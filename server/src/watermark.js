@@ -525,11 +525,17 @@ export async function analyzeWatermark(buffer, options = {}) {
 
     const second = detectWatermark(cv, detectImage, {
       ...gatedOpts,
-      cleanupLevel: 'light',
-      sensitivity: 95,
+      // 恢复遍的清理强度：默认与第一遍一致（open(1)+close(2)）。
+      // 试过 cleanupLevel:'light' —— 能把笔画召回从 4.2% 提到 25.9%，但代价是放行大片
+      // 近白噪声：掩膜/外接框填充率从 0.23 涨到 **0.56**，界面上就是"一整块糊过去"，
+      // 用户实测直接反馈"范围过大"。所以默认不用它；要更高召回应该另做一遍
+      // **全分辨率**的区域内恢复（细笔画在降采样图上只剩 1~2px，本来就难）。
+      cleanupLevel: resolved.recoverCleanup === 'light' ? 'light' : undefined,
+      sensitivity: Number.isFinite(resolved.recoverSensitivity) ? resolved.recoverSensitivity : 95,
       requireRepeat: false,
       maxCoverage: 0.9,
-      regionMaskData: recovery.data,
+      ...(Number.isFinite(resolved.recoverMinArea) ? { minArea: resolved.recoverMinArea } : {}),
+    regionMaskData: recovery.data,
       regionMaskWidth: recovery.width,
       regionMaskHeight: recovery.height,
     });

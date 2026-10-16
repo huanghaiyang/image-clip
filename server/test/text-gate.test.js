@@ -49,10 +49,30 @@ test('文本门控：把水印检测限制在文字区域内（用户实测样�
     }
   }
   assert.ok(total > 0, '掩膜不应为空');
-  // 召回：门控内还会跑一遍低阈值恢复（见 analyzeWatermark 的 recoverInsideGate），
-  // 否则只覆盖文字框的 1.4%，检出是对的却清不干净。实测恢复后约 24%。
+  // 召回：门控内还会跑一遍区域内恢复（见 analyzeWatermark 的 recoverInsideGate），
+  // 否则只覆盖文字框的 1.4%，检出是对的却清不干净。实测恢复后约 8%。
   const boxCoverage = inside / (TEXT_BOX.width * TEXT_BOX.height);
-  assert.ok(boxCoverage >= 0.15, `文字框覆盖率应 ≥15%（当前 ${(boxCoverage * 100).toFixed(1)}%）`);
+  assert.ok(boxCoverage >= 0.05, `文字框覆盖率应 ≥5%（当前 ${(boxCoverage * 100).toFixed(1)}%）`);
+
+  // **掩膜必须贴着字形，而不是把整个文字框糊成一块**（用户实测反馈"范围过大"）。
+  // 判据：掩膜面积 / 外接框面积。细笔画约 0.2~0.3；"糊成一片"会到 0.5 以上。
+  // 这条把"恢复遍不许用轻量清理"钉死 —— 轻量清理会放行大片近白噪声，实测填充率 0.56。
+  let minX = result.width;
+  let minY = result.height;
+  let maxX = 0;
+  let maxY = 0;
+  for (let y = 0; y < result.height; y += 1) {
+    for (let x = 0; x < result.width; x += 1) {
+      if (result.mask.data[y * result.width + x] <= 127) continue;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+  const bboxArea = (maxX - minX + 1) * (maxY - minY + 1);
+  const fill = total / bboxArea;
+  assert.ok(fill <= 0.35, `掩膜填充率应 ≤0.35（贴着笔画；当前 ${fill.toFixed(2)}）`);
   const precision = inside / total;
   assert.ok(precision >= 0.9, `掩膜应有 ≥90% 落在文字框内（当前 ${(precision * 100).toFixed(1)}%）`);
 });

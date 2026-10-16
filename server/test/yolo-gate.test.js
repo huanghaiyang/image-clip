@@ -58,6 +58,24 @@ test('水印框门控：只框住水印本身（用户实测样例 + 三张无�
   assert.ok(total > 0, '掩膜不应为空');
   assert.ok(inside / total >= 0.9, `掩膜应有 ≥90% 落在文字框内（当前 ${((inside / total) * 100).toFixed(1)}%）`);
 
+  // 掩膜必须贴着字形，不能糊成一块（用户实测反馈"范围过大"）：
+  // 细笔画的填充率约 0.2~0.3，"糊成一片"会到 0.5 以上。
+  let minX = result.width;
+  let minY = result.height;
+  let maxX = 0;
+  let maxY = 0;
+  for (let y = 0; y < result.height; y += 1) {
+    for (let x = 0; x < result.width; x += 1) {
+      if (result.mask.data[y * result.width + x] <= 127) continue;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+  const fill = total / ((maxX - minX + 1) * (maxY - minY + 1));
+  assert.ok(fill <= 0.35, `掩膜填充率应 ≤0.35（贴着笔画；当前 ${fill.toFixed(2)}）`);
+
   // 3) 无水印素材：模型零框 → 门控直接判无
   for (const name of ['蝴蝶-01.webp', '蝴蝶-02.webp', '蝴蝶-03.webp']) {
     const b = await fs.promises.readFile(path.join(SAMPLES, name));
