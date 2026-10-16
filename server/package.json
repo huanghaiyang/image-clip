@@ -11,7 +11,9 @@
     "test": "node --test test/"
   },
   "dependencies": {
+    "@techstark/opencv-js": "^5.0.0-release.1",
     "express": "^4.21.2",
+    "onnxruntime-node": "^1.30.0",
     "sharp": "^0.34.5"
   }
 }

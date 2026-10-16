@@ -31,6 +31,17 @@ import {
   toDataUrl,
 } from './imaging.js';
 import { DEFAULT_OPTIONS } from '../../shared/aabb.js';
+import {
+  DEFAULT_REMOVE_OPTIONS,
+  REMOVE_ENGINES,
+  analyzeWatermark,
+  maskToDataUrl,
+  maskToRle,
+  removeWatermark,
+} from './watermark.js';
+import { opencvStatus } from './opencv.js';
+import { lamaStatus } from './lama.js';
+import { DETECT_METHODS, DEFAULT_DETECT_OPTIONS } from '../../shared/watermark/detect.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '../..');
@@ -196,6 +207,101 @@ export function createApp() {
     }
   });
 
+  // --------------------------------------------------------------- 水印
+
+  app.get('/api/watermark/health', async (_req, res) => {
+    const [opencv, lama] = await Promise.all([opencvStatus(), Promise.resolve(lamaStatus())]);
+    res.json({
+      ok: opencv.available,
+      service: 'image-clip-watermark',
+      engine: opencv.available ? 'node-opencv' : 'unavailable',
+      opencv,
+      lama,
+      detectMethods: DETECT_METHODS,
+      engines: REMOVE_ENGINES,
+      detectDefaults: DEFAULT_DETECT_OPTIONS,
+      removeDefaults: DEFAULT_REMOVE_OPTIONS,
+      limits: { maxPixels: LIMITS.maxPixels },
+    });
+  });
+
+  app.post('/api/watermark/detect', rawBody, async (req, res, next) => {
+    try {
+      const { buffer, body } = extractInput(req);
+      const options = watermarkOptions(req.query, body);
+      const result = await analyzeWatermark(buffer, options);
+      res.json({
+        name: body.name ?? null,
+        engine: 'node-opencv',
+        method: result.method,
+        usedMethods: result.usedMethods,
+        confidence: result.confidence,
+        coverage: result.coverage,
+        estimatedAlpha: result.estimatedAlpha,
+        boxes: result.boxes,
+        mask: {
+          width: result.mask.width,
+          height: result.mask.height,
+          dataUrl: await maskToDataUrl(result.mask),
+        },
+        rle: maskToRle(result.mask),
+        width: result.width,
+        height: result.height,
+        diagnostics: result.diagnostics,
+        elapsedMs: result.elapsedMs,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post('/api/watermark/remove', rawBody, async (req, res, next) => {
+    try {
+      const { buffer, body } = extractInput(req);
+      const options = watermarkOptions(req.query, body);
+      // 前端画笔编辑过的掩膜会以 mask 字段回传，优先使用它
+      if (body.mask) options.mask = body.mask;
+      const result = await removeWatermark(buffer, options);
+
+      if (String(req.query.response ?? body.response ?? '') === 'json') {
+        res.json({
+          name: body.name ?? null,
+          engine: result.engine,
+          requestedEngine: result.requestedEngine,
+          reason: result.reason,
+          alpha: result.alpha,
+          alphaConfidence: result.alphaConfidence,
+          watermarkColor: result.watermarkColor,
+          coverage: result.coverage,
+          patches: result.patches,
+          detection: result.detection,
+          integrity: result.integrity,
+          source: result.source,
+          elapsedMs: result.elapsedMs,
+          mime: result.mime,
+          bytes: result.buffer.length,
+          dataUrl: toDataUrl(result.mime, result.buffer),
+          maskDataUrl: result.maskPng ? toDataUrl('image/png', result.maskPng) : null,
+        });
+        return;
+      }
+
+      res
+        .status(200)
+        .type(result.mime)
+        .set('X-Image-Clip-Engine', result.engine)
+        .set('X-Image-Clip-Alpha', String(result.alpha ?? ''))
+        .set('X-Image-Clip-Elapsed-Ms', String(result.elapsedMs ?? ''))
+        .set('X-Watermark-Engine', result.engine)
+        .set('X-Watermark-Elapsed-Ms', String(result.elapsedMs ?? ''))
+        .set('X-Watermark-Alpha', String(result.alpha ?? ''))
+        .set('Content-Disposition', `inline; filename="${encodeURIComponent(watermarkFilename(body.name, result.format))}"`)
+        .send(result.buffer);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // 生产模式：`npm run build` 之后由同一个 Node 进程托管前端产物。
   app.use(express.static(WEB_DIST, { index: false, fallthrough: true }));
   app.get(/^(?!\/api\/).*/, async (req, res, next) => {
@@ -295,6 +401,78 @@ function resolveSamplePath(name) {
 function croppedName(name, format) {
   const base = String(name ?? 'image').replace(/\.[^./\\]+$/, '') || 'image';
   return `${base}-cropped.${format === 'jpeg' ? 'jpg' : format}`;
+}
+
+function watermarkFilename(name, format) {
+  const base = String(name ?? 'image').replace(/\.[^./\\]+$/, '') || 'image';
+  return `${base}-watermark-removed.${format === 'jpeg' ? 'jpg' : format}`;
+}
+
+/** 水印接口的参数解析：query 与 JSON body.options 都会被读，body 优先。 */
+function watermarkOptions(query = {}, body = {}) {
+  const raw = { ...stripUndefinedObj(query), ...stripUndefinedObj(body.options ?? {}) };
+  const numeric = [
+    'sensitivity',
+    'dilate',
+    'minArea',
+    'maxCoverage',
+    'alphaFloorAt0',
+    'alphaFloorAt100',
+    'alphaCeil',
+    'alphaConsistency',
+    'repeatCoverageFallback',
+    'inpaintRadius',
+    'inpaintDilate',
+    'feather',
+    'lamaContext',
+    'lamaMaxPatches',
+    'quality',
+    'alphaHint',
+    'thresholdAt0',
+    'thresholdAt100',
+  ];
+  const options = {};
+  for (const key of numeric) {
+    if (raw[key] !== undefined && raw[key] !== '') {
+      const value = Number(raw[key]);
+      if (Number.isFinite(value)) options[key] = value;
+    }
+  }
+  const booleans = ['requireRepeat', 'integrity'];
+  for (const key of booleans) {
+    if (raw[key] !== undefined && raw[key] !== '') options[key] = toBoolValue(raw[key]);
+  }
+  if (raw.method) options.method = String(raw.method);
+  if (raw.engine) options.engine = String(raw.engine);
+  if (raw.polarity) options.polarity = String(raw.polarity);
+  if (raw.inpaintMethod) options.inpaintMethod = String(raw.inpaintMethod);
+  if (raw.watermarkColor) options.watermarkColor = String(raw.watermarkColor);
+  if (raw.format) options.format = String(raw.format);
+  if (raw.template) options.templateBuffer = raw.template;
+  if (raw.templateRect) options.templateRect = parseRect(raw.templateRect);
+  if (raw.region) options.region = parseRect(raw.region);
+  return options;
+}
+
+/** 'x,y,w,h' 或 {x,y,width,height} 都接受。 */
+function parseRect(input) {
+  if (!input) return null;
+  if (typeof input === 'object') return input;
+  const parts = String(input)
+    .split(',')
+    .map((v) => Number(v.trim()));
+  if (parts.length !== 4 || parts.some((v) => !Number.isFinite(v))) return null;
+  return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+}
+
+function stripUndefinedObj(obj) {
+  return Object.fromEntries(Object.entries(obj || {}).filter(([, v]) => v !== undefined));
+}
+
+/** query 里的布尔值可能是 'true' / '1' / 'false'。 */
+function toBoolValue(value) {
+  if (typeof value === 'boolean') return value;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

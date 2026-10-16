@@ -1,12 +1,32 @@
 <script setup>
-/** 顶部工具栏：品牌、当前素材、引擎切换、导入入口、主题。 */
+/** 顶部工具栏：品牌、当前素材、模式/引擎切换、导入入口、主题。 */
 import { computed } from 'vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import { useWorkspace } from '../composables/useWorkspace.js';
+import { useWatermark } from '../composables/useWatermark.js';
 import { ENGINES } from '../lib/engine.js';
 import { formatBytes } from '../lib/imaging.js';
+import { SERVER_HINT } from '../lib/watermark.js';
 
 const { state, selected, stats, actions, meta } = useWorkspace();
+const { state: watermarkState, actions: watermarkActions } = useWatermark();
+
+const MODES = [
+  { value: 'crop', label: '透明裁剪', hint: '检测 AABB 透明区域并裁剪' },
+  { value: 'watermark', label: '水印去除', hint: '识别水印掩膜并做内容修复' },
+];
+
+/**
+ * 水印模式的引擎取自 health 能力报告（缺项时退回契约里固定的三个值）。
+ * 后端把 unblend 与 opencv 都归为“本地 OpenCV”一类，但 value 原样透传，
+ * 后端仍然能区分是反混合还是修补。
+ */
+const WATERMARK_ENGINES = {
+  auto: { label: '自动', hint: '按可用性自动挑选去除引擎' },
+  unblend: { label: '本地 OpenCV', hint: '半透明水印反混合，推荐首选' },
+  opencv: { label: 'OpenCV 修补', hint: 'Telea/NS 修补，适合细笔画、不透明水印' },
+  lama: { label: 'LaMa 深度', hint: '深度模型修复，复杂纹理最好，显存占用高' },
+};
 
 const engineOptions = computed(() =>
   ENGINES.map((engine) => ({
@@ -15,6 +35,21 @@ const engineOptions = computed(() =>
     hint: engine.hint,
   })),
 );
+
+const watermarkEngineOptions = computed(() => {
+  const list = watermarkState.health.checked ? watermarkState.health.engines : [];
+  const usable = list.length ? list : Object.keys(WATERMARK_ENGINES);
+  return usable.map((value) => ({ value, ...(WATERMARK_ENGINES[value] ?? { label: value }) }));
+});
+
+const engineHint = computed(() => {
+  if (!watermarkState.health.checked) return '正在检查水印服务…';
+  if (!watermarkState.health.ok) return SERVER_HINT;
+  const { lama, lamaBytes, opencv } = watermarkState.health;
+  const parts = [opencv ? 'OpenCV 就绪' : 'OpenCV 不可用'];
+  parts.push(lama ? `LaMa 就绪${lamaBytes ? `（${formatBytes(lamaBytes)}）` : ''}` : 'LaMa 未就绪');
+  return parts.join(' · ');
+});
 
 const currentLabel = computed(() => {
   if (state.items.length === 0) return '未导入素材';
@@ -60,11 +95,29 @@ function pickFiles() {
 
     <div class="topbar-center">
       <SegmentedControl
+        :model-value="watermarkState.mode"
+        :options="MODES"
+        size="sm"
+        @update:model-value="watermarkActions.setMode($event)"
+      />
+      <span class="divider" />
+      <!-- 两种模式的引擎语义完全不同：裁剪模式是“在哪算”，水印模式是“用什么算法修”，因此按模式替换而不是并排 -->
+      <SegmentedControl
+        v-if="watermarkState.mode === 'crop'"
         :model-value="state.engine"
         :options="engineOptions"
         size="sm"
         @update:model-value="actions.setEngine($event)"
       />
+      <template v-else>
+        <SegmentedControl
+          :model-value="watermarkState.options.engine"
+          :options="watermarkEngineOptions"
+          size="sm"
+          @update:model-value="watermarkActions.setOption('engine', $event)"
+        />
+        <span class="engine-hint muted" :title="engineHint">{{ engineHint }}</span>
+      </template>
     </div>
 
     <div class="topbar-right">
@@ -110,12 +163,23 @@ function pickFiles() {
 }
 
 .topbar-center {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex: none;
 }
 
 .topbar-right {
   flex: 1;
   justify-content: flex-end;
+}
+
+.engine-hint {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
 }
 
 .logo {
