@@ -38,6 +38,8 @@ const item = computed(() => selected.value);
 const entry = computed(() => selectedEntry.value);
 const view = computed(() => state.view);
 const result = computed(() => entry.value?.result ?? null);
+/** 自动检测出的候选区域个数（画布标记与左下角读数共用） */
+const boxCount = computed(() => entry.value?.detect?.boxes?.length ?? 0);
 const resultUrl = computed(() => result.value?.url ?? '');
 const isCompare = computed(() => view.value.compare && Boolean(resultUrl.value));
 
@@ -319,6 +321,11 @@ function paintOverlay() {
     if (cached) ctx.drawImage(cached.canvas, cached.x, cached.y, cached.w, cached.h);
   }
 
+  // 检出位置标记：自动检测出的候选区域画成虚线框。
+  // 不受「掩膜叠加」开关影响 —— 这是"检测结果"，不是掩膜本身；关掉叠加时
+  // 也要能看出水印在哪（否则用户只看到面板里一个数字，不知道该修哪里）。
+  if (view.value.mode !== 'result') paintDetectBoxes(ctx);
+
   // 笔刷光标：掩膜视图/原图视图下都要能看见落点，用强调色描边
   if (cursor.value?.inside && view.value.mode !== 'result') {
     const r = Math.max(1, state.brush.radius * zoom.value);
@@ -330,6 +337,59 @@ function paintOverlay() {
     ctx.strokeStyle = cssVar('--accent', '#0d99ff');
     ctx.stroke();
   }
+}
+
+/**
+ * 把自动检测出的候选区域画成屏幕坐标的虚线框。
+ *
+ * 编号只给面积最大的若干个：平铺水印会一次检出几十个区域，
+ * 逐个标号会糊成一片，但框全部保留（用户需要看到完整范围）。
+ */
+function paintDetectBoxes(ctx) {
+  const boxes = entry.value?.detect?.boxes;
+  if (!boxes?.length) return;
+  const rect = imageRect();
+  const scale = zoom.value;
+  if (rect.w <= 0 || rect.h <= 0 || scale <= 0) return;
+
+  const mapped = boxes
+    .map((box, index) => ({
+      index: index + 1,
+      area: box.width * box.height,
+      x: rect.x + box.x * scale,
+      y: rect.y + box.y * scale,
+      w: Math.max(1, box.width * scale),
+      h: Math.max(1, box.height * scale),
+    }))
+    // 屏幕上不足 3px 的框画出来只会是一坨噪点
+    .filter((b) => b.w >= 3 && b.h >= 3);
+  if (!mapped.length) return;
+
+  const color = cssVar('--warn', '#ffcd29');
+  ctx.save();
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([5, 3]);
+  ctx.strokeStyle = color;
+  for (const b of mapped) ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w, b.h);
+  ctx.setLineDash([]);
+
+  const labeled = [...mapped].sort((a, b) => b.area - a.area).slice(0, 8);
+  ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textBaseline = 'middle';
+  for (const b of labeled) {
+    const text = String(b.index);
+    const padX = 3;
+    const chipW = ctx.measureText(text).width + padX * 2;
+    const chipH = 14;
+    // 框在画布边缘时把标签翻到框内，避免被裁掉
+    const cx = Math.min(b.x, rect.x + rect.w - chipW);
+    const cy = b.y - chipH - 2 >= rect.y ? b.y - chipH - 2 : b.y + 2;
+    ctx.fillStyle = color;
+    ctx.fillRect(cx, cy, chipW, chipH);
+    ctx.fillStyle = '#141414';
+    ctx.fillText(text, cx + padX, cy + chipH / 2 + 0.5);
+  }
+  ctx.restore();
 }
 
 function paint() {
@@ -696,6 +756,7 @@ watch(
       <span class="readout-sep" />
       <span>左键涂抹 · Alt/右键擦除 · 中键拖动平移 · 滚轮缩放</span>
       <span class="readout-sep" />
+      <span v-if="boxCount" class="readout-boxes mono">检出 {{ boxCount }} 处</span>
       <span class="mono">覆盖 {{ (coverage * 100).toFixed(2) }}%</span>
       <span v-if="entry?.dirty" class="readout-dirty">掩膜已改动，需重新去除</span>
     </div>
@@ -901,6 +962,10 @@ watch(
 
 .readout-tool {
   color: var(--text-2);
+}
+
+.readout-boxes {
+  color: var(--warn);
 }
 
 .readout-sep {
