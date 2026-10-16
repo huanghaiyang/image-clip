@@ -1,0 +1,27 @@
+{
+  "name": "image-clip",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node + Vue 图片处理工具：AABB 自动识别透明区域并裁剪。",
+  "type": "module",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm --workspace server run dev",
+    "dev:web": "npm --workspace web run dev",
+    "build": "npm --workspace web run build",
+    "start": "npm --workspace server run start",
+    "test": "node shared/aabb.test.js && node server/test/api.test.js && node web/test/zip.test.js",
+    "test:runner": "node --test shared/ server/test/ web/test/",
+    "verify": "node scripts/verify-samples.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "engines": {
+    "node": ">=18.17"
+  }
+}

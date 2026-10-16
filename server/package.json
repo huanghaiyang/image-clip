@@ -1,0 +1,17 @@
+{
+  "name": "@image-clip/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "image-clip Node 服务端：AABB 透明区域检测与裁剪 API。",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "sharp": "^0.34.5"
+  }
+}

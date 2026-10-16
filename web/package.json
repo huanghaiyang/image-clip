@@ -1,0 +1,21 @@
+{
+  "name": "@image-clip/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "image-clip 前端：Figma 风格界面 + 浏览器端即时 AABB 检测。",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "dev:restricted": "node scripts/vite-runner.mjs --configLoader runner --config vite.noesbuild.config.js",
+    "build:restricted": "node scripts/vite-runner.mjs build --configLoader runner --config vite.noesbuild.config.js"
+  },
+  "dependencies": {
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.0"
+  }
+}
