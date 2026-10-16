@@ -19,16 +19,34 @@
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 YOLOV5_SRC = ROOT / "models" / "yolov5-7.0"
+
+# YOLOv5 的 utils/general.py 在**导入时**就会往用户目录写配置
+# （Windows 上是 %APPDATA%\Ultralytics），matplotlib 也会建字体缓存目录。
+# 在受限/沙箱环境里这两个写入会被拒绝（实测 WinError 5 / Errno 13），
+# 所以统一重定向到工作区内（models/ 已在 .gitignore）。
+os.environ.setdefault("YOLOV5_CONFIG_DIR", str(ROOT / "models" / ".yolov5cfg"))
+os.environ.setdefault("MPLCONFIGDIR", str(ROOT / "models" / ".mplcache"))
+for _d in (ROOT / "models" / ".yolov5cfg", ROOT / "models" / ".mplcache"):
+    _d.mkdir(parents=True, exist_ok=True)
 WEIGHTS = ROOT / "models" / "watermark-yolov5.pt"
 OUTPUT = ROOT / "models" / "watermark-yolov5.onnx"
 
 
 def main() -> int:
+    # Windows 控制台默认是 GBK，打印 ✓ 之类字符会 UnicodeEncodeError。
+    # 显式把标准输出切到 UTF-8，脚本在任何控制台上都能跑完（否则导出成功却报错退出）。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--imgsz", type=int, default=640, help="导出时固定的输入边长（检测时按此 letterbox）")
     parser.add_argument("--opset", type=int, default=12)

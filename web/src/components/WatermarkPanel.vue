@@ -23,6 +23,10 @@ const METHOD_LABELS = {
     label: '模型',
     hint: '先用离线文字检测模型框出文字区域，再在区域内部检测水印：插画/照片里的非文字内容不会被误判成水印（需 npm run model:watermark 下载 4.5MB 模型）',
   },
+  yolo: {
+    label: '水印框',
+    hint: '用离线 YOLOv5 水印检测器直接框出水印（含图形类/非文字水印），再在框内精修像素。需先 node scripts/download-wm-model.mjs --yolov5 并用 scripts/export-wm-yolov5.py 导出',
+  },
   overlay: { label: '叠加', hint: '适合固定在某个位置的半透明叠加水印' },
   periodic: { label: '周期', hint: '适合平铺/重复出现的水印（时间戳、网点）' },
   template: { label: '模板', hint: '需要提供水印模板图，当前前端尚未提供模板上传入口' },

@@ -42,6 +42,7 @@ import {
 import { opencvStatus } from './opencv.js';
 import { lamaStatus } from './lama.js';
 import { textModelStatus } from './text-detect.js';
+import { wmModelStatus } from './wm-model.js';
 import { DETECT_METHODS, DEFAULT_DETECT_OPTIONS } from '../../shared/watermark/detect.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -219,7 +220,12 @@ export function createApp() {
       opencv,
       lama,
       textModel: textModelStatus(),
-      detectMethods: textModelStatus().available ? [...DETECT_METHODS, 'model'] : DETECT_METHODS,
+      wmModel: wmModelStatus(),
+      detectMethods: [
+        ...DETECT_METHODS,
+        ...(textModelStatus().available ? ['model'] : []),
+        ...(wmModelStatus().available ? ['yolo'] : []),
+      ],
       engines: REMOVE_ENGINES,
       detectDefaults: DEFAULT_DETECT_OPTIONS,
       removeDefaults: DEFAULT_REMOVE_OPTIONS,
@@ -433,6 +439,9 @@ function watermarkOptions(query = {}, body = {}) {
     'alphaHint',
     'textLimitSide',
     'textThreshold',
+    'yoloConfidence',
+    'yoloIou',
+    'yoloMaxBoxes',
     'thresholdAt0',
     'thresholdAt100',
   ];
@@ -443,7 +452,7 @@ function watermarkOptions(query = {}, body = {}) {
       if (Number.isFinite(value)) options[key] = value;
     }
   }
-  const booleans = ['requireRepeat', 'integrity', 'textGate', 'textGateRelax'];
+  const booleans = ['requireRepeat', 'integrity', 'textGate', 'textGateRelax', 'yoloGate'];
   for (const key of booleans) {
     if (raw[key] !== undefined && raw[key] !== '') options[key] = toBoolValue(raw[key]);
   }

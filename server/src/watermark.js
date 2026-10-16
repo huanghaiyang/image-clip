@@ -37,6 +37,7 @@ import { getOpenCv } from './opencv.js';
 import { lamaInpaint, lamaStatus } from './lama.js';
 import { removeByBackground } from './bgsub.js';
 import { detectTextRegions, textModelStatus } from './text-detect.js';
+import { detectWatermarkRegions, wmModelStatus } from './wm-model.js';
 
 export const REMOVE_ENGINES = Object.freeze(['auto', 'unblend', 'bgsub', 'opencv', 'lama']);
 
@@ -140,6 +141,7 @@ async function buildTextGate(image, options) {
     // 又放回来，正好抵消掉门控的意义。
     return {
       used: true,
+      source: 'text',
       empty: true,
       reason: '图中未检测到文字区域：不认为存在文字水印（可在界面关掉语义门控改走统计检测）',
       gate: null,
@@ -168,6 +170,7 @@ async function buildTextGate(image, options) {
   }
   return {
     used: true,
+    source: 'text',
     reason: null,
     gate,
     rects,
@@ -178,27 +181,179 @@ async function buildTextGate(image, options) {
   };
 }
 
+/**
+ * 水印框门控（第二个区域提议源，YOLOv5 水印检测器）。
+ *
+ * 与文本门控互补：文本模型覆盖"文字水印"，这个模型覆盖**图形类/非文字水印**
+ * （logo、图标、印章式标记）。它直接给出水印的边界框，所以不需要像文本那样
+ * 沿行外扩，只要给一点留白让 α-map 能补全边缘。
+ *
+ * 权重来自 Eugeoter/yolov5-watermark-detection（AGPL-3.0，见 THIRD_PARTY_NOTICES），
+ * 构建期用 scripts/export-wm-yolov5.py 导出 ONNX，运行期同样只依赖 onnxruntime。
+ */
+async function buildYoloGate(image, options) {
+  const status = wmModelStatus();
+  if (!status.available) return { used: false, source: 'yolo', reason: status.reason, gate: null };
+  const detected = await detectWatermarkRegions(image, {
+    confidence: options.yoloConfidence,
+    iou: options.yoloIou,
+    maxBoxes: options.yoloMaxBoxes,
+  });
+  if (!detected.boxes.length) {
+    return {
+      used: true,
+      source: 'yolo',
+      empty: true,
+      reason: '水印框模型未框出任何区域：不认为存在水印',
+      gate: null,
+      regions: 0,
+      coverage: 0,
+      elapsedMs: detected.elapsedMs,
+    };
+  }
+  const margin = Math.max(16, Math.round(Math.min(image.width, image.height) * 0.008));
+  const gate = createMask(image.width, image.height);
+  const rects = [];
+  for (const box of detected.boxes) {
+    const x0 = Math.max(0, box.x - margin);
+    const y0 = Math.max(0, box.y - margin);
+    const x1 = Math.min(image.width, box.x + box.width + margin);
+    const y1 = Math.min(image.height, box.y + box.height + margin);
+    rects.push({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+    for (let y = y0; y < y1; y += 1) {
+      for (let x = x0; x < x1; x += 1) gate.data[y * image.width + x] = 255;
+    }
+  }
+  return {
+    used: true,
+    source: 'yolo',
+    reason: null,
+    gate,
+    rects,
+    regions: detected.boxes.length,
+    coverage: countMask(gate) / (image.width * image.height),
+    boxes: detected.boxes.slice(0, 12),
+    elapsedMs: detected.elapsedMs,
+  };
+}
+
+/**
+ * 区域提议调度：按请求选择文本门控 / 水印框门控 / 两者并集。
+ *
+ * 语义（都很重要，踩过坑）：
+ *  - **没有任何提议源可用（未安装/出错）** → 返回 used:false，让检测回退到纯统计路径。
+ *    这正是验收里的"模型未安装时行为与现在完全一致"。
+ *  - **有提议源跑通了但一个区域都没给出** → empty：直接判"没有水印"，
+ *    而不是回退统计检测（回退会把画面内容的误检放回来，抵消门控的意义）。
+ *  - **可回退**：显式要"模型"但只装了 YOLO → 用 YOLO 顶上并在 reason 里说明。
+ */
+async function buildRegionGate(image, options, { wantsText, wantsYolo, allowFallback }) {
+  const textStatus = textModelStatus();
+  const yoloStatus = wmModelStatus();
+  const notes = [];
+  let wantText = wantsText;
+  let wantYolo = wantsYolo;
+
+  if (allowFallback && wantText && !textStatus.available && yoloStatus.available) {
+    wantText = false;
+    wantYolo = true;
+    notes.push('文本检测模型未安装，已回退到水印框模型');
+  }
+
+  const sources = [];
+  if (wantText) {
+    if (!textStatus.available) notes.push(textStatus.reason);
+    else {
+      try {
+        sources.push(await buildTextGate(image, options));
+      } catch (err) {
+        notes.push(`文本检测失败：${err.message}`);
+      }
+    }
+  }
+  if (wantYolo) {
+    if (!yoloStatus.available) notes.push(yoloStatus.reason);
+    else {
+      try {
+        sources.push(await buildYoloGate(image, options));
+      } catch (err) {
+        notes.push(`水印框模型失败：${err.message}`);
+      }
+    }
+  }
+
+  const ran = sources.filter((s) => s.used);
+  const usable = ran.filter((s) => s.gate);
+  if (!usable.length) {
+    if (!ran.length) {
+      // 一个提议源都没跑起来 → 交给调用方回退统计检测
+      return { used: false, gate: null, sources: [], reason: notes.join('；') || '区域提议不可用' };
+    }
+    return {
+      used: true,
+      empty: true,
+      gate: null,
+      sources: ran.map((s) => s.source),
+      reason: [...notes, ...ran.map((s) => s.reason).filter(Boolean)].join('；') || '未找到候选区域：不认为存在水印',
+    };
+  }
+
+  const gate = createMask(image.width, image.height);
+  const rects = [];
+  let coverage = 0;
+  let regions = 0;
+  let boxes = [];
+  let elapsedMs = 0;
+  for (const s of usable) {
+    for (let i = 0; i < gate.data.length; i += 1) {
+      if (s.gate.data[i] > 127) gate.data[i] = 255;
+    }
+    rects.push(...(s.rects ?? []));
+    coverage += s.coverage ?? 0;
+    regions += s.regions ?? 0;
+    boxes = boxes.concat(s.boxes ?? []);
+    elapsedMs += s.elapsedMs ?? 0;
+  }
+  return {
+    used: true,
+    reason: notes.join('；') || null,
+    gate,
+    rects,
+    regions,
+    coverage: countMask(gate) / (image.width * image.height),
+    boxes: boxes.slice(0, 12),
+    elapsedMs,
+    sources: usable.map((s) => s.source),
+  };
+}
+
 /** 检测：图片字节 → { mask, boxes, ... } */
 export async function analyzeWatermark(buffer, options = {}) {
   const resolved = await resolveTemplateOption(options);
   // method: 'model' = "先用离线语义模型提议区域，再在区域内跑常规级联"。
   // 这是检出方法层面的开关；等价于 textGate 开启 + method auto，但语义更清楚。
-  const useModel = resolved.method === 'model';
-  const opts = detectOptionsFrom({ ...resolved, method: useModel ? 'auto' : resolved.method });
+  const useTextMethod = resolved.method === 'model';
+  const useYoloMethod = resolved.method === 'yolo';
+  const isModelMethod = useTextMethod || useYoloMethod;
+  const opts = detectOptionsFrom({ ...resolved, method: isModelMethod ? 'auto' : resolved.method });
   const cv = await getOpenCv();
   const { data, width, height } = await decodeRgba(buffer);
   const longEdge = Math.max(width, height);
 
-  // 文本区域门控：只在"像文字水印"的位置检测（可用 textGate: false 关闭）
+  // 区域提议（"模型给区域、本地给像素"的第一段）。
+  // 变量名沿用 textGate 是历史原因：它现在可能来自文本模型、水印框模型或两者并集，
+  // 对外用 sources 字段说明实际来源（'text' / 'yolo'）。
   const image = { width, height, data: new Uint8ClampedArray(data) };
   let textGate = { used: false, reason: null, gate: null };
-  const gateRequested = (useModel || resolved.textGate === true) && !resolved.template && !resolved.templateRect;
-  if (gateRequested) {
+  const wantsText = useTextMethod || resolved.textGate === true;
+  const wantsYolo = useYoloMethod || resolved.yoloGate === true;
+  const regionGateRequested = (wantsText || wantsYolo) && !resolved.template && !resolved.templateRect;
+  if (regionGateRequested) {
     try {
-      textGate = await buildTextGate(image, resolved);
+      textGate = await buildRegionGate(image, resolved, { wantsText, wantsYolo, allowFallback: isModelMethod });
     } catch (err) {
       // 模型侧出错（文件损坏、onnxruntime 异常）不应让整个请求失败，退回统计检测并说明原因
-      textGate = { used: false, reason: `文本检测失败（${err.message}），退回无门控检测`, gate: null };
+      textGate = { used: false, reason: `区域提议失败（${err.message}），退回无门控检测`, gate: null };
     }
   }
   if (textGate.empty) {
@@ -207,7 +362,7 @@ export async function analyzeWatermark(buffer, options = {}) {
       mask: createMask(width, height),
       boxes: [],
       usedMethods: [],
-      method: 'model',
+      method: resolved.method,
       confidence: 0,
       coverage: 0,
       estimatedAlpha: null,
@@ -218,6 +373,7 @@ export async function analyzeWatermark(buffer, options = {}) {
       textGate: {
         used: true,
         reason: textGate.reason,
+        sources: textGate.sources ?? [],
         regions: 0,
         coverage: 0,
         boxes: [],
@@ -278,6 +434,7 @@ export async function analyzeWatermark(buffer, options = {}) {
     textGate: {
       used: textGate.used,
       reason: textGate.reason,
+      sources: textGate.sources ?? [],
       regions: textGate.regions ?? 0,
       coverage: textGate.coverage ?? 0,
       boxes: textGate.boxes ?? [],

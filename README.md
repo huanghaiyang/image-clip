@@ -302,6 +302,40 @@ npm test                   # 模型存在时会跑 server/test/text-gate.test.js
 
 三张无水印素材在门控下仍为 0.000%；`示例-平铺水印` 6.7%（其文字区域被门控放行）。
 
+#### 第二个提议源：YOLOv5 水印框模型（图形类水印 / 更紧的框）
+
+文本门控只认"文字"，覆盖不到 logo/图标/印章这类图形水印。所以再接一个**YOLOv5 水印
+检测器**（`Eugeoter/yolov5-watermark-detection`，单类 `watermark`）作为第二个提议源：
+它直接给出水印**边界框**，同样是"模型给区域、本地 α-map 给像素"。
+
+实测（同一批样例）：
+
+| 样例 | YOLO 给出的框 | 文本门控 | YOLO 门控 |
+|---|---|---|---|
+| `蝴蝶-豆包AI水印.jpg` | **1 个，247×59 @(2446,1435)**（正压在水印上） | 覆盖 0.224%，精度 100% | 覆盖 **0.242%**，精度 100%，文字框覆盖 **25.9%** |
+| 蝴蝶-01/02/03（无水印） | **0 个框** | 0% | 0% |
+| `示例-平铺水印` | 2 个框（只盖住两块） | 6.700% | 0.748%（**两个源并集才是 6.700%**） |
+
+用法：`method=yolo`（只用框模型）、`textGate=1&yoloGate=1`（两个源**并集**，
+平铺水印这种需要它）。
+
+模型获取是**两步**（权重只有 PyTorch 格式，须构建期导出一次）：
+
+```bash
+node scripts/download-wm-model.mjs --yolov5   # 权重 165MB + YOLOv5 v7.0 源码（codeload）
+# 一次性导出环境（本机 anaconda python 建 venv；numpy/opencv 必须钉 1.x/4.10 以匹配 torch 2.4）
+D:\ProgramData\anaconda3\python.exe -m venv models/venv
+models/venv/Scripts/python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
+  "torch==2.4.0" "torchvision==0.19.0" onnx "numpy<2" "opencv-python-headless<4.11" "setuptools<80" \
+  pandas requests ipython matplotlib seaborn scipy tqdm psutil thop
+npm run model:export:yolov5                    # → models/watermark-yolov5.onnx
+```
+
+⚠️ 两点注意：
+* 导出产物 **329MB**（模型是 YOLOv5x 量级，86M 参数 fp32），比文本模型大两个数量级；
+  只想要文字水印的话不必装它。CPU 单图推理实测 **0.5~1.0s**。
+* 该模型的架构来自 **YOLOv5（AGPL-3.0）**，对外分发前请确认授权合规（见 THIRD_PARTY_NOTICES）。
+
 **当前限制（下一步）**：
 * 门控覆盖文字框约 24%（这类低对比空心字对文本检测器本身就是难的），
   所以检出是"对的但不满"；继续提召回要在**内容边界**上做掩膜精修。
