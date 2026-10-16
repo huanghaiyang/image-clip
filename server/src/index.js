@@ -32,6 +32,7 @@ import {
 } from './imaging.js';
 import { DEFAULT_OPTIONS } from '../../shared/aabb.js';
 import {
+  DEFAULT_GATE_OPTIONS,
   DEFAULT_REMOVE_OPTIONS,
   REMOVE_ENGINES,
   analyzeWatermark,
@@ -228,6 +229,7 @@ export function createApp() {
       ],
       engines: REMOVE_ENGINES,
       detectDefaults: DEFAULT_DETECT_OPTIONS,
+      gateDefaults: DEFAULT_GATE_OPTIONS,
       removeDefaults: DEFAULT_REMOVE_OPTIONS,
       limits: { maxPixels: LIMITS.maxPixels },
     });

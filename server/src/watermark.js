@@ -116,6 +116,27 @@ async function resolveTemplateOption(options) {
 const DETECT_MAX_EDGE = 1400;
 
 /**
+ * 区域提议（语义模型门控）的默认值 —— **默认全部关闭**。
+ *
+ * 也就是说：默认的检测是**纯统计**路径（α-map + 形态学背景 + 周期/模板级联），
+ * 不会调用任何模型。文本门控 / 水印框门控都要显式请求：
+ *   · method=model（文本模型）/ method=yolo（水印框模型）
+ *   · 或 textGate=1 / yoloGate=1（与 method=auto 组合，可两个一起用以取并集）
+ * 模型文件不存在时，这些开关会被忽略并退回纯统计路径（可回退，行为与从前一致）。
+ */
+export const DEFAULT_GATE_OPTIONS = Object.freeze({
+  textGate: false,
+  yoloGate: false,
+  textGateRelax: true,
+  textRecover: true,
+  textLimitSide: 1600,
+  textThreshold: 0.25,
+  yoloConfidence: 0.35,
+  yoloIou: 0.45,
+  yoloMaxBoxes: 24,
+});
+
+/**
  * 文本区域门控（"模型给区域、本地给像素"的第一段）。
  *
  * 为什么要它：纯统计检测没有"水印"概念。实测用户那张 20 只蝴蝶的图，亮极性把浅色
