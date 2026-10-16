@@ -453,7 +453,9 @@ async function pickTemplate() {  const input = document.createElement('input');
 .inspector {
   display: flex;
   flex-direction: column;
-  width: 288px;
+  /* 336px：引擎组现在有 5 项（自动/Unblend/背景替代/OpenCV/LaMa），
+     288px 时最后一项会被挤出容器裁掉。SegmentedControl 另外做了换行兜底。 */
+  width: 336px;
   flex: none;
   border-left: 1px solid var(--border);
 }

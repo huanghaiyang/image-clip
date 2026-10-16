@@ -221,7 +221,8 @@ const qualityVisible = computed(() => state.output.format !== 'png');
 .inspector {
   display: flex;
   flex-direction: column;
-  width: 288px;
+  /* 与 WatermarkPanel 保持同一宽度：两种模式切换时右侧栏不应跳动 */
+  width: 336px;
   flex: none;
   border-left: 1px solid var(--border);
 }

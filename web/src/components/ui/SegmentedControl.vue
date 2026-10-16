@@ -31,6 +31,9 @@ const emit = defineEmits(['update:modelValue']);
 <style scoped>
 .segmented {
   display: inline-flex;
+  /* 选项多（例如 5 个引擎）时换行，而不是把最后一项挤出容器裁掉。
+     配合 .segmented-item 的 min-width: max-content，标签永远不会被压扁或截断。 */
+  flex-wrap: wrap;
   padding: 2px;
   gap: 2px;
   background: var(--panel-2);
@@ -44,7 +47,9 @@ const emit = defineEmits(['update:modelValue']);
 }
 
 .segmented-item {
-  flex: 1;
+  flex: 1 1 auto;
+  /* 标签按内容定最小宽度：宁可换行，也不挤压/截断文字 */
+  min-width: max-content;
   height: 22px;
   padding: 0 10px;
   border-radius: 4px;
