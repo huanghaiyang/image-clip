@@ -40,3 +40,15 @@ Inpainting with Fourier Convolutions*）。
 - **LaMa 推理**：固定 512×512 输入，按原生分辨率做重叠窗口切片（`planPatches`），只回贴掩膜内像素。
 
 以上均为论文/算法层面的参考，仓库内不含其源码。
+
+## 检测用模型（可选）
+
+- **PP-OCRv4 文本检测（DBNet）** —— `SWHL/RapidOCR` 提供的 ONNX 转换，模型源自
+  PaddlePaddle/PaddleOCR，**Apache-2.0**。用途：把水印检测限制在"文字区域"内
+  （见 README §6.4）。文件 `models/ppocrv4-det.onnx`（4.5MB）不随仓库分发，
+  用 `npm run model:watermark` 从 hf-mirror 获取。
+
+- **YOLOv5 水印检测器（备选，默认不下载）** —— 权重来自 `Eugeoter/yolov5-watermark-detection`，
+  架构为 **YOLOv5（ultralytics，AGPL-3.0）**。⚠️ AGPL-3.0 具有传染性：
+  若要把本应用**对外分发**且包含该模型的导出产物，需要先确认授权合规性
+  （内部使用/不分发不受影响）。用途：输出水印边界框，覆盖图形类水印。

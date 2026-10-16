@@ -34,6 +34,7 @@ import { InputError, decodeRgba, readMetadata, toBuffer } from './imaging.js';
 import { getOpenCv } from './opencv.js';
 import { lamaInpaint, lamaStatus } from './lama.js';
 import { removeByBackground } from './bgsub.js';
+import { detectTextRegions, textModelStatus } from './text-detect.js';
 
 export const REMOVE_ENGINES = Object.freeze(['auto', 'unblend', 'bgsub', 'opencv', 'lama']);
 
@@ -111,6 +112,58 @@ async function resolveTemplateOption(options) {
  */
 const DETECT_MAX_EDGE = 1400;
 
+/**
+ * 文本区域门控（"模型给区域、本地给像素"的第一段）。
+ *
+ * 为什么要它：纯统计检测没有"水印"概念。实测用户那张 20 只蝴蝶的图，亮极性把浅色
+ * 蝴蝶读成 α≈0.48~0.55 的叠加物（掩膜 99.6% 是内容），周期性路径更把蝴蝶网格判成
+ * 平铺水印（22%）。而**绝大多数可见水印是文字**，所以先用一个 4.5MB 的文本检测模型
+ * （PP-OCRv4 det / DBNet，纯 ONNX、离线）把"图里哪儿是文字"找出来：
+ *   - 非文字内容（蝴蝶翅膀、纹理、高光）**根本进不了候选** —— 这是结构性的修复；
+ *   - 文字区域只当**种子**：DBNet 对这种低对比空心字只能覆盖文字框的 17%~34%
+ *     （实测），所以把种子外扩一段，再在扩后的框内用**更低的 α 下限**重跑 α-map，
+ *     由本地算法补全整段文字的像素与不透明度。
+ *   - 模型缺失/关闭时完全走原来的路径（行为不变）。
+ */
+async function buildTextGate(image, options) {
+  const status = textModelStatus();
+  if (!status.available) return { used: false, reason: status.reason, gate: null };
+  const regions = await detectTextRegions(image, {
+    limitSide: options.textLimitSide,
+    threshold: options.textThreshold,
+  });
+  if (!regions.coverage) {
+    return {
+      used: true,
+      reason: '图中未检测到文字区域，水印检测不会在文字区域外进行',
+      gate: null,
+      regions: 0,
+      coverage: 0,
+    };
+  }
+  // 种子外扩：文字框向外留出余量，让 α-map 能把整段水印补全
+  const margin = Math.max(24, Math.round(Math.min(image.width, image.height) * 0.025));
+  const gate = createMask(image.width, image.height);
+  for (const box of regions.boxes) {
+    const x0 = Math.max(0, box.x - margin);
+    const y0 = Math.max(0, box.y - margin);
+    const x1 = Math.min(image.width, box.x + box.width + margin);
+    const y1 = Math.min(image.height, box.y + box.height + margin);
+    for (let y = y0; y < y1; y += 1) {
+      for (let x = x0; x < x1; x += 1) gate.data[y * image.width + x] = 255;
+    }
+  }
+  return {
+    used: true,
+    reason: null,
+    gate,
+    regions: regions.boxes.length,
+    coverage: regions.coverage,
+    boxes: regions.boxes.slice(0, 12),
+    elapsedMs: regions.elapsedMs,
+  };
+}
+
 /** 检测：图片字节 → { mask, boxes, ... } */
 export async function analyzeWatermark(buffer, options = {}) {
   const resolved = await resolveTemplateOption(options);
@@ -119,9 +172,78 @@ export async function analyzeWatermark(buffer, options = {}) {
   const { data, width, height } = await decodeRgba(buffer);
   const longEdge = Math.max(width, height);
 
+  // 文本区域门控：只在"像文字水印"的位置检测（可用 textGate: false 关闭）
+  const image = { width, height, data: new Uint8ClampedArray(data) };
+  let textGate = { used: false, reason: null, gate: null };
+  if (resolved.textGate === true && !resolved.template && !resolved.templateRect) {
+    try {
+      textGate = await buildTextGate(image, resolved);
+    } catch (err) {
+      textGate = { used: false, reason: `文本检测失败（${err.message}），退回无门控检测`, gate: null };
+    }
+  }
+  const gatedOpts = { ...opts };
+  /**
+   * 门控掩膜必须与"检测实际运行的那张图"同尺寸。
+   * 大图会先降采样再检测（DETECT_MAX_EDGE），所以这里按目标尺寸**块状降采样**：
+   * 小块内只要有一个门控像素就置位（保守方向，宁可多给一点区域也不漏水印）。
+   * 踩过的坑：直接把原尺寸门控传进去，尺寸校验不通过 → 门控被安全地忽略 → 门控形同虚设。
+   */
+  const gateFor = (w, h) => {
+    if (!textGate.gate) return null;
+    if (w === width && h === height) return textGate.gate.data;
+    const out = new Uint8Array(w * h);
+    const stepX = width / w;
+    const stepY = height / h;
+    for (let y = 0; y < h; y += 1) {
+      const y0 = Math.floor(y * stepY);
+      const y1 = Math.min(height, Math.max(y0 + 1, Math.ceil((y + 1) * stepY)));
+      for (let x = 0; x < w; x += 1) {
+        const x0 = Math.floor(x * stepX);
+        const x1 = Math.min(width, Math.max(x0 + 1, Math.ceil((x + 1) * stepX)));
+        let on = false;
+        for (let yy = y0; yy < y1 && !on; yy += 1) {
+          const row = yy * width;
+          for (let xx = x0; xx < x1; xx += 1) {
+            if (textGate.gate.data[row + xx] > 127) {
+              on = true;
+              break;
+            }
+          }
+        }
+        if (on) out[y * w + x] = 255;
+      }
+    }
+    return out;
+  };
+  if (textGate.gate) {
+    // 语义上已确认"这里是文字"，可以在框内放宽 α 下限去捞极淡水印（默认灵敏度提高 30）。
+    //
+    // 注意：**不要**在这里顺手改成轻量清理（cleanupLevel:'light'）。试过了，虽然能把
+    // 门控内的笔画像素从 1.4% 提到 17.3%，但代价是 α 一致性聚类被大量碎点搅坏：
+    // 实测平铺水印样例直接掉到 0%、用户图在低灵敏度下归零。召回要在"已确认的水印
+    // 区域内"单独做一遍恢复（见 README §6.6 的后续计划），而不是改全局清理强度。
+    if (resolved.textGateRelax !== false) {
+      gatedOpts.sensitivity = Math.min(100, (opts.sensitivity ?? 55) + 30);
+    }
+  }
+
+  const attach = (result) => ({
+    ...result,
+    width,
+    height,
+    textGate: {
+      used: textGate.used,
+      reason: textGate.reason,
+      regions: textGate.regions ?? 0,
+      coverage: textGate.coverage ?? 0,
+      boxes: textGate.boxes ?? [],
+      elapsedMs: textGate.elapsedMs ?? null,
+    },
+  });
+
   if (longEdge <= DETECT_MAX_EDGE) {
-    const result = detectWatermark(cv, { width, height, data }, opts);
-    return { ...result, width, height };
+    return attach(detectWatermark(cv, image, gatedOpts));
   }
 
   const scale = DETECT_MAX_EDGE / longEdge;
@@ -132,7 +254,11 @@ export async function analyzeWatermark(buffer, options = {}) {
     .raw()
     .toBuffer({ resolveWithObject: true });
 
-  const small = detectWatermark(cv, { width: smallW, height: smallH, data: new Uint8ClampedArray(smallData) }, opts);
+  const smallGate = gateFor(smallW, smallH);
+  const optsSmall = smallGate
+    ? { ...gatedOpts, regionMaskData: smallGate, regionMaskWidth: smallW, regionMaskHeight: smallH }
+    : gatedOpts;
+  const small = detectWatermark(cv, { width: smallW, height: smallH, data: new Uint8ClampedArray(smallData) }, optsSmall);
 
   // 掩膜放回原尺寸；顺带 +1px 膨胀，补偿降采样把细笔画边界磨掉的半个像素
   const bigMask = createMask(width, height);
@@ -154,14 +280,12 @@ export async function analyzeWatermark(buffer, options = {}) {
     source: b.source,
   }));
 
-  return {
+  return attach({
     ...small,
     mask: dilateMask(bigMask, 1),
     boxes,
-    width,
-    height,
     downscaled: { detectWidth: smallW, detectHeight: smallH, scale: Number(scale.toFixed(4)) },
-  };
+  });
 }
 
 /** 掩膜 → 灰度 PNG（UI 显示与回传都用它）。 */

@@ -41,6 +41,7 @@ import {
 } from './watermark.js';
 import { opencvStatus } from './opencv.js';
 import { lamaStatus } from './lama.js';
+import { textModelStatus } from './text-detect.js';
 import { DETECT_METHODS, DEFAULT_DETECT_OPTIONS } from '../../shared/watermark/detect.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -217,6 +218,7 @@ export function createApp() {
       engine: opencv.available ? 'node-opencv' : 'unavailable',
       opencv,
       lama,
+      textModel: textModelStatus(),
       detectMethods: DETECT_METHODS,
       engines: REMOVE_ENGINES,
       detectDefaults: DEFAULT_DETECT_OPTIONS,
@@ -247,6 +249,7 @@ export function createApp() {
         rle: maskToRle(result.mask),
         width: result.width,
         height: result.height,
+        textGate: result.textGate ?? null,
         diagnostics: result.diagnostics,
         elapsedMs: result.elapsedMs,
       });
@@ -428,6 +431,8 @@ function watermarkOptions(query = {}, body = {}) {
     'lamaMaxPatches',
     'quality',
     'alphaHint',
+    'textLimitSide',
+    'textThreshold',
     'thresholdAt0',
     'thresholdAt100',
   ];
@@ -438,7 +443,7 @@ function watermarkOptions(query = {}, body = {}) {
       if (Number.isFinite(value)) options[key] = value;
     }
   }
-  const booleans = ['requireRepeat', 'integrity'];
+  const booleans = ['requireRepeat', 'integrity', 'textGate', 'textGateRelax'];
   for (const key of booleans) {
     if (raw[key] !== undefined && raw[key] !== '') options[key] = toBoolValue(raw[key]);
   }

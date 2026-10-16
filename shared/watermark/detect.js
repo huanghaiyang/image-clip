@@ -172,6 +172,19 @@ export function detectWatermark(cv, image, options = {}) {
     const regionMask = region ? createMask(image.width, image.height) : null;
     if (regionMask) fillRect(regionMask, region, 255);
 
+    /**
+     * 掩膜式区域限制（比矩形 region 更强）：调用方可以用来把检测**限制在语义上
+     * 可能有水印的地方**。例如服务端先用文本检测模型（DBNet）找出图中的文字区域，
+     * 再把水印检测限制在这些区域内 —— 这样插画里的非文字内容（例如用户那张图里
+     * 20 只蝴蝶的翅膀边缘）根本进不了候选，从结构上消掉"把画面内容当水印"的误检。
+     *
+     * 尺寸不符时直接忽略（宁可退回无限制，也不静默给出错误结果）。
+     */
+    const semanticMask =
+      opts.regionMaskData && opts.regionMaskWidth === image.width && opts.regionMaskHeight === image.height
+        ? { width: opts.regionMaskWidth, height: opts.regionMaskHeight, data: opts.regionMaskData }
+        : null;
+
     const results = [];
     const wantOverlay = opts.method === 'auto' || opts.method === 'overlay';
     const wantPeriodic = opts.method === 'auto' || opts.method === 'periodic';
@@ -208,6 +221,7 @@ export function detectWatermark(cv, image, options = {}) {
       for (const r of entries) {
         let m = r.mask;
         if (regionMask) m = intersectWith(m, regionMask);
+        if (semanticMask) m = intersectWith(m, semanticMask);
         r.mask = alphaGate(m);
       }
       const usable = entries.filter((r) => r.mask && !isEmptyMask(r.mask));
@@ -380,12 +394,17 @@ function detectOverlay(cv, scope, rgba, gray, edge, opacity, opts) {
         rawMask.data[i] = 255;
       }
 
-      const cleaned = maskClose(maskOpen(rawMask, 1), 2);
+      // 清理强度：默认 open(1)+close(2) 用来去掉孤立噪点；但在**语义门控**路径上，
+      // 区域内已经确认是文字，而降采样后笔画往往只剩 1~2px —— 再做一次开运算会把它们
+      // 整体抹掉（实测用户图：门控内只剩 1.4% 的笔画像素，去除时几乎没效果）。
+      // 所以门控时只做轻量闭运算（close(1)），不掉笔画。
+      const cleaned =
+        opts.cleanupLevel === 'light' ? maskClose(rawMask, 1) : maskClose(maskOpen(rawMask, 1), 2);
       const scored = scoreCandidates(
         cleaned,
         { alphaMap, sat: s, grad: edge.data, borderRatio: 0.18 },
         {
-          minArea: opts.minArea,
+          minArea: opts.cleanupLevel === 'light' ? Math.max(4, Math.round(opts.minArea / 4)) : opts.minArea,
           threshold: scoreThresholdValue,
           imageArea: w * h,
           alphaFloor,
