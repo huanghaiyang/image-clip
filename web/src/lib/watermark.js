@@ -29,7 +29,7 @@ export const WATERMARK_ENDPOINTS = {
 };
 
 /** 契约里固定的枚举值，集中一处便于与后端对照。 */
-export const DETECT_METHODS = ['auto', 'overlay', 'periodic', 'template'];
+export const DETECT_METHODS = ['auto', 'model', 'overlay', 'periodic', 'template'];
 export const REMOVE_ENGINES = ['auto', 'unblend', 'bgsub', 'opencv', 'lama'];
 
 // ------------------------------------------------------------- 服务端调用

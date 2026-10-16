@@ -61,9 +61,15 @@ export async function removeByBackground(image, mask, options = {}) {
   const bg = new cv.Mat();
   cv.morphologyEx(src, bg, polarity === 'bright' ? cv.MORPH_OPEN : cv.MORPH_CLOSE, se);
 
-  // 背景平坦度：在降采样图上算梯度幅值
+  // 背景平坦度：在降采样图上算梯度幅值。
+  //
+  // 注意这里算的是**原图**（src）的梯度，不是背景估计（bg）的梯度 —— 踩过的坑：
+  // 水印压在画面内容上时（用户那张图里「豆包AI生成」横跨蝴蝶翅膀），
+  // 背景估计本身就是翅膀自己的颜色、局部很平滑，于是"平坦"判据通过 →
+  // 用错误的底色把翅膀替换掉，糊成一整块蓝色。改用**原图**梯度后，
+  // 有结构的地方判为非平坦，交给 Telea 修补，不再做颜色替换。
   const gray = new cv.Mat();
-  cv.cvtColor(bg, gray, cv.COLOR_RGB2GRAY);
+  cv.cvtColor(src, gray, cv.COLOR_RGB2GRAY);
   const gx = new cv.Mat();
   const gy = new cv.Mat();
   cv.Sobel(gray, gx, cv.CV_16S, 1, 0, 3);

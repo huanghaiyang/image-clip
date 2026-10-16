@@ -51,7 +51,7 @@ export function textModelStatus() {
       available: false,
       path: modelPath,
       sizeBytes: 0,
-      reason: `未找到文本检测模型（${err.code ?? err.message}）：先跑 node scripts/download-text-model.mjs`,
+      reason: `未找到文本检测模型（${err.code ?? err.message}）：先跑 npm run model:watermark（scripts/download-wm-model.mjs）`,
     };
   }
 }

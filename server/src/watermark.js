@@ -17,6 +17,8 @@ import {
   DEFAULT_DETECT_OPTIONS,
   colorCode,
   createMask,
+  intersect as intersectMask,
+  union as unionMask,
   countMask,
   createMatScope,
   detectWatermark,
@@ -133,22 +135,33 @@ async function buildTextGate(image, options) {
     threshold: options.textThreshold,
   });
   if (!regions.coverage) {
+    // 请求了语义门控、但图里**没有文字** —— 这时诚实的答案是"没有文字水印"，
+    // 而不是退回无门控检测：退回会把之前那些画面内容误检（蝴蝶网格被判成平铺水印）
+    // 又放回来，正好抵消掉门控的意义。
     return {
       used: true,
-      reason: '图中未检测到文字区域，水印检测不会在文字区域外进行',
+      empty: true,
+      reason: '图中未检测到文字区域：不认为存在文字水印（可在界面关掉语义门控改走统计检测）',
       gate: null,
       regions: 0,
       coverage: 0,
     };
   }
-  // 种子外扩：文字框向外留出余量，让 α-map 能把整段水印补全
+  // 种子外扩：
+  //  1) 统一留白 margin：让 α-map 能把笔画边缘补全；
+  //  2) **沿文字行方向再外扩 0.6×框宽**：文本检测器常常只在一段文字的局部着火
+  //     （实测用户图的「豆包AI生成」只找到右半段「AI生成」），而水印通常是**一整行**字，
+  //     所以按行方向拉长是对的；垂直方向不拉，避免把上下相邻的内容卷进来。
   const margin = Math.max(24, Math.round(Math.min(image.width, image.height) * 0.025));
   const gate = createMask(image.width, image.height);
+  const rects = [];
   for (const box of regions.boxes) {
-    const x0 = Math.max(0, box.x - margin);
+    const extendX = Math.round(box.width * 0.6);
+    const x0 = Math.max(0, box.x - margin - extendX);
     const y0 = Math.max(0, box.y - margin);
-    const x1 = Math.min(image.width, box.x + box.width + margin);
+    const x1 = Math.min(image.width, box.x + box.width + margin + extendX);
     const y1 = Math.min(image.height, box.y + box.height + margin);
+    rects.push({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
     for (let y = y0; y < y1; y += 1) {
       for (let x = x0; x < x1; x += 1) gate.data[y * image.width + x] = 255;
     }
@@ -157,6 +170,7 @@ async function buildTextGate(image, options) {
     used: true,
     reason: null,
     gate,
+    rects,
     regions: regions.boxes.length,
     coverage: regions.coverage,
     boxes: regions.boxes.slice(0, 12),
@@ -167,7 +181,10 @@ async function buildTextGate(image, options) {
 /** 检测：图片字节 → { mask, boxes, ... } */
 export async function analyzeWatermark(buffer, options = {}) {
   const resolved = await resolveTemplateOption(options);
-  const opts = detectOptionsFrom(resolved);
+  // method: 'model' = "先用离线语义模型提议区域，再在区域内跑常规级联"。
+  // 这是检出方法层面的开关；等价于 textGate 开启 + method auto，但语义更清楚。
+  const useModel = resolved.method === 'model';
+  const opts = detectOptionsFrom({ ...resolved, method: useModel ? 'auto' : resolved.method });
   const cv = await getOpenCv();
   const { data, width, height } = await decodeRgba(buffer);
   const longEdge = Math.max(width, height);
@@ -175,12 +192,38 @@ export async function analyzeWatermark(buffer, options = {}) {
   // 文本区域门控：只在"像文字水印"的位置检测（可用 textGate: false 关闭）
   const image = { width, height, data: new Uint8ClampedArray(data) };
   let textGate = { used: false, reason: null, gate: null };
-  if (resolved.textGate === true && !resolved.template && !resolved.templateRect) {
+  const gateRequested = (useModel || resolved.textGate === true) && !resolved.template && !resolved.templateRect;
+  if (gateRequested) {
     try {
       textGate = await buildTextGate(image, resolved);
     } catch (err) {
+      // 模型侧出错（文件损坏、onnxruntime 异常）不应让整个请求失败，退回统计检测并说明原因
       textGate = { used: false, reason: `文本检测失败（${err.message}），退回无门控检测`, gate: null };
     }
+  }
+  if (textGate.empty) {
+    // 请求了门控但图中无文字 → 直接判"没有文字水印"（见 buildTextGate 里的说明）
+    return {
+      mask: createMask(width, height),
+      boxes: [],
+      usedMethods: [],
+      method: 'model',
+      confidence: 0,
+      coverage: 0,
+      estimatedAlpha: null,
+      diagnostics: { gate: textGate.reason },
+      elapsedMs: 0,
+      width,
+      height,
+      textGate: {
+        used: true,
+        reason: textGate.reason,
+        regions: 0,
+        coverage: 0,
+        boxes: [],
+        elapsedMs: textGate.elapsedMs ?? null,
+      },
+    };
   }
   const gatedOpts = { ...opts };
   /**
@@ -242,8 +285,88 @@ export async function analyzeWatermark(buffer, options = {}) {
     },
   });
 
+  /**
+   * 门控内的**召回恢复**（第二遍）。
+   *
+   * 第一遍走的是常规判据（支持性、α 一致性、默认清理强度），精度高但召回低：
+   * 实测用户图只覆盖文字框的 1.4% —— 检出是对的，却清不干净。
+   * 所以第一遍确认"这里确实有水印"之后，在**它自己的掩膜外扩一圈**的区域内再跑一遍：
+   *   - 降低 α 下限（sensitivity 95 → 下限≈0.03）去捞极淡笔画；
+   *   - 轻量清理（close(1)，不掉 1~2px 的细笔画）；
+   *   - 关掉支持性判据（区域已被第一遍验证过，不需要再证明"重复出现/贴角"）；
+   * 结果与第一遍取并集，并且**始终与语义门控求交**（不会溢出到文字区域之外）。
+   *
+   * 为什么不能直接把上面这些放宽用在第一遍：那会把 α 一致性聚类搅坏 ——
+   * 实测平铺水印样例会直接掉到 0%（见 gatedOpts 处的注释）。
+   */
+  const recoverInsideGate = (detectImage, first) => {
+    if (!textGate.gate || !first || !first.mask || !(first.coverage > 0)) return first;
+    if (resolved.textRecover === false) return first;
+    const margin = Math.max(12, Math.round(Math.min(detectImage.width, detectImage.height) * 0.02));
+    const gateMask = {
+      width: detectImage.width,
+      height: detectImage.height,
+      data: gateFor(detectImage.width, detectImage.height),
+    };
+    if (!gateMask.data) return first;
+
+    /**
+     * 恢复区域 = **包含第一遍命中像素的整个文本框**（不是种子周围那一小圈）。
+     *
+     * 为什么：文本检测器常常只在一段文字的局部着火（实测用户图只找到「AI生成」，
+     * 而水印是整行「豆包AI生成」）。只扩种子周围 30px 的话，「豆包」永远进不来；
+     * 而文本框本身来自语义模型，是"这里有一行字"的直接证据，整框都在门控之内，
+     * 因此用它当恢复区域既能把整行捞回来，又不会越出文字区域。
+     */
+    const region = createMask(detectImage.width, detectImage.height);
+    const scaleToDetect = detectImage.width / width;
+    for (const rect of textGate.rects ?? []) {
+      // 该文本框是否与第一遍的命中像素相交
+      let hit = false;
+      const rx0 = Math.max(0, Math.floor(rect.x * scaleToDetect));
+      const ry0 = Math.max(0, Math.floor(rect.y * scaleToDetect));
+      const rx1 = Math.min(detectImage.width, Math.ceil((rect.x + rect.width) * scaleToDetect));
+      const ry1 = Math.min(detectImage.height, Math.ceil((rect.y + rect.height) * scaleToDetect));
+      for (let y = ry0; y < ry1 && !hit; y += 1) {
+        for (let x = rx0; x < rx1; x += 1) {
+          if (first.mask.data[y * detectImage.width + x] > 127) {
+            hit = true;
+            break;
+          }
+        }
+      }
+      if (!hit) continue;
+      for (let y = ry0; y < ry1; y += 1) {
+        for (let x = rx0; x < rx1; x += 1) region.data[y * detectImage.width + x] = 255;
+      }
+    }
+    // 文本框之外，再给种子周围留一圈（不依赖文本框也能兜住零散笔画）
+    const seedRegion = intersectMask(dilateMask(first.mask, margin), gateMask);
+    const recovery = intersectMask(unionMask(region, seedRegion), gateMask);
+    if (!countMask(recovery)) return first;
+
+    const second = detectWatermark(cv, detectImage, {
+      ...gatedOpts,
+      cleanupLevel: 'light',
+      sensitivity: 95,
+      requireRepeat: false,
+      maxCoverage: 0.9,
+      regionMaskData: recovery.data,
+      regionMaskWidth: recovery.width,
+      regionMaskHeight: recovery.height,
+    });
+    const merged = intersectMask(unionMask(first.mask, second.mask), gateMask);
+    const mergedCoverage = countMask(merged) / (detectImage.width * detectImage.height);
+    return {
+      ...first,
+      mask: merged,
+      coverage: mergedCoverage,
+      recovered: { coverage: second.coverage, maskPixels: countMask(second.mask) },
+    };
+  };
+
   if (longEdge <= DETECT_MAX_EDGE) {
-    return attach(detectWatermark(cv, image, gatedOpts));
+    return attach(recoverInsideGate(image, detectWatermark(cv, image, gatedOpts)));
   }
 
   const scale = DETECT_MAX_EDGE / longEdge;
@@ -258,7 +381,9 @@ export async function analyzeWatermark(buffer, options = {}) {
   const optsSmall = smallGate
     ? { ...gatedOpts, regionMaskData: smallGate, regionMaskWidth: smallW, regionMaskHeight: smallH }
     : gatedOpts;
-  const small = detectWatermark(cv, { width: smallW, height: smallH, data: new Uint8ClampedArray(smallData) }, optsSmall);
+  const smallImage = { width: smallW, height: smallH, data: new Uint8ClampedArray(smallData) };
+  // 恢复这一遍必须在**与检测同分辨率**的图上做（否则掩膜/区域的坐标体系不一致）
+  const small = recoverInsideGate(smallImage, detectWatermark(cv, smallImage, optsSmall));
 
   // 掩膜放回原尺寸；顺带 +1px 膨胀，补偿降采样把细笔画边界磨掉的半个像素
   const bigMask = createMask(width, height);

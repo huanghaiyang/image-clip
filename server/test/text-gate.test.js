@@ -49,6 +49,10 @@ test('文本门控：把水印检测限制在文字区域内（用户实测样�
     }
   }
   assert.ok(total > 0, '掩膜不应为空');
+  // 召回：门控内还会跑一遍低阈值恢复（见 analyzeWatermark 的 recoverInsideGate），
+  // 否则只覆盖文字框的 1.4%，检出是对的却清不干净。实测恢复后约 24%。
+  const boxCoverage = inside / (TEXT_BOX.width * TEXT_BOX.height);
+  assert.ok(boxCoverage >= 0.15, `文字框覆盖率应 ≥15%（当前 ${(boxCoverage * 100).toFixed(1)}%）`);
   const precision = inside / total;
   assert.ok(precision >= 0.9, `掩膜应有 ≥90% 落在文字框内（当前 ${(precision * 100).toFixed(1)}%）`);
 });

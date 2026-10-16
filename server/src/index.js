@@ -219,7 +219,7 @@ export function createApp() {
       opencv,
       lama,
       textModel: textModelStatus(),
-      detectMethods: DETECT_METHODS,
+      detectMethods: textModelStatus().available ? [...DETECT_METHODS, 'model'] : DETECT_METHODS,
       engines: REMOVE_ENGINES,
       detectDefaults: DEFAULT_DETECT_OPTIONS,
       removeDefaults: DEFAULT_REMOVE_OPTIONS,

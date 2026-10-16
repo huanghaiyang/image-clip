@@ -19,6 +19,10 @@ const { state, selectedEntry, hasMask, coverage, actions } = useWatermark();
 
 const METHOD_LABELS = {
   auto: { label: '自动', hint: '后端依次尝试叠加/周期/模板策略，取最可信的结果' },
+  model: {
+    label: '模型',
+    hint: '先用离线文字检测模型框出文字区域，再在区域内部检测水印：插画/照片里的非文字内容不会被误判成水印（需 npm run model:watermark 下载 4.5MB 模型）',
+  },
   overlay: { label: '叠加', hint: '适合固定在某个位置的半透明叠加水印' },
   periodic: { label: '周期', hint: '适合平铺/重复出现的水印（时间戳、网点）' },
   template: { label: '模板', hint: '需要提供水印模板图，当前前端尚未提供模板上传入口' },
