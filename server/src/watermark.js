@@ -303,10 +303,42 @@ function removeByUnblend(image, mask, options) {
 }
 
 /**
+ * 掩膜紧邻一圈里"平坦底色"像素的占比（用来判断水印底下是底色还是内容）。
+ *
+ * 取掩膜向外 2~6px 的一圈（不含掩膜本身），统计灰度**接近纯白或纯黑**（≥235 / ≤20）的比例：
+ *  - 占比高 → 水印主要压在平坦底色上，底色可以直接观测 → 用背景替代；
+ *  - 占比低 → 压在照片/插画内容上 → 靠 (α, W) 反混合。
+ *
+ * 为什么不用中位数：用户那张图的水印有一部分压在蝴蝶翅膀上，环像素中位数被拉到 211
+ * （25 分位 179 / 75 分位 234），单看中位数会误判成"内容"；而看占比是 ——
+ * 用户图约 45% 的环像素是纯白底，平铺水印那张只有约 0%（整段挤在 120~161）。
+ */
+function ringFlatFraction(image, mask) {
+  const { width: w, height: h } = image;
+  const inner = dilateMask(mask, 2);
+  const outer = dilateMask(mask, 6);
+  let flat = 0;
+  let total = 0;
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      const i = y * w + x;
+      if (outer.data[i] <= 127 || inner.data[i] > 127) continue;
+      const p = i * 4;
+      const luma = image.data[p] * 0.299 + image.data[p + 1] * 0.587 + image.data[p + 2] * 0.114;
+      total += 1;
+      if (luma >= 235 || luma <= 20) flat += 1;
+    }
+  }
+  return total ? flat / total : null;
+}
+
+/**
  * 自动选择引擎：
- *  - 能估出可信的 (α, W) → unblend（半透明水印，效果远好于修补）
- *  - 否则有水印区域较大且装了 LaMa → lama
- *  - 否则 → opencv 快速修补
+ *  - 半透明水印 → unblend（反推 (α, W)）；但若水印压在**平坦底色**上（底色近乎纯白/纯黑），
+ *    底色本身可以直接观测，用 bgsub（形态学背景替代）更稳，不依赖 α 估计
+ *    —— 实测用户那张白底浅灰角标：反混合取 α=0.187 时水印只是变淡，
+ *    换成背景替代后文字基本清除；
+ *  - 估不出可信 (α, W) → 装了 LaMa 就用 lama，否则 opencv 修补。
  */
 function chooseEngine(image, mask, options) {
   const requested = options.engine;
@@ -318,6 +350,14 @@ function chooseEngine(image, mask, options) {
   const plausible = isUnblendPlausible(unblendParams) || hintPlausible;
   if (requested !== 'auto') return { engine: requested, unblendParams, reason: '显式指定' };
   if (plausible) {
+    const flatFraction = ringFlatFraction(image, mask);
+    if (flatFraction !== null && flatFraction >= 0.15) {
+      return {
+        engine: 'bgsub',
+        unblendParams,
+        reason: `水印主要压在平坦底色上（邻域纯色占比 ${(flatFraction * 100).toFixed(0)}%）：用形态学背景直接替换，不依赖 α 估计`,
+      };
+    }
     return {
       engine: 'unblend',
       unblendParams,

@@ -202,6 +202,30 @@ test('干净图（无半透明叠加）不应产生误检掩膜', async () => {
   }
 });
 
+test('白底浅灰角标：默认设置下就能识别（用户实测样例「豆包AI生成」）', async () => {
+  // 这段水印是"浅灰空心描边 + 单实例贴右下角 + 近白背景"，三个点分别踩中了：
+  //  α 只有 0.10~0.25（低于旧默认下限）、单实例（过不了重复性判据）、
+  //  近白背景上亮极性的 α 欠定（噪声就能凑出假水印，且会把暗极性短路掉）。
+  // 现在靠"背景余量先验"自动改走暗极性，默认设置就该检出 —— 这条用例把该修复锁死。
+  const file = path.resolve(import.meta.dirname, '../../samples', '蝴蝶-豆包AI水印.jpg');
+  const buffer = await fs.promises.readFile(file);
+  const result = await analyzeWatermark(buffer, { method: 'auto', sensitivity: 55 });
+
+  assert.ok(result.coverage > 0.005, `默认设置应检出该角标（当前 ${(result.coverage * 100).toFixed(3)}%）`);
+  assert.ok(result.confidence > 0.5, `应有较高置信度（当前 ${result.confidence}）`);
+  assert.ok(result.boxes.length > 0, '应在画布上给出候选框（用于标记水印位置）');
+  assert.equal(result.diagnostics.overlay.polarity, 'dark', '近白背景应自动改用暗极性');
+  assert.ok(
+    result.estimatedAlpha > 0.05 && result.estimatedAlpha < 0.35,
+    `α 应落在浅灰水印的合理区间（当前 ${result.estimatedAlpha}）`,
+  );
+
+  // 默认「自动」引擎：底色近乎纯白 → 应当选背景替代（而不是在这个部分掩膜上失效的反混合）
+  const removed = await removeWatermark(buffer, { engine: 'auto', method: 'auto', sensitivity: 55 });
+  assert.equal(removed.engine, 'bgsub', `平坦底色上应选背景替代（当前 ${removed.engine}）`);
+  assert.equal(removed.integrity.changedOutsideMask, 0, '掩膜外不能有改动');
+});
+
 test('模板匹配：给一张水印图能定位到图中的位置', async () => {
   const clean = cleanImage(320, 240);
   const tw = 60;

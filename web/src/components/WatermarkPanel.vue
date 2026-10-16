@@ -42,7 +42,7 @@ const polarities = [
   {
     value: 'auto',
     label: '自动',
-    hint: '先按亮水印（白/浅色）检测；只有它拿不出可信结果时才回退到暗极性。',
+    hint: '按背景明暗自动选极性：近白背景优先「暗色」（亮极性在那里估不准不透明度），否则优先「亮色」。',
   },
   {
     value: 'bright',
@@ -187,6 +187,7 @@ async function pickTemplate() {  const input = document.createElement('input');
           @update:model-value="actions.setOption('polarity', $event)"
         />
         <p class="muted note">{{ polarities.find((p) => p.value === state.options.polarity)?.hint }}</p>
+        <p class="muted note">识别不使用下方引擎：检测是 α-map + 形态学背景的统计算法（OpenCV.js，无模型）；「去除」里的引擎只决定如何重建内容。</p>
 
         <div v-if="state.options.method === 'template'" class="template-row">
           <button class="btn is-block" type="button" @click="pickTemplate">

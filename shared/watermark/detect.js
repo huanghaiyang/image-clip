@@ -328,8 +328,33 @@ function detectOverlay(cv, scope, rgba, gray, edge, opacity, opts) {
   const g = gray.data;
   const s = sat.data;
 
+  // ---- 极性先验：用"背景余量"决定先试哪一极 ----------------------------------
+  // 亮水印的 α ≈ (I−B)/(255−B)：背景越接近纯白，"还能再亮多少"就越小，α 越欠定
+  // （2~3 级压缩噪声就能凑出 α≈0.1~0.2 的假水印）。所以当整张图大面积是近白背景时，
+  // 亮极性的结果不可信，应当**优先试暗极性**（灰/黑水印，α ≈ (B−I)/B 在亮背景上很干净）。
+  //
+  // 实测：豆包角标图（2720×1520，58.8% 像素 >240）——亮极性先试时检出的是白蝴蝶边缘的
+  // 噪声（自动检测返回 0%），改成暗极性先试后正确给出 1.89%/64 个候选；
+  // 而三张无水印素材在暗极性下仍是 0.000%，平铺水印（中灰背景）依旧由亮极性给出 7.09%。
+  const minHeadroom = Math.max(4, Number(opts.minHeadroom) || 32);
+  const usableFraction = (() => {
+    const bgBright = backgrounds[0].bright.data;
+    let usable = 0;
+    let opaque = 0;
+    for (let i = 0; i < opacity.length; i += 7) {
+      if (opacity[i] < 24) continue;
+      opaque += 1;
+      if (255 - bgBright[i] >= minHeadroom) usable += 1;
+    }
+    return opaque ? usable / opaque : 1;
+  })();
+  const preferredPolarity = usableFraction >= 0.5 ? 'bright' : 'dark';
+
   const candidates = [];
-  const polarities = opts.polarity === 'auto' ? ['bright', 'dark'] : [opts.polarity];
+  const polarities =
+    opts.polarity === 'auto'
+      ? [preferredPolarity, preferredPolarity === 'bright' ? 'dark' : 'bright']
+      : [opts.polarity];
   for (const polarity of polarities) {
     const perScale = [];
     for (const bg of backgrounds) {
@@ -339,6 +364,8 @@ function detectOverlay(cv, scope, rgba, gray, edge, opacity, opts) {
       const alphaMap = new Uint8Array(w * h);
       for (let i = 0; i < alphaMap.length; i += 1) {
         if (opacity[i] < 24) continue; // 透明处没有内容
+        // 余量不足的像素直接判为不可测（见上面的极性先验说明）
+        if (polarity === 'bright' ? 255 - background[i] < minHeadroom : background[i] < minHeadroom) continue;
         const diff = polarity === 'bright' ? g[i] - background[i] : background[i] - g[i];
         if (diff <= 0) continue;
         const denom = Math.max(polarity === 'bright' ? 255 - background[i] : background[i], 24);
