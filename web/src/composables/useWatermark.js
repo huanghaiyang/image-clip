@@ -296,6 +296,8 @@ export async function detectFor(item = workspace.selected.value) {
     const entry = entryFor(item.id);
     entry.detect = markRaw({
       method: raw.method,
+    // 区域提议信息（哪几个语义模型参与了）：界面上要能看出"这次用的哪个模型"
+    textGate: raw.textGate ?? null,
       usedMethods: raw.usedMethods ?? [],
       confidence: raw.confidence ?? 0,
       elapsedMs: raw.elapsedMs ?? 0,

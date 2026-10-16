@@ -97,6 +97,16 @@ const methods = computed(() => {
   return usable.map((value) => ({ value, ...(METHOD_LABELS[value] ?? { label: value }) }));
 });
 
+/** 本次检测用了哪些语义模型提议区域（文本模型 / 水印框模型 / 两者并集）。 */
+const proposeText = computed(() => {
+  const gate = detect.value?.textGate;
+  if (!gate?.used) return '—';
+  const sources = gate.sources ?? [];
+  if (!sources.length) return '未找到候选区域';
+  const labels = { text: '文本模型', yolo: '水印框模型' };
+  return sources.map((s) => labels[s] ?? s).join(' + ');
+});
+
 const engines = computed(() => {
   const list = state.health.checked ? state.health.engines : [];
   const usable = list.length ? list : Object.keys(ENGINE_LABELS);
@@ -386,6 +396,10 @@ async function pickTemplate() {  const input = document.createElement('input');
               <dd class="mono">
                 {{ detect ? detect.usedMethods.join(' + ') || detect.method : '—' }}
               </dd>
+            </div>
+            <div v-if="detect?.textGate?.used" class="kv-row">
+              <dt>提议来源</dt>
+              <dd class="mono">{{ proposeText }}</dd>
             </div>
             <div class="kv-row">
               <dt>置信度</dt>
