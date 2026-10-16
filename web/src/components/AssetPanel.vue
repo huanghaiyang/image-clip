@@ -77,7 +77,7 @@ function pickFiles() {
     <div class="assets-footer">
       <button class="btn is-block" type="button" :disabled="state.busy" @click="pickFiles">导入图片</button>
       <button class="btn is-block" type="button" :disabled="state.busy" @click="actions.loadSamples()">
-        载入示例（3 张）
+        载入示例
       </button>
       <button class="btn is-block is-ghost" type="button" :disabled="state.busy || !items.length" @click="actions.clearItems()">
         清空
