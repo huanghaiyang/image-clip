@@ -16,6 +16,7 @@ import sharp from 'sharp';
 import {
   DEFAULT_DETECT_OPTIONS,
   colorCode,
+  createMask,
   countMask,
   createMatScope,
   detectWatermark,
@@ -32,8 +33,9 @@ import {
 import { InputError, decodeRgba, readMetadata, toBuffer } from './imaging.js';
 import { getOpenCv } from './opencv.js';
 import { lamaInpaint, lamaStatus } from './lama.js';
+import { removeByBackground } from './bgsub.js';
 
-export const REMOVE_ENGINES = Object.freeze(['auto', 'unblend', 'opencv', 'lama']);
+export const REMOVE_ENGINES = Object.freeze(['auto', 'unblend', 'bgsub', 'opencv', 'lama']);
 
 export const DEFAULT_REMOVE_OPTIONS = Object.freeze({
   engine: 'auto',
@@ -97,15 +99,69 @@ async function resolveTemplateOption(options) {
   };
 }
 
+/**
+ * 大于该边长时，**检测**先降采样再跑，掩膜最后放大回原分辨率。
+ *
+ * 为什么要这么做：2720×1520 的 JPEG 里，白底上的压缩噪声会在 α-map 上产生上千个
+ * 碎片——实测单极性耗时 38s，而且碎片把"各连通域 α 一致"这条判据彻底搅乱
+ * （真水印被淹没在噪声里）。降采样相当于一次低通：噪声被抹平、笔画 α 反而更一致，
+ * 耗时也回到 1~3s。水印文字本身足够大（缩到 1400px 仍有几十像素高），不会因此漏检。
+ *
+ * 只对长边 > 1400 的图生效，所以小图（含全部回归用例）的检测结果完全不变。
+ */
+const DETECT_MAX_EDGE = 1400;
+
 /** 检测：图片字节 → { mask, boxes, ... } */
 export async function analyzeWatermark(buffer, options = {}) {
   const resolved = await resolveTemplateOption(options);
   const opts = detectOptionsFrom(resolved);
   const cv = await getOpenCv();
   const { data, width, height } = await decodeRgba(buffer);
-  const image = { width, height, data };
-  const result = detectWatermark(cv, image, opts);
-  return { ...result, width, height };
+  const longEdge = Math.max(width, height);
+
+  if (longEdge <= DETECT_MAX_EDGE) {
+    const result = detectWatermark(cv, { width, height, data }, opts);
+    return { ...result, width, height };
+  }
+
+  const scale = DETECT_MAX_EDGE / longEdge;
+  const smallW = Math.max(1, Math.round(width * scale));
+  const smallH = Math.max(1, Math.round(height * scale));
+  const { data: smallData } = await sharp(Buffer.from(data), { raw: { width, height, channels: 4 } })
+    .resize(smallW, smallH, { kernel: 'lanczos3' })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const small = detectWatermark(cv, { width: smallW, height: smallH, data: new Uint8ClampedArray(smallData) }, opts);
+
+  // 掩膜放回原尺寸；顺带 +1px 膨胀，补偿降采样把细笔画边界磨掉的半个像素
+  const bigMask = createMask(width, height);
+  const inv = 1 / scale;
+  for (let y = 0; y < height; y += 1) {
+    const sy = Math.min(smallH - 1, Math.floor(y * scale));
+    for (let x = 0; x < width; x += 1) {
+      if (small.mask.data[sy * smallW + Math.min(smallW - 1, Math.floor(x * scale))] > 127) {
+        bigMask.data[y * width + x] = 255;
+      }
+    }
+  }
+  const boxes = (small.boxes ?? []).map((b) => ({
+    x: Math.round(b.x * inv),
+    y: Math.round(b.y * inv),
+    width: Math.max(1, Math.round(b.width * inv)),
+    height: Math.max(1, Math.round(b.height * inv)),
+    score: b.score,
+    source: b.source,
+  }));
+
+  return {
+    ...small,
+    mask: dilateMask(bigMask, 1),
+    boxes,
+    width,
+    height,
+    downscaled: { detectWidth: smallW, detectHeight: smallH, scale: Number(scale.toFixed(4)) },
+  };
 }
 
 /** 掩膜 → 灰度 PNG（UI 显示与回传都用它）。 */

@@ -27,9 +27,34 @@ const METHOD_LABELS = {
 const ENGINE_LABELS = {
   auto: { label: '自动' },
   unblend: { label: 'Unblend' },
+  bgsub: { label: '背景替代' },
   opencv: { label: 'OpenCV' },
   lama: { label: 'LaMa' },
 };
+
+/**
+ * 水印极性。
+ *
+ * 这不是可有可无的高级选项：白底上的浅灰角标（「豆包AI生成」这类）在亮极性下
+ * α 是欠定的（近白背景没有"还能再亮多少"的余量），必须切到暗色才测得出来。
+ */
+const polarities = [
+  {
+    value: 'auto',
+    label: '自动',
+    hint: '先按亮水印（白/浅色）检测；只有它拿不出可信结果时才回退到暗极性。',
+  },
+  {
+    value: 'bright',
+    label: '亮色',
+    hint: '强制按「叠加了白色/浅色」来测：白水印、浅色 logo。',
+  },
+  {
+    value: 'dark',
+    label: '暗色',
+    hint: '强制按「叠加了灰/黑色」来测：白底浅灰角标（如「豆包AI生成」）用这一档。',
+  },
+];
 
 const COLOR_OPTIONS = [
   { value: 'auto', label: '自动' },
@@ -153,6 +178,15 @@ async function pickTemplate() {  const input = document.createElement('input');
           @update:model-value="actions.setOption('method', $event)"
         />
         <p class="muted note">{{ methods.find((m) => m.value === state.options.method)?.hint }}</p>
+
+        <p class="field-label">水印极性</p>
+        <SegmentedControl
+          block
+          :model-value="state.options.polarity"
+          :options="polarities"
+          @update:model-value="actions.setOption('polarity', $event)"
+        />
+        <p class="muted note">{{ polarities.find((p) => p.value === state.options.polarity)?.hint }}</p>
 
         <div v-if="state.options.method === 'template'" class="template-row">
           <button class="btn is-block" type="button" @click="pickTemplate">

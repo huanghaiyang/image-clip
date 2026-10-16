@@ -72,6 +72,9 @@ const state = reactive({
     dilate: 2,
     minArea: 24,
     maxCoverage: 0.6,
+    // 水印极性：auto = 先亮后暗（亮极性仅在拿不出可信结果时才回退暗极性）。
+    // 白底浅灰角标这类必须显式选 dark 才能测出来。
+    polarity: 'auto',
     engine: 'auto',
     watermarkColor: 'auto',
     inpaintRadius: 6,
@@ -126,6 +129,7 @@ function optionSnapshot() {
   return {
     method: o.method,
     sensitivity: o.sensitivity,
+    polarity: o.polarity,
     dilate: o.dilate,
     minArea: o.minArea,
     maxCoverage: o.maxCoverage,

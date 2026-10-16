@@ -30,7 +30,7 @@ export const WATERMARK_ENDPOINTS = {
 
 /** 契约里固定的枚举值，集中一处便于与后端对照。 */
 export const DETECT_METHODS = ['auto', 'overlay', 'periodic', 'template'];
-export const REMOVE_ENGINES = ['auto', 'unblend', 'opencv', 'lama'];
+export const REMOVE_ENGINES = ['auto', 'unblend', 'bgsub', 'opencv', 'lama'];
 
 // ------------------------------------------------------------- 服务端调用
 
@@ -97,6 +97,8 @@ export async function detectWatermark(image, options = {}) {
     dilate: options.dilate,
     minArea: options.minArea,
     maxCoverage: options.maxCoverage,
+    // 极性：白底上的浅灰角标要靠"暗极性"才能测出来（亮极性在近白背景上 α 欠定）
+    polarity: options.polarity,
   };
 
   let res;
@@ -137,7 +139,7 @@ export async function removeWatermark(image, options = {}, maskDataUrl = '') {
     feather: options.feather,
     format: options.format,
     quality: options.format === 'png' ? undefined : options.quality,
-    // 检测阶段的先验：让服务端能正确选择"反混合"而不是退化成昂贵的修补
+    // 检测阶段的先验：让服务端能正确选择引擎（反混合/背景替代/修补）
     alphaHint: options.alphaHint,
     polarity: options.polarity,
   });
