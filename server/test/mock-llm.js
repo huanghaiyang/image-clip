@@ -83,6 +83,7 @@ export async function startMockLlm({ host = '127.0.0.1', port = 0, script = [] }
       queue = [...next];
     },
     async close() {
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     },
   };

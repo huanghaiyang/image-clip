@@ -17,7 +17,7 @@ import path from 'node:path';
 
 import createApp from '../src/index.js';
 import { createLlmRouter } from '../src/llm/routes.js';
-import { getProvider, listProviders, saveSettings, setActiveProvider, updateProvider, loadSettings } from '../src/llm/providers.js';
+import { getProvider, listProviders, saveSettings, setActiveProvider, updateProvider, loadSettings, settingsPath } from '../src/llm/providers.js';
 import { startMockLlm } from './mock-llm.js';
 
 const SAMPLE = path.resolve(import.meta.dirname, '../../samples/蝴蝶-豆包AI水印.jpg');
@@ -54,15 +54,20 @@ async function readSse(res) {
 test('大模型接入：入口 / 切换 / 水印识别与去除 / 任意图片操作（mock 模型）', async (t) => {
   assert.ok(fs.existsSync(SAMPLE), '需要 samples/蝴蝶-豆包AI水印.jpg 作为测试素材');
 
-  // 保存原始设置，测试结束后恢复（避免污染本地配置）
-  const original = JSON.parse(JSON.stringify(loadSettings()));
+  // 保存原始设置文件（字节级），测试结束后原样恢复或删掉 —— 避免污染本地配置。
+  // 只靠 saveSettings(loadSettings()) 不够：loadSettings 有进程内缓存，一旦被改过就恢复不干净。
+  const settingsFile = settingsPath();
+  const originalSettingsBytes = fs.existsSync(settingsFile) ? fs.readFileSync(settingsFile) : null;
   const mock = await startMockLlm();
   const app = createApp();
   const server = await listen(app);
   const base = baseOf(server);
 
   t.after(async () => {
-    saveSettings(original);
+    if (originalSettingsBytes) fs.writeFileSync(settingsFile, originalSettingsBytes);
+    else fs.rmSync(settingsFile, { force: true });
+    // undici 的 keep-alive 连接会让 server.close() 一直等下去，先强制断开
+    server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
     await mock.close();
   });

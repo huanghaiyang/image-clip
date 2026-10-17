@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const ROOT = path.resolve(import.meta.dirname, '../..');
+const ROOT = path.resolve(import.meta.dirname, '../../..');
 const DATA_DIR = path.join(ROOT, 'data');
 const SETTINGS_FILE = path.join(DATA_DIR, 'llm.json');
 
