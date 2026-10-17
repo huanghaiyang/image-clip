@@ -524,3 +524,23 @@ npm run llm:serve                          # 起 OpenAI 兼容侧车（127.0.0.1
 
 - 默认提供方全部指向 `127.0.0.1`；**只有显式切到"云端"提供方时图片才会离开本机**（UI 上标 ⚠️云端）。
 - 对话 artifact 落在 `data/artifacts/`（gitignore，本地磁盘），可用 `save_artifact` 导出到 `data/exports/`。
+
+### 6.7 GPU（DirectML）默认开启
+
+本机有 RTX 3060 Laptop（6GB 显存）、驱动 616.92、CUDA Toolkit 12.2。ONNX 推理默认走
+**DirectML**（onnxruntime-node 自带 `dml` 后端，**无需额外下载**），失败自动回退 CPU：
+
+| 项目 | CPU | DirectML | 说明 |
+|---|---|---|---|
+| YOLO 水印框推理 | 596ms（中位） | **54ms（11×）** | 受控 A/B 各 3 次 |
+| 门控检测端到端 | 8019ms | 7297ms | 模型只占一小部分，大头是 α-map |
+| 纯统计检测端到端 | 3172ms | 3095ms | 无模型参与，符合预期 |
+
+- 环境变量 `ORT_PROVIDERS` 可强制（`cpu` / `dml,cpu`）；默认 `dml,cpu`。
+- **LaMa 仍是 CPU 默认**：实测 DirectML 在 LaMa 的 FFC/RTTN MatMul 上会报
+  `E_INVALIDARG`（见 server/src/lama.js 文件头）；需要试验时设 `IMAGE_CLIP_LAMA_EP=dml`。
+- 端到端提升有限的根因：α-map / 形态学在 OpenCV.js(WASM/CPU) 里，要更快得换 WebGL/WebGPU
+  或把检测也搬到 ONNX —— 属于另一项工作。
+- 大模型（DeepSeek-VL2）目前仍跑 CPU：venv 里的 torch 是 `+cpu` 轮子（当初为导出 ONNX 装的）。
+  上 GPU 需换 `torch+cu121`（2.27GB）并解决显存：权重 6.4GB > 6GB 显存，需要 4-bit 量化或
+  offload；换 2B 级视觉模型（如 Qwen2-VL-2B）则可直接放显存。

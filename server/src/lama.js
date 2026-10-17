@@ -16,6 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createSession } from './ort.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const MODEL_FILES = ['lama_fp32.onnx', 'lama.onnx'];
@@ -71,11 +72,13 @@ export function getLamaSession() {
     }
     const ort = (await import('onnxruntime-node')).default;
     const requested = process.env.IMAGE_CLIP_LAMA_EP || 'cpu';
-    const providers = requested === 'cpu' ? ['cpu'] : [requested, 'cpu'];
-    const session = await ort.InferenceSession.create(modelPath, {
-      executionProviders: providers,
-      graphOptimizationLevel: 'all',
-    });
+    // 这个模型默认**必须 CPU**：实测 DirectML 在 LaMa 的 FFC/RTTN MatMul 上会报
+    // E_INVALIDARG（见文件头的说明）。只有显式 IMAGE_CLIP_LAMA_EP=dml 时才尝试，失败由
+    // createSession 自动回退到 CPU。
+    const providers = requested === 'dml' ? ['dml', 'cpu'] : ['cpu'];
+    const { session } = requested === 'dml'
+      ? await createSession(ort, modelPath, { graphOptimizationLevel: 'all' })
+      : { session: await ort.InferenceSession.create(modelPath, { executionProviders: providers, graphOptimizationLevel: 'all' }) };
     return { ort, session, modelPath, providers };
   })().catch((err) => {
     sessionPromise = null; // 失败不缓存，下次可重试

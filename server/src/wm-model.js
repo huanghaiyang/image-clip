@@ -17,6 +17,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { createSession } from './ort.js';
 
 /** 默认输入边长（与导出脚本一致）。 */
 const DEFAULT_IMGSZ = 640;
@@ -55,8 +56,8 @@ async function getSession() {
       const status = wmModelStatus();
       if (!status.available) throw new Error(status.reason);
       const ort = (await import('onnxruntime-node')).default;
-      const providers = (process.env.ORT_PROVIDERS || 'cpu').split(',').map((s) => s.trim()).filter(Boolean);
-      const session = await ort.InferenceSession.create(status.path, { executionProviders: providers });
+      // 默认尝试 DirectML（GPU），失败自动回退 CPU —— 见 server/src/ort.js
+      const { session, providers } = await createSession(ort, status.path);
       const input = session.inputNames?.[0] ?? 'images';
       const shape = session.inputMetadata?.[input]?.dimensions ?? [];
       const imgsz = Number(shape[2]) || DEFAULT_IMGSZ;

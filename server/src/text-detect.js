@@ -22,6 +22,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { createSession } from './ort.js';
 
 /** DBNet 要求输入边长为 32 的倍数。 */
 const ALIGN = 32;
@@ -62,8 +63,8 @@ async function getSession() {
       const status = textModelStatus();
       if (!status.available) throw new Error(status.reason);
       const ort = (await import('onnxruntime-node')).default;
-      const providers = (process.env.ORT_PROVIDERS || 'cpu').split(',').map((s) => s.trim()).filter(Boolean);
-      const session = await ort.InferenceSession.create(status.path, { executionProviders: providers });
+      // 默认尝试 DirectML（GPU），失败自动回退 CPU —— 见 server/src/ort.js
+      const { session, providers } = await createSession(ort, status.path);
       return { session, input: session.inputNames[0], output: session.outputNames[0] };
     })().catch((err) => {
       sessionPromise = null; // 失败不缓存，装好模型后可以重试
