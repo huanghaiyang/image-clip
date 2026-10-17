@@ -44,6 +44,7 @@ import { opencvStatus } from './opencv.js';
 import { lamaStatus } from './lama.js';
 import { textModelStatus } from './text-detect.js';
 import { wmModelStatus } from './wm-model.js';
+import { createLlmRouter } from './llm/routes.js';
 import { DETECT_METHODS, DEFAULT_DETECT_OPTIONS } from '../../shared/watermark/detect.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -312,6 +313,9 @@ export function createApp() {
       next(err);
     }
   });
+
+  // 大模型接入（提供方注册、对话、工具调用）。放在静态资源之前挂载。
+  app.use('/api/llm', createLlmRouter());
 
   // 生产模式：`npm run build` 之后由同一个 Node 进程托管前端产物。
   app.use(express.static(WEB_DIST, { index: false, fallthrough: true }));

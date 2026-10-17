@@ -11,3 +11,6 @@ probe-out/
 models/
 *.onnx
 *.onnx.part
+
+# 运行时数据：大模型设置（含 API key）、对话 artifact、导出文件
+data/

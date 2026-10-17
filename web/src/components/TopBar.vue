@@ -4,12 +4,14 @@ import { computed } from 'vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import { useWorkspace } from '../composables/useWorkspace.js';
 import { useWatermark } from '../composables/useWatermark.js';
+import { useLlmChat } from '../composables/useLlmChat.js';
 import { ENGINES } from '../lib/engine.js';
 import { formatBytes } from '../lib/imaging.js';
 import { SERVER_HINT } from '../lib/watermark.js';
 
 const { state, selected, stats, actions, meta } = useWorkspace();
 const { state: watermarkState, actions: watermarkActions } = useWatermark();
+const { state: llmState, actions: llmActions } = useLlmChat();
 
 const MODES = [
   { value: 'crop', label: '透明裁剪', hint: '检测 AABB 透明区域并裁剪' },
@@ -121,6 +123,15 @@ function pickFiles() {
     </div>
 
     <div class="topbar-right">
+      <button
+        class="btn is-ghost"
+        type="button"
+        :title="llmState.providers.length ? '用自然语言操作图片（本地大模型）' : '还没有可用的模型端点'"
+        @click="llmActions.toggle()"
+      >
+        <span class="ai-dot" :class="llmState.activeError ? 'bad' : llmState.activeReachable ? 'ok' : 'idle'" />
+        AI 对话
+      </button>
       <button class="btn is-ghost is-icon" type="button" title="切换主题" @click="actions.toggleTheme()">
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
           <path

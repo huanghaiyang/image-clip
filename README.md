@@ -464,3 +464,63 @@ npm install --cache .npm-cache     # npm 不接受 .npmrc 里的相对 cache 路
 
 画布左下角会实时显示光标处的图像坐标与 RGBA（`A 0` 高亮），
 调阈值时可以直接看着 alpha 判断边界。
+
+## 7. 大模型接入（本地 DeepSeek 视觉模型 + 工具调用）
+
+### 7.1 架构：模型只做决策，像素操作全在本机
+
+```
+浏览器 ──SSE──> Node 服务 ──OpenAI 兼容 HTTP──> 模型端点
+                    │                           ├─ 本地 DeepSeek-VL2 侧车（本项目自带，127.0.0.1:11500）
+                    │                           ├─ 本机 Ollama（127.0.0.1:11434）
+                    └─ 工具执行（本机）          └─ 云端 OpenAI 兼容（⚠️图片外发，需显式切换）
+                         detect_watermark / remove_watermark / crop_transparent / resize / convert / save
+```
+
+**关键取舍**：不让模型生成像素。模型负责"看懂意图 + 决定调哪个工具 + 读出参数"，
+真正的检测/去除/裁剪/缩放都在本地算法或本地 ONNX 模型里跑。好处是：
+- 图片**不出本机**（默认端点都是 127.0.0.1）；
+- 精确度由本地算法保证，不受模型能力限制；
+- 换模型只改 `baseUrl`+`model`，其余代码零改动。
+
+### 7.2 四个能力对应的实现
+
+| 需求 | 实现 |
+|---|---|
+| 大模型接入入口 | `server/src/llm/`（providers/client/tools/agent/routes）+ 顶栏「AI 对话」按钮 → `ChatDrawer.vue` |
+| 大模型切换 | provider 注册表：`GET/PUT /api/llm/providers`、`POST /api/llm/providers/:id/activate`；设置存 `data/llm.json`（gitignore），API key 只写不读回 |
+| 水印识别与去除 | 模型调用 `detect_watermark`（method=model/yolo）→ `remove_watermark`（传 maskId）；都是本地真跑 |
+| 任意图片操作对话 | 工具集：crop_transparent / resize_image / convert_image / save_artifact / image_info / list_assets；SSE 流式展示工具轨迹 |
+
+模型能力不够时的兜底：**提示式工具调用** —— 不支持原生 function calling 的模型
+（如 DeepSeek-VL2-tiny、很多 Ollama 模型）只要按系统提示输出
+`{"tool": "...", "arguments": {...}}`，agent 就会解析并执行（见 `parsePromptedToolCall`）。
+
+### 7.3 本地 DeepSeek 视觉模型（本项目的默认端点）
+
+```bash
+node scripts/download-deepseek-vl.mjs     # 下载 deepseek-vl2-tiny（6.28GB，断点续传，modelscope→hf-mirror 双源）
+npm run llm:serve                          # 起 OpenAI 兼容侧车（127.0.0.1:11500）
+```
+
+- 权重放 `models/deepseek-vl2-tiny/`（已 gitignore，不入库）；**CPU 加载约 12~20 秒**。
+- 选型说明：`deepseek-vl-1.3b` 在镜像上 401 取不到；`vl-7b-chat`/`vl2-small` 14GB+；
+  **`deepseek-vl2-tiny`（6.28GB）是能拿到的最小 DeepSeek VL 对话模型**。
+- ⚠️ **CPU 推理很慢**：单次带图回答实测数分钟级（3B MoE + 视觉编码器）。适合"离线、不着急"的场景；
+  要交互流畅请用本机 Ollama 的小视觉模型（如 `qwen2.5vl:3b`）并把 provider 切过去。
+- 装机时踩平的兼容坑（都写在 `scripts/llm-sidecar-deepseek-vl.py` 里）：
+  1. `sentencepiece 0.2.2` 在本机 Python 3.11 上 `import` 直接**访问违例崩溃**（0xC0000005）→ 钉 `0.2.0`；
+  2. `siglip_vit.Attention.forward` **硬编码** `from xformers.ops import ...`（非条件导入），
+     CPU 没装 xformers → 注入 `F.scaled_dot_product_attention` 的等价 shim；
+  3. VL2 代码依赖 `transformers<4.47` 的旧内部 API → 钉 `transformers==4.40.2 / tokenizers==0.19.1 / huggingface-hub==0.23.5`。
+
+### 7.4 测试（不依赖真实权重）
+
+`server/test/llm.test.js` + `server/test/mock-llm.js`：用一个按脚本回复的
+**mock OpenAI 服务**跑通完整闭环 —— 入口 → 切换 → 上传 → 模型发（原生/提示式）工具调用 →
+本地真跑检测与去除 → artifact 回取 → 多轮历史。所以 CI 不需要 6.28GB 权重或 GPU。
+
+### 7.5 隐私边界
+
+- 默认提供方全部指向 `127.0.0.1`；**只有显式切到"云端"提供方时图片才会离开本机**（UI 上标 ⚠️云端）。
+- 对话 artifact 落在 `data/artifacts/`（gitignore，本地磁盘），可用 `save_artifact` 导出到 `data/exports/`。

@@ -10,6 +10,7 @@ import WatermarkPanel from './components/WatermarkPanel.vue';
 import StatusBar from './components/StatusBar.vue';
 import { useWorkspace } from './composables/useWorkspace.js';
 import { useWatermark } from './composables/useWatermark.js';
+import ChatDrawer from './components/ChatDrawer.vue';
 
 const { state, actions } = useWorkspace();
 const { state: watermarkState, actions: watermarkActions } = useWatermark();
@@ -103,6 +104,7 @@ onBeforeUnmount(() => {
       <InspectorPanel v-else />
     </main>
     <StatusBar />
+    <ChatDrawer />
   </div>
 </template>
 
