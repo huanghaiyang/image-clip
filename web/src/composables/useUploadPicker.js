@@ -12,6 +12,7 @@ import { reactive, readonly } from 'vue';
 
 import { useAudio } from './useAudio.js';
 import { useVideo } from './useVideo.js';
+import { useLibrary } from './useLibrary.js';
 
 const DEFAULTS = {
   title: '上传文件',
@@ -90,12 +91,21 @@ export function openImportPicker(mode) {
     return;
   }
 
+  // 图片工作区：统一先写入资源库，再自动加入左侧素材列表
   openUploadPicker({
     title: '导入图片',
-    description: '图片会加入左侧素材列表，不会写入资源库',
+    description: '图片会保存到资源库，并自动加入左侧素材列表',
     accept: 'image/*',
-    dest: 'workspace',
+    dest: 'library',
+    dir: '',
     actionLabel: '导入',
+    onUploaded: (entries) => {
+      const images = (entries ?? []).filter((entry) => entry.kind === 'image');
+      if (images.length) {
+        // 弹窗已完成入库，这里只负责载入素材列表，保持当前工作区不变
+        void useLibrary().actions.openInEditor(images, { mode });
+      }
+    },
   });
 }
 

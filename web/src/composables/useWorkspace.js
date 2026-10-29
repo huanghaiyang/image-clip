@@ -18,6 +18,7 @@ import {
 } from '../lib/imaging.js';
 import { analyzeWith, cropWith } from '../lib/engine.js';
 import { blobToBytes, createZip } from '../lib/zip.js';
+import { onLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
 
 let uid = 0;
 
@@ -48,6 +49,13 @@ const stats = computed(() => {
   const empty = state.items.filter((item) => item.resultEmpty).length;
   const sourceBytes = state.items.reduce((sum, item) => sum + (item.bytes || 0), 0);
   return { total, ready, empty, sourceBytes };
+});
+
+// 资源库改名 / 移动后，已载入素材的来源路径跟着更新，避免再次打开时重复导入
+onLibraryPathsMoved((moves) => {
+  for (const item of state.items) {
+    if (item.libraryPath) item.libraryPath = remapLibraryPath(item.libraryPath, moves);
+  }
 });
 
 // --------------------------------------------------------------- 内部工具
@@ -142,6 +150,8 @@ async function addOneFile(file) {
     elapsedMs: 0,
     error: '',
     detectedAt: 0,
+    /** 来源资源库路径；同一张库图片再次打开时直接选中，不重复建素材 */
+    libraryPath: '',
   });
   state.items.push(item);
   state.selectedId = item.id;
@@ -149,17 +159,25 @@ async function addOneFile(file) {
   return item;
 }
 
-export async function addFiles(fileList) {
+/**
+ * 批量导入图片文件。
+ * options.libraryPaths 与文件顺序一一对应，用于记住来源资源库路径；
+ * 返回值是本次实际建立的素材项，便于调用方继续选中 / 标记来源。
+ */
+export async function addFiles(fileList, options = {}) {
   const files = [...(fileList ?? [])].filter((file) => file && /^image\//.test(file.type || '') );
   const fallbackFiles = [...(fileList ?? [])].filter((file) => file && !/^image\//.test(file.type || ''));
   const all = [...files, ...fallbackFiles];
-  if (all.length === 0) return;
+  if (all.length === 0) return [];
 
   state.busy = true;
   state.error = '';
-  for (const file of all) {
+  const created = [];
+  for (const [index, file] of all.entries()) {
     try {
       const item = await addOneFile(file);
+      if (options.libraryPaths?.[index]) item.libraryPath = options.libraryPaths[index];
+      created.push(item);
       setStatus(`已导入 ${item.name}（${item.width}×${item.height}）`);
     } catch (err) {
       const message = err instanceof ImageDecodeError ? err.message : `无法读取「${file.name}」：${err.message}`;
@@ -167,6 +185,7 @@ export async function addFiles(fileList) {
     }
   }
   state.busy = false;
+  return created;
 }
 
 /**

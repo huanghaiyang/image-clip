@@ -14,17 +14,67 @@
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue';
 
-import { useWorkspace } from '../composables/useWorkspace.js';
 import { useCropTool } from '../composables/useCropTool.js';
 import { useStageViewport } from '../composables/useStageViewport.js';
 import { clampRect } from '@shared/selection.js';
 
-const { selected } = useWorkspace();
-const { state, actions } = useCropTool();
+const { state, actions, activeItem, atlasItems, atlasCount, atlasIndex, normalizedRect } = useCropTool();
 const { container, baseEl, view, frameStyle, displayWidth, displayHeight, zoomPercent, setImage, zoomIn, zoomOut, resetView, toImage, frameOrigin } = useStageViewport();
 
 const overlayEl = ref(null);
-const item = computed(() => selected.value ?? null);
+// 图集模式下当前项 = 当前层，否则跟随左侧素材选中
+const item = computed(() => activeItem.value ?? null);
+const atlasEnabled = computed(() => state.atlas.enabled);
+
+/**
+ * 纸叠效果：当前层底下露出的几张“纸”（循环取前面几层）。
+ * 只是视觉层叠，真正的层切换在右侧层条里。
+ */
+const paperLayers = computed(() => {
+  if (!atlasEnabled.value) return [];
+  const list = atlasItems.value;
+  const count = list.length;
+  if (count < 2) return [];
+  const show = Math.min(3, count - 1);
+  const papers = [];
+  for (let i = show; i >= 1; i -= 1) {
+    const layer = list[(atlasIndex.value - i + count) % count];
+    papers.push({
+      id: layer.id,
+      src: layer.thumbnail,
+      name: layer.name,
+      style: {
+        transform: `translate(${i * 7}px, ${i * 9}px) rotate(${i % 2 ? 1.6 : -1.2}deg)`,
+        zIndex: i,
+      },
+    });
+  }
+  return papers;
+});
+
+/**
+ * 右侧层条：每一层按当前归一化裁剪框裁出预览缩略图。
+ * 用 CSS 百分比定位模拟裁切（img 放大到 1/nw 倍再平移），不用逐张生成位图。
+ */
+const layerThumbs = computed(() => {
+  if (!atlasEnabled.value) return [];
+  const norm = normalizedRect.value;
+  const nw = Math.max(0.0001, norm.width);
+  const nh = Math.max(0.0001, norm.height);
+  return atlasItems.value.map((layer, index) => ({
+    id: layer.id,
+    index,
+    name: layer.name,
+    src: layer.thumbnail,
+    aspect: (nw * layer.width) / Math.max(1e-6, nh * layer.height),
+    imgStyle: {
+      width: `${100 / nw}%`,
+      height: `${100 / nh}%`,
+      left: `${(-norm.x / nw) * 100}%`,
+      top: `${(-norm.y / nh) * 100}%`,
+    },
+  }));
+});
 
 /** 指针拖动状态：null 表示没在拖。 */
 let drag = null;
@@ -325,7 +375,8 @@ watch(
       return;
     }
     actions.syncCrop();
-    setImage(current.width, current.height);
+    // 图集模式切层时保持缩放与平移，翻看效果才连贯
+    setImage(current.width, current.height, { reset: !state.atlas.enabled });
     await nextTick();
     drawBase();
     scheduleOverlay();
@@ -351,12 +402,28 @@ watchEffect(() => {
 
 onMounted(() => {
   window.addEventListener('resize', scheduleOverlay);
+  window.addEventListener('keydown', onLayerKeydown);
 });
 
 onBeforeUnmount(() => {
   if (overlayFrame) cancelAnimationFrame(overlayFrame);
   window.removeEventListener('resize', scheduleOverlay);
+  window.removeEventListener('keydown', onLayerKeydown);
 });
+
+/** 图集模式下用方向键翻层（不在输入框中时）。 */
+function onLayerKeydown(event) {
+  if (!state.atlas.enabled) return;
+  const target = event.target;
+  if (target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+  if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+    event.preventDefault();
+    actions.stepLayer(1);
+  } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+    event.preventDefault();
+    actions.stepLayer(-1);
+  }
+}
 
 function onWheel(event) {
   if (!item.value) return;
@@ -392,20 +459,55 @@ function zoomBy(factor) {
         @pointercancel="onPointerUp"
         @pointerleave="hoverHandle = ''"
       >
-        <canvas ref="baseEl" class="base" :width="item.width" :height="item.height" />
+        <!-- 图集模式：底下几张“纸”从当前层后面露出来 -->
+        <div v-for="paper in paperLayers" :key="paper.id" class="paper" :style="paper.style" :title="paper.name">
+          <img :src="paper.src" :alt="paper.name" draggable="false" />
+        </div>
+        <canvas ref="baseEl" class="base" :class="{ 'is-top': atlasEnabled }" :width="item.width" :height="item.height" />
       </div>
 
       <canvas ref="overlayEl" class="overlay" />
+
+      <!-- 图集模式：右侧层条，逐层预览裁切效果 -->
+      <div v-if="atlasEnabled" class="layer-strip">
+        <div class="layer-strip-head mono">{{ atlasIndex + 1 }}/{{ atlasCount }}</div>
+        <div class="layer-list">
+          <button
+            v-for="thumb in layerThumbs"
+            :key="thumb.id"
+            class="layer-thumb"
+            :class="{ 'is-active': thumb.index === atlasIndex }"
+            type="button"
+            :title="`${thumb.index + 1}. ${thumb.name}`"
+            @click="actions.setAtlasLayer(thumb.index)"
+          >
+            <span class="layer-clip" :style="{ aspectRatio: String(thumb.aspect) }">
+              <img :src="thumb.src" :alt="thumb.name" :style="thumb.imgStyle" draggable="false" />
+            </span>
+            <span class="layer-index mono">{{ thumb.index + 1 }}</span>
+          </button>
+        </div>
+      </div>
 
       <div class="hud">
         <button class="hud-btn" type="button" title="缩小" @click="zoomOut">−</button>
         <span class="hud-zoom mono">{{ zoomPercent }}%</span>
         <button class="hud-btn" type="button" title="放大" @click="zoomIn">+</button>
         <button class="hud-btn is-text" type="button" title="适合窗口" @click="resetView">适合</button>
+        <button
+          class="hud-btn is-text"
+          :class="{ 'is-on': atlasEnabled }"
+          type="button"
+          title="图集模式：素材像纸一样叠加，统一裁剪框，逐层查看效果"
+          @click="actions.toggleAtlas()"
+        >
+          图集
+        </button>
       </div>
 
       <div class="stage-hint muted">
-        拖动边角调整裁剪框 · 框外拖动重新拉框 · 滚轮缩放
+        <template v-if="atlasEnabled">图集模式 · ←/→ 或点击右侧层条翻看每一层 · 拖动调整统一裁剪框</template>
+        <template v-else>拖动边角调整裁剪框 · 框外拖动重新拉框 · 滚轮缩放</template>
       </div>
     </template>
   </section>
@@ -476,6 +578,130 @@ function zoomBy(factor) {
   height: 100%;
 }
 
+/* 图集模式：顶层的“纸”要有自己的投影，和底下的纸区分开；
+   背景沿用棋盘格，透明 PNG 的透明区不会变成纯白。 */
+.base.is-top {
+  position: relative;
+  z-index: 10;
+  background-image: linear-gradient(45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--checker-b) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--checker-b) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-color: var(--checker-a);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.paper {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background-image: linear-gradient(45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--checker-b) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--checker-b) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-color: var(--checker-a);
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.28);
+}
+
+.paper img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+}
+
+/* 右侧层条：逐层裁切预览 */
+.layer-strip {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  bottom: 48px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  width: 92px;
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+  overflow: hidden;
+}
+
+.layer-strip-head {
+  flex: none;
+  padding: 6px 0 4px;
+  text-align: center;
+  color: #fff;
+  font-size: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.layer-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.layer-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.layer-thumb:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.layer-thumb.is-active {
+  border-color: var(--accent);
+  background: rgba(13, 153, 255, 0.18);
+}
+
+.layer-clip {
+  position: relative;
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 2px;
+  background-image: linear-gradient(45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--checker-b) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--checker-b) 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+  background-color: var(--checker-a);
+}
+
+.layer-clip img {
+  position: absolute;
+  max-width: none;
+  max-height: none;
+}
+
+.layer-index {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 9px;
+  line-height: 14px;
+}
+
 .overlay {
   position: absolute;
   inset: 0;
@@ -506,6 +732,11 @@ function zoomBy(factor) {
 
 .hud-btn:hover {
   background: rgba(255, 255, 255, 0.16);
+}
+
+.hud-btn.is-on {
+  background: var(--accent);
+  color: #fff;
 }
 
 .hud-zoom {

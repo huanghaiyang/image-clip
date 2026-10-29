@@ -5,13 +5,16 @@
  * 交互约定：
  *  - 单击选中（Ctrl/Cmd 追加选择），双击打开（文件夹进入 / 图片预览 / 视频或音频切到对应工作区）；
  *  - 预览层支持 ← → 翻页、Esc 关闭；
- *  - 右键不处理，所有批量操作都在右侧检查器里。
+ *  - 改名入口：卡片 / 树形行上的 ✎ 打开全局重命名弹窗，右侧检查器也可改名；
+ *  - 右键不处理，批量操作都在右侧检查器里。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 import { useLibrary } from '../composables/useLibrary.js';
+import { useWorkspace } from '../composables/useWorkspace.js';
 import { useVideo } from '../composables/useVideo.js';
 import { useAudio } from '../composables/useAudio.js';
+import { useRenamePrompt } from '../composables/useRenamePrompt.js';
 import { setMode } from '../composables/useAppMode.js';
 import { formatDuration, formatSize, libraryFileUrl, libraryThumbUrl } from '../lib/library.js';
 import { buildResourceTree, flattenResourceTree } from '../lib/resourceTree.js';
@@ -31,8 +34,10 @@ const {
   previewList,
   actions,
 } = useLibrary();
-const { actions: videoActions } = useVideo();
-const { actions: audioActions } = useAudio();
+const { actions: videoActions, state: videoState } = useVideo();
+const { actions: audioActions, state: audioState } = useAudio();
+const { selected: workspaceSelected } = useWorkspace();
+const { actions: renameActions } = useRenamePrompt();
 
 const KIND_FILTERS = [
   { value: 'all', label: '全部' },
@@ -53,6 +58,15 @@ const KIND_ICON = { image: '▣', video: '▶', audio: '♪', file: '▤' };
 const failedThumbs = ref(new Set());
 const previewError = ref(false);
 const trashOpen = ref(false);
+
+/** 正在编辑的资源：图片工作区当前素材的来源 + 视频/音频当前打开的文件。 */
+const editingPaths = computed(() => {
+  const paths = new Set();
+  if (workspaceSelected.value?.libraryPath) paths.add(workspaceSelected.value.libraryPath);
+  if (videoState.activePath) paths.add(videoState.activePath);
+  if (audioState.activePath) paths.add(audioState.activePath);
+  return paths;
+});
 
 const selectedSet = computed(() => new Set(state.selected));
 const totalVisible = computed(() => currentFolders.value.length + currentEntries.value.length);
@@ -159,6 +173,11 @@ async function openAudio(entry) {
 
 function onThumbError(path) {
   failedThumbs.value = new Set([...failedThumbs.value, path]);
+}
+
+/** 卡片 / 树形行上的快捷入口：打开全局重命名弹窗。 */
+function startRename(item, isFolder = false) {
+  renameActions.open(item, isFolder);
 }
 
 function thumbOf(entry) {
@@ -278,13 +297,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
           <span class="folder-icon">▸</span>
           <span class="card-name" :title="folder.name">{{ folder.name }}</span>
           <span class="card-meta">文件夹</span>
+          <span
+            class="folder-rename"
+            role="button"
+            title="重命名文件夹"
+            @click.stop="startRename(folder, true)"
+            @dblclick.stop
+            >✎</span
+          >
         </button>
 
         <button
           v-for="entry in currentEntries"
           :key="entry.path"
           class="card"
-          :class="{ 'is-selected': selectedSet.has(entry.path) }"
+          :class="{ 'is-selected': selectedSet.has(entry.path), 'is-editing': editingPaths.has(entry.path) }"
           type="button"
           :title="entry.path"
           @click="select($event, entry)"
@@ -300,7 +327,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
             />
             <span v-else class="thumb-icon">{{ KIND_ICON[entry.kind] ?? '▤' }}</span>
             <span v-if="entrySize(entry)" class="badge-size mono">{{ entrySize(entry) }}</span>
+            <span v-if="editingPaths.has(entry.path)" class="badge-editing">编辑中</span>
             <span v-if="entry.kind === 'video'" class="badge-video">▶</span>
+            <span
+              class="thumb-rename"
+              role="button"
+              title="重命名文件"
+              @click.stop="startRename(entry)"
+              @dblclick.stop
+              >✎</span
+            >
           </span>
           <span class="card-name" :title="entry.name">{{ entry.name }}</span>
           <span class="card-meta mono">{{ entryMeta(entry) }}</span>
@@ -337,13 +373,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
               />
             </svg>
             <span class="tree-row-name">{{ row.name }}</span>
+            <span
+              class="row-rename"
+              role="button"
+              title="重命名文件夹"
+              @click.stop="startRename(row, true)"
+              @dblclick.stop
+              >✎</span
+            >
             <span class="tree-row-count mono">{{ row.count }}</span>
           </button>
 
           <button
             v-else
             class="tree-row is-file"
-            :class="{ 'is-selected': selectedSet.has(row.path) }"
+            :class="{ 'is-selected': selectedSet.has(row.path), 'is-editing': editingPaths.has(row.path) }"
             type="button"
             :title="row.path"
             :style="{ paddingLeft: `${8 + row.depth * 16 + 14}px` }"
@@ -364,6 +408,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
               <span class="tree-row-name">{{ row.name }}</span>
               <span class="tree-row-meta mono">{{ entryMeta(row.entry) }}</span>
             </span>
+            <span v-if="editingPaths.has(row.path)" class="edit-flag">编辑中</span>
+            <span
+              class="row-rename"
+              role="button"
+              title="重命名文件"
+              @click.stop="startRename(row.entry)"
+              @dblclick.stop
+              >✎</span
+            >
           </button>
         </template>
       </div>
@@ -754,6 +807,37 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
   font-size: 9px;
 }
 
+/* 正在编辑：卡片/树形行上的蓝色徽标，区别于多选高亮 */
+.badge-editing {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9px;
+  line-height: 14px;
+}
+
+.card.is-editing {
+  border-color: rgba(13, 153, 255, 0.7);
+}
+
+.tree-row.is-editing {
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+.edit-flag {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9px;
+  line-height: 14px;
+}
+
 .card-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -768,6 +852,57 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
   white-space: nowrap;
   color: var(--text-muted);
   font-size: 9px;
+}
+
+/* 卡片 / 树形行上的重命名快捷入口：常驻但低调，悬停放大可点区域 */
+.folder-rename,
+.row-rename {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.55;
+  cursor: pointer;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.folder-rename:hover,
+.row-rename:hover {
+  opacity: 1;
+  background: var(--panel-3);
+  color: var(--accent);
+}
+
+.thumb-rename {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.6;
+  cursor: pointer;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+
+.card:hover .thumb-rename {
+  opacity: 1;
+}
+
+.thumb-rename:hover {
+  background: var(--accent);
+  opacity: 1;
 }
 
 .placeholder {

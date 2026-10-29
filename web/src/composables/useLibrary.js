@@ -23,6 +23,7 @@ import {
 } from '../lib/library.js';
 import { useWorkspace } from './useWorkspace.js';
 import { setMode } from './useAppMode.js';
+import { movesFromResults, notifyLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
 
 const EMPTY_STATS = { files: 0, folders: 0, images: 0, videos: 0, audios: 0, bytes: 0, truncated: false };
 
@@ -188,6 +189,21 @@ function baseOf(name) {
 
 function failedCount(result) {
   return Math.max(0, Number(result?.total ?? 0) - Number(result?.succeeded ?? 0));
+}
+
+/**
+ * 改名 / 移动成功后同步前端关联状态：
+ * 选中项、当前目录、预览路径都可能位于被改名的文件或文件夹之下。
+ * 必须在 refreshLibrary 之前调用，否则旧路径会先被“清理选中”过滤掉。
+ */
+function applyPathMoves(results) {
+  const moves = movesFromResults(results);
+  if (!moves.length) return [];
+  state.selected = [...new Set(state.selected.map((path) => remapLibraryPath(path, moves)))];
+  state.currentDir = remapLibraryPath(state.currentDir, moves);
+  state.previewPath = remapLibraryPath(state.previewPath, moves);
+  notifyLibraryPathsMoved(moves);
+  return moves;
 }
 
 // --------------------------------------------------------------- 动作
@@ -395,8 +411,11 @@ export async function renameOne(entry, name) {
       const first = result.results?.find((item) => item.ok === false);
       throw new LibraryApiError(first?.error || '重命名失败', 'RENAME_FAILED');
     }
+    // 文件夹改名时，选中项 / 当前目录 / 预览路径可能都在它下面
+    const moves = applyPathMoves(result.results);
     await refreshLibrary({ quiet: true });
-    setStatus(`已重命名为 ${target}`);
+    const finalName = moves[0]?.to?.split('/').pop() || target;
+    setStatus(`已重命名为 ${finalName}`);
     return true;
   } catch (err) {
     setError(`重命名失败：${err.message}`);
@@ -423,8 +442,10 @@ export function buildBatchNames(list, config) {
   const withNumber = Boolean(config?.withNumber);
 
   return list.map((entry, index) => {
-    const ext = extensionOf(entry.name);
-    let base = baseOf(entry.name);
+    // 文件夹没有扩展名概念：整名当主体，避免把 "v1.2" 拆成主体 + ".2"
+    const isFolder = !entry.kind;
+    const ext = isFolder ? '' : extensionOf(entry.name);
+    let base = isFolder ? String(entry.name) : baseOf(entry.name);
     if (mode === 'sequence') {
       base = `${prefix}${String(start + index).padStart(padding, '0')}${suffix}`;
     } else {
@@ -441,7 +462,7 @@ export function previewBatchRename(config, list = selectedEntries.value) {
   const rows = buildBatchNames(list, config);
   const seen = new Map();
   return rows.map(({ entry, name }) => {
-    const key = `${entry.dir}/${name.toLowerCase()}`;
+    const key = `${entry.dir ?? entry.parent ?? ''}/${name.toLowerCase()}`;
     const duplicate = seen.has(key);
     seen.set(key, true);
     return { entry, name, duplicate };
@@ -457,11 +478,11 @@ export async function batchRename(config, list = selectedEntries.value) {
   state.busy = true;
   try {
     const result = await renameLibraryItems(rows.map(({ entry, name }) => ({ path: entry.path, name })));
+    applyPathMoves(result.results);
     await refreshLibrary({ quiet: true });
-    state.selected = [];
     const failed = failedCount(result);
     if (failed) setError(`批量改名部分失败：${failed} 项`);
-    else setStatus(`已批量重命名 ${rows.length} 个文件`);
+    else setStatus(`已批量重命名 ${rows.length} 项`);
     return result.ok;
   } catch (err) {
     setError(`批量改名失败：${err.message}`);
@@ -479,6 +500,8 @@ export async function moveSelected(targetDir) {
   state.busy = true;
   try {
     const result = await moveLibraryItems([...state.selected], targetDir ?? '');
+    // 若移动的是当前目录（或它的上级），把目录与预览路径一起迁到新位置
+    applyPathMoves(result.results);
     await refreshLibrary({ quiet: true });
     state.selected = [];
     const failed = failedCount(result);
@@ -614,19 +637,31 @@ export async function openInEditor(entryOrPath, options = {}) {
 
   state.busy = true;
   try {
+    const workspace = useWorkspace();
+    // 同一张资源库图片只建立一个工作素材，重复点击直接选中已有素材
+    const pending = images.filter(
+      (entry) => !workspace.state.items.some((item) => item.libraryPath === entry.path),
+    );
     const files = [];
-    for (const entry of images) {
+    for (const entry of pending) {
       const blob = await fetchLibraryBlob(entry);
       files.push(new File([blob], entry.name, { type: blob.type || 'image/png' }));
     }
-    const workspace = useWorkspace();
-    await workspace.actions.addFiles(files);
-    const targetMode = images.length > 1 ? 'cropimage' : options.mode || 'crop';
+    if (files.length) {
+      await workspace.actions.addFiles(files, { libraryPaths: pending.map((entry) => entry.path) });
+    } else {
+      const existing = workspace.state.items.find((item) => item.libraryPath === images[0].path);
+      if (existing) workspace.actions.selectItem(existing.id);
+    }
+    // options.mode 优先：从图片模块的素材库载入时保持当前工作区，不被强制切走
+    const targetMode = options.mode || (images.length > 1 ? 'cropimage' : 'crop');
     setMode(targetMode);
     setStatus(
-      images.length > 1
-        ? `已把 ${images.length} 张图片转入图片裁剪（可直接批量裁剪）`
-        : `已将 ${images[0].name} 转入编辑工作区`,
+      files.length < images.length
+        ? `已载入 ${files.length} 张新图片，其余已在素材列表中`
+        : images.length > 1
+          ? `已把 ${images.length} 张图片转入图片裁剪（可直接批量裁剪）`
+          : `已将 ${images[0].name} 转入编辑工作区`,
     );
     return images;
   } catch (err) {

@@ -6,7 +6,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import { useWorkspace } from '../composables/useWorkspace.js';
-import { openUploadPicker } from '../composables/useUploadPicker.js';
+import { importFilesToLibrary, pickLibraryImages } from '../composables/useLibraryImport.js';
 
 const { state, selected, actions } = useWorkspace();
 
@@ -253,7 +253,7 @@ function onWheel(event) {
 function onDrop(event) {
   event.preventDefault();
   dropActive.value = false;
-  if (event.dataTransfer?.files?.length) actions.addFiles(event.dataTransfer.files);
+  if (event.dataTransfer?.files?.length) void importFilesToLibrary(event.dataTransfer.files);
 }
 
 function onDragOver(event) {
@@ -266,13 +266,7 @@ function onDragLeave() {
 }
 
 function pickFiles() {
-  openUploadPicker({
-    title: '导入图片',
-    description: '图片会加入左侧素材列表，不会写入资源库',
-    accept: 'image/*',
-    dest: 'workspace',
-    actionLabel: '导入',
-  });
+  pickLibraryImages({ title: '导入图片' });
 }
 
 // ------------------------------------------------------------- 生命周期

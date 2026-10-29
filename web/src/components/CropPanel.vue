@@ -13,7 +13,7 @@ import { useCropTool, BUILTIN_SIZES, CROP_RATIOS } from '../composables/useCropT
 import SegmentedControl from './ui/SegmentedControl.vue';
 
 const { state: workspaceState } = useWorkspace();
-const { state, actions, activeItem, outputSize, normalizedRect, canApply } = useCropTool();
+const { state, actions, activeItem, outputSize, normalizedRect, canApply, atlasCount } = useCropTool();
 
 const presetName = ref('');
 const saveToLibrary = ref(true);
@@ -74,6 +74,23 @@ function savePreset() {
       <p v-if="!activeItem" class="empty muted">请先在左侧选择一张图片。</p>
 
       <template v-else>
+        <section class="section">
+          <h3 class="section-title">图集模式</h3>
+          <label class="check-row">
+            <input type="checkbox" :checked="state.atlas.enabled" @change="actions.toggleAtlas()" />
+            <span>素材像纸一样叠加，统一裁剪框</span>
+          </label>
+          <template v-if="state.atlas.enabled">
+            <div class="atlas-row">
+              <button class="btn is-ghost" type="button" @click="actions.stepLayer(-1)">上一层</button>
+              <span class="mono atlas-pos">第 {{ state.atlas.layer + 1 }} / {{ atlasCount }} 层</span>
+              <button class="btn is-ghost" type="button" @click="actions.stepLayer(1)">下一层</button>
+            </div>
+            <p class="hint">舞台右侧层条可逐层预览裁切效果，方向键 ←/→ 也能翻层。</p>
+          </template>
+          <p v-else class="hint">适合图集 / 序列帧：一个裁剪框按相对位置作用到每张图。</p>
+        </section>
+
         <section class="section">
           <h3 class="section-title">裁剪比例</h3>
           <div class="ratio-grid">
@@ -199,9 +216,11 @@ function savePreset() {
         </section>
 
         <section class="section">
-          <h3 class="section-title">批量裁剪（{{ workspaceState.items.length }} 张）</h3>
+          <h3 class="section-title">
+            批量裁剪（{{ workspaceState.items.length }} 张）<span v-if="state.atlas.enabled" class="tag-atlas">图集</span>
+          </h3>
           <p class="hint">
-            以当前裁剪框为模板，按相对位置套用到左侧所有素材。归一化取景：
+            以{{ state.atlas.enabled ? '图集统一裁剪框' : '当前裁剪框' }}为模板，按相对位置套用到左侧所有素材。归一化取景：
             <span class="mono">{{ normalizedSummary }}</span>
           </p>
           <label class="check-row">
@@ -245,6 +264,30 @@ function savePreset() {
 
 .empty {
   padding: 14px 12px;
+}
+
+.atlas-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.atlas-pos {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.tag-atlas {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 400;
+  vertical-align: 1px;
 }
 
 .ratio-grid {

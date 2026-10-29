@@ -451,6 +451,7 @@ export function createLibrary(options = {}) {
 
     // 阶段 2：临时 → 目标
     const results = [];
+    const moved = [];
     for (const item of valid) {
       if (!item.ok || !item.tempPath) {
         results.push({ from: item.fromRel, ok: false, error: item.error ?? '重命名失败' });
@@ -461,7 +462,7 @@ export function createLibrary(options = {}) {
         await fs.rename(item.tempPath, target);
         const toRelPath = toRel(target);
         results.push({ from: item.fromRel, to: toRelPath, ok: true, name: path.basename(target) });
-        await moveVersions(item.fromRel, toRelPath);
+        moved.push({ from: item.fromRel, to: toRelPath });
       } catch (err) {
         // 尽力回滚到原名，避免文件停在临时名上
         try {
@@ -472,6 +473,10 @@ export function createLibrary(options = {}) {
         results.push({ from: item.fromRel, ok: false, error: err.message, temporary: toRel(item.tempPath) });
       }
     }
+
+    // 整批改名完成后再迁移关联索引（文件夹会连子文件一起迁移）
+    await moveVersions(moved);
+    await moveMeta(moved);
 
     const failures = prepared.filter((p) => p.ok === false && !p.fromRel);
     for (const failure of failures) results.push({ from: failure.from, ok: false, error: failure.error });
@@ -490,6 +495,7 @@ export function createLibrary(options = {}) {
     const { abs: targetDir, rel: targetRel } = resolve(targetDirRel || '');
     await fs.mkdir(targetDir, { recursive: true });
     const results = [];
+    const moved = [];
 
     for (const rel of paths) {
       try {
@@ -512,11 +518,15 @@ export function createLibrary(options = {}) {
           await fs.rm(abs, { recursive: true, force: true });
         }
         results.push({ from: rel, ok: true, to: toRel(dest), name: finalName });
-        await moveVersions(rel, toRel(dest));
+        moved.push({ from: rel, to: toRel(dest) });
       } catch (err) {
         results.push({ from: rel, ok: false, error: err.message });
       }
     }
+
+    // 移动完成后统一迁移历史版本索引与元数据缓存（文件夹会连子文件一起迁移）
+    await moveVersions(moved);
+    await moveMeta(moved);
     return results;
   }
 
@@ -641,7 +651,11 @@ export function createLibrary(options = {}) {
           await fs.rm(abs, { recursive: true, force: true });
         }
         await fs.rm(itemDir, { recursive: true, force: true });
-        results.push({ id, ok: true, path: toRel(dest), name: finalName });
+        // 恢复时如果因重名改了路径，历史版本与缓存跟着回迁
+        const restoredRel = toRel(dest);
+        await moveVersions([{ from: record.path, to: restoredRel }]);
+        await moveMeta([{ from: record.path, to: restoredRel }]);
+        results.push({ id, ok: true, path: restoredRel, name: finalName });
       } catch (err) {
         results.push({ id, ok: false, error: err.message });
       }
@@ -760,15 +774,55 @@ export function createLibrary(options = {}) {
     return entryByRel(relPath);
   }
 
-  /** 改名/移动后把历史版本索引迁到新路径，避免版本记录跟着旧路径丢失。 */
-  async function moveVersions(fromRel, toRel) {
-    if (!fromRel || !toRel || fromRel === toRel) return;
+  /**
+   * 把旧索引键映射到本次变更后的最终路径。
+   * 按「源路径」直接对应「最终路径」，而不是逐条串行改写：
+   * a.png ↔ b.png 互换时，两边的版本记录会跟着各自的文件内容互换位置。
+   * 文件夹改名/移动时取最长的前缀匹配，子文件整体迁到新目录。
+   */
+  function remapIndexKey(key, changes) {
+    let best = null;
+    for (const change of changes) {
+      if (key === change.from) return change.to;
+      if (key.startsWith(`${change.from}/`) && (!best || change.from.length > best.from.length)) best = change;
+    }
+    if (!best) return key;
+    return `${best.to}/${key.slice(best.from.length + 1)}`;
+  }
+
+  /**
+   * 改名/移动后迁移历史版本索引。
+   * 一次性处理整批变更（先算好每个旧键的最终路径再重建），
+   * 避免 a.png ↔ b.png 互换时把两边的版本记录混在一起。
+   */
+  async function moveVersions(changes) {
+    const list = (Array.isArray(changes) ? changes : [changes]).filter((item) => item?.from && item?.to && item.from !== item.to);
+    if (!list.length) return;
     await loadVersions();
-    const list = versionsIndex[fromRel];
-    if (!list) return;
-    delete versionsIndex[fromRel];
-    versionsIndex[toRel] = [...list, ...(versionsIndex[toRel] ?? [])].slice(0, MAX_VERSIONS_PER_FILE);
+    const next = {};
+    for (const key of Object.keys(versionsIndex)) {
+      const target = remapIndexKey(key, list);
+      const merged = [...(versionsIndex[key] ?? []), ...(next[target] ?? [])].sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+      next[target] = merged.slice(0, MAX_VERSIONS_PER_FILE);
+    }
+    versionsIndex = next;
     await saveVersions();
+  }
+
+  /** 元数据缓存同样按相对路径做键，改名后迁移前缀，缩略图尺寸不用重新探测。 */
+  async function moveMeta(changes) {
+    const list = (Array.isArray(changes) ? changes : [changes]).filter((item) => item?.from && item?.to && item.from !== item.to);
+    if (!list.length) return;
+    await loadMeta();
+    const next = { ...meta };
+    for (const key of Object.keys(meta)) {
+      const target = remapIndexKey(key, list);
+      if (target === key) continue;
+      delete next[key];
+      next[target] = meta[key];
+    }
+    meta = next;
+    scheduleMetaSave();
   }
 
   // ------------------------------------------------------------- 内容校验

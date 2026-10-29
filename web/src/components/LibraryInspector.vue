@@ -26,7 +26,12 @@ const RENAME_MODES = [
 ];
 
 const single = computed(() => (selectedEntries.value.length === 1 && !selectedFolders.value.length ? selectedEntries.value[0] : null));
+/** 只选中一个文件夹时也给出详情与改名入口。 */
+const singleFolder = computed(() => (selectedFolders.value.length === 1 && !selectedEntries.value.length ? selectedFolders.value[0] : null));
+const singleItem = computed(() => single.value ?? singleFolder.value);
 const firstSelected = computed(() => selectedEntries.value[0] ?? selectedFolders.value[0] ?? null);
+/** 批量改名同时支持文件与文件夹；顺序与原列表一致。 */
+const batchList = computed(() => [...selectedEntries.value, ...selectedFolders.value]);
 
 const renameName = ref('');
 const renaming = ref(false);
@@ -51,7 +56,7 @@ const config = ref({
 const moveTarget = ref('');
 
 const preview = computed(() => {
-  const list = selectedEntries.value;
+  const list = batchList.value;
   if (!list.length) return [];
   return actions.previewBatchRename(config.value, list);
 });
@@ -61,11 +66,12 @@ const changed = computed(() => preview.value.filter((row) => row.name !== row.en
 const dupCount = computed(() => preview.value.filter((row) => row.duplicate).length);
 
 watch(
-  single,
+  singleItem,
   (entry) => {
     renameName.value = entry?.name ?? '';
     renaming.value = false;
-    void loadVersions(entry);
+    // 历史版本只属于文件，文件夹选中时不必请求
+    void loadVersions(single.value);
   },
   { immediate: true },
 );
@@ -125,7 +131,7 @@ function mtimeText(value) {
 }
 
 async function submitRename() {
-  const entry = single.value;
+  const entry = singleItem.value;
   if (!entry) return;
   const name = renameName.value.trim();
   if (!name || name === entry.name) {
@@ -242,13 +248,51 @@ function fileInfo(entry) {
         <p v-if="versionsError" class="version-error">{{ versionsError }}</p>
       </section>
 
+      <!-- 单个文件夹详情：也支持改名，子文件的版本/尺寸缓存会跟着迁移 -->
+      <section v-else-if="singleFolder" class="block">
+        <div class="row">
+          <label class="label">文件夹名</label>
+          <div class="rename">
+            <input
+              v-model="renameName"
+              class="text-input"
+              :disabled="!renaming"
+              @keydown.enter.prevent="submitRename"
+              @keydown.esc="renaming = false"
+            />
+            <button v-if="!renaming" class="btn is-mini" type="button" @click="renaming = true">改名</button>
+            <button v-else class="btn is-mini" type="button" :disabled="state.busy" @click="submitRename">保存</button>
+          </div>
+        </div>
+        <table class="info">
+          <tbody>
+            <tr>
+              <th>类型</th>
+              <td>文件夹</td>
+            </tr>
+            <tr>
+              <th>位置</th>
+              <td :title="singleFolder.parent || '资源库根目录'">{{ singleFolder.parent || '资源库根目录' }}</td>
+            </tr>
+            <tr>
+              <th>路径</th>
+              <td :title="singleFolder.path">{{ singleFolder.path }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="actions">
+          <button class="btn is-block" type="button" @click="actions.openFolder(singleFolder)">进入文件夹</button>
+        </div>
+        <p class="hint">改名后，文件夹内文件的尺寸缓存与历史版本记录会一起迁移。</p>
+      </section>
+
       <section v-else-if="firstSelected" class="block">
         <div class="hint">多选时可以在下方批量改名 / 移动 / 删除。</div>
       </section>
 
-      <!-- 批量改名 -->
-      <section v-if="selectedEntries.length" class="block">
-        <div class="block-title">批量改名 · {{ selectedEntries.length }} 个文件</div>
+      <!-- 批量改名：文件和文件夹都可以 -->
+      <section v-if="batchList.length" class="block">
+        <div class="block-title">批量改名 · {{ batchList.length }} 项</div>
         <div class="segmented">
           <button
             v-for="item in RENAME_MODES"
@@ -312,7 +356,7 @@ function fileInfo(entry) {
           class="btn is-block"
           type="button"
           :disabled="state.busy || !changed.length"
-          @click="actions.batchRename(config, selectedEntries)"
+          @click="actions.batchRename(config, batchList)"
         >
           应用批量改名{{ changed.length ? `（${changed.length} 项）` : '' }}
         </button>

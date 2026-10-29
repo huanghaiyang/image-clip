@@ -8,10 +8,12 @@
 import { computed, ref } from 'vue';
 
 import { useLibrary } from '../composables/useLibrary.js';
+import { useRenamePrompt } from '../composables/useRenamePrompt.js';
 import { openUploadPicker } from '../composables/useUploadPicker.js';
 import { formatSize } from '../lib/library.js';
 
 const { state, folderTree, currentFolders, currentEntries, stats, actions } = useLibrary();
+const { actions: renameActions } = useRenamePrompt();
 
 const creating = ref(false);
 const folderName = ref('');
@@ -49,6 +51,11 @@ async function submitFolder() {
     folderName.value = '';
     actions.setDir(folder.path);
   }
+}
+
+/** 目录树上的重命名入口；根目录不可改名。 */
+function renameFolder(folder) {
+  renameActions.open(folder, true);
 }
 </script>
 
@@ -89,6 +96,14 @@ async function submitFolder() {
       >
         <span class="tree-icon">{{ folder.isRoot ? '⌂' : '▸' }}</span>
         <span class="tree-name">{{ folder.name }}</span>
+        <span
+          v-if="!folder.isRoot"
+          class="tree-rename"
+          role="button"
+          title="重命名文件夹"
+          @click.stop="renameFolder(folder)"
+          >✎</span
+        >
         <span v-if="childCount.has(folder.path)" class="tree-badge">·</span>
       </button>
       <div v-if="folderTree.length <= 1" class="tree-empty">还没有子目录，可在下方新建</div>
@@ -248,6 +263,27 @@ async function submitFolder() {
 
 .tree-badge {
   flex: none;
+  color: var(--accent);
+}
+
+.tree-rename {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.5;
+  cursor: pointer;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.tree-rename:hover {
+  opacity: 1;
+  background: var(--panel-3);
   color: var(--accent);
 }
 

@@ -21,6 +21,7 @@ import {
   probeLibraryVideo,
 } from '../lib/library.js';
 import { refreshLibrary, setDir as setLibraryDir } from './useLibrary.js';
+import { onLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
 
 const state = reactive({
   initialized: false,
@@ -55,6 +56,17 @@ const state = reactive({
 
 /** <video> 元素用 shallowRef 保存，避免 Vue 深度代理 DOM。 */
 const player = shallowRef(null);
+
+/**
+ * 资源库改名 / 移动后同步正在打开的视频。
+ * 内容没有变化，只更新路径与显示名：不重新探测，时间轴上的关键帧标记也保持不变。
+ */
+onLibraryPathsMoved((moves) => {
+  const next = remapLibraryPath(state.activePath, moves);
+  if (next === state.activePath) return;
+  state.activePath = next;
+  if (state.meta) state.meta = { ...state.meta, name: next.split('/').pop() || state.meta.name };
+});
 
 const duration = computed(() => Number(state.meta?.duration) || 0);
 const fps = computed(() => Number(state.meta?.fps) || 0);

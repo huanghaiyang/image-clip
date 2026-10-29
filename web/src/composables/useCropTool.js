@@ -73,15 +73,30 @@ const state = reactive({
   status: '',
   error: '',
   batch: { running: false, done: 0, total: 0, saveToLibrary: false },
+  /**
+   * 图集模式：素材像纸一样叠在一起，一个裁剪框按归一化坐标作用到每一层。
+   * atlasNorm 是唯一的“真值”，state.rect 只是它在当前层上的像素投影。
+   */
+  atlas: { enabled: false, layer: 0 },
+  atlasNorm: null,
 });
 
-const activeItem = computed(() => workspace.selected.value ?? null);
+const atlasItems = computed(() => workspace.state.items ?? []);
+const atlasCount = computed(() => atlasItems.value.length);
+const atlasIndex = computed(() => Math.min(Math.max(0, state.atlas.layer), Math.max(0, atlasCount.value - 1)));
+
+const activeItem = computed(() => {
+  if (state.atlas.enabled) return atlasItems.value[atlasIndex.value] ?? null;
+  return workspace.selected.value ?? null;
+});
 const imageSize = computed(() => ({
   width: activeItem.value?.width ?? 0,
   height: activeItem.value?.height ?? 0,
 }));
 const outputSize = computed(() => resolveOutputSize(state.rect, state.output));
 const normalizedRect = computed(() => {
+  // 图集模式下归一化裁剪框是唯一真值，不随层切换重算
+  if (state.atlas.enabled && state.atlasNorm) return state.atlasNorm;
   const { width, height } = imageSize.value;
   if (!width || !height) return { x: 0, y: 0, width: 1, height: 1 };
   return normalizeRect(state.rect, width, height);
@@ -107,17 +122,39 @@ function setError(message) {
   state.status = '';
 }
 
-/** 选中素材变化时初始化裁剪框；切到相同素材则保留用户调整。 */
+/**
+ * 选中素材变化时初始化裁剪框；切到相同素材则保留用户调整。
+ * 图集模式下切层：只把归一化裁剪框投影到新层的像素尺寸上，取景保持不变。
+ */
 export function syncCrop() {
   const item = activeItem.value;
   if (!item) {
     state.imageId = null;
     return null;
   }
+  if (state.atlas.enabled) {
+    if (!state.atlasNorm) {
+      const fitted = fitAspectRect(item.width, item.height, state.aspect);
+      state.atlasNorm = normalizeRect(fitted, item.width, item.height);
+    }
+    if (state.imageId !== item.id) {
+      state.imageId = item.id;
+      state.rect = rectFromNormalized(state.atlasNorm, item.width, item.height);
+    }
+    return item;
+  }
   if (state.imageId === item.id) return item;
   state.imageId = item.id;
   state.rect = fitAspectRect(item.width, item.height, state.aspect);
   return item;
+}
+
+/** 写入像素裁剪框；图集模式下同步更新归一化真值。 */
+function commitRect(rect, width, height) {
+  state.rect = rect;
+  if (state.atlas.enabled && width && height) {
+    state.atlasNorm = normalizeRect(rect, width, height);
+  }
 }
 
 export function setAspect(ratio) {
@@ -126,7 +163,7 @@ export function setAspect(ratio) {
   const item = syncCrop();
   if (!item) return;
   if (value > 0) {
-    state.rect = rectToAspect(state.rect, value, item.width, item.height);
+    commitRect(rectToAspect(state.rect, value, item.width, item.height), item.width, item.height);
   }
   setStatus(value > 0 ? `裁剪比例已切换为 ${aspectLabel.value}` : '裁剪比例已切换为自由');
 }
@@ -135,19 +172,72 @@ export function setRect(next) {
   const { width, height } = imageSize.value;
   if (!width || !height) return;
   const clamped = clampRect(next, width, height);
-  state.rect = {
-    x: clamped.x,
-    y: clamped.y,
-    width: Math.max(1, clamped.width),
-    height: Math.max(1, clamped.height),
-  };
+  commitRect(
+    {
+      x: clamped.x,
+      y: clamped.y,
+      width: Math.max(1, clamped.width),
+      height: Math.max(1, clamped.height),
+    },
+    width,
+    height,
+  );
 }
 
 export function resetRect() {
   const item = syncCrop();
   if (!item) return;
-  state.rect = fitAspectRect(item.width, item.height, state.aspect);
+  commitRect(fitAspectRect(item.width, item.height, state.aspect), item.width, item.height);
   setStatus('裁剪框已重置');
+}
+
+// --------------------------------------------------------------- 图集模式
+
+/** 进入图集模式：以当前裁剪框为初始取景；退出时选中当前停留的层。 */
+export function toggleAtlas(force) {
+  const next = typeof force === 'boolean' ? force : !state.atlas.enabled;
+  if (next === state.atlas.enabled) return;
+  if (next && !atlasCount.value) {
+    setError('素材列表为空，无法进入图集模式');
+    return;
+  }
+  if (next) {
+    const selectedIndex = workspace.state.items.findIndex((item) => item.id === workspace.state.selectedId);
+    state.atlas.layer = selectedIndex >= 0 ? selectedIndex : 0;
+    state.atlas.enabled = true;
+    const item = activeItem.value;
+    if (item) {
+      // 当前裁剪框还属于这张图就直接沿用，否则按当前比例适配
+      const base =
+        state.imageId === item.id && state.rect.width >= 1
+          ? state.rect
+          : fitAspectRect(item.width, item.height, state.aspect);
+      state.atlasNorm = normalizeRect(base, item.width, item.height);
+      state.imageId = null;
+      syncCrop();
+    }
+    setStatus(`图集模式：${atlasCount.value} 层叠加，一个裁剪框作用到全部`);
+  } else {
+    const current = activeItem.value;
+    state.atlas.enabled = false;
+    state.atlasNorm = null;
+    state.imageId = null;
+    if (current) workspace.actions.selectItem(current.id);
+    setStatus('已退出图集模式');
+  }
+}
+
+/** 图集模式下切换到指定层（循环）。 */
+export function setAtlasLayer(index) {
+  if (!state.atlas.enabled || !atlasCount.value) return;
+  const count = atlasCount.value;
+  state.atlas.layer = ((Math.round(Number(index) || 0) % count) + count) % count;
+  state.imageId = null; // 强制把归一化裁剪框投影到新层
+  syncCrop();
+}
+
+export function stepLayer(delta) {
+  setAtlasLayer(state.atlas.layer + (Number(delta) || 0));
 }
 
 export function setOutputMode(mode) {
@@ -204,7 +294,7 @@ export function applySizePreset(preset) {
   const height = Math.max(1, Math.round(Number(preset.height) || 0));
   state.output = { mode: 'resize', width, height };
   state.aspect = width / height;
-  if (item) state.rect = fitAspectRect(item.width, item.height, state.aspect);
+  if (item) commitRect(fitAspectRect(item.width, item.height, state.aspect), item.width, item.height);
   setStatus(`已应用尺寸 ${width}×${height}`);
 }
 
@@ -333,11 +423,17 @@ export function useCropTool() {
     normalizedRect,
     aspectLabel,
     canApply,
+    atlasItems,
+    atlasCount,
+    atlasIndex,
     actions: {
       syncCrop,
       setAspect,
       setRect,
       resetRect,
+      toggleAtlas,
+      setAtlasLayer,
+      stepLayer,
       setOutputMode,
       setOutputDimension,
       saveSizePreset,

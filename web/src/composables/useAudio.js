@@ -20,6 +20,7 @@ import {
 } from '../lib/audio.js';
 import { fetchLibraryBlob, libraryFileUrl } from '../lib/library.js';
 import { saveBlobToLibrary } from './useLibrary.js';
+import { onLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
 
 const state = reactive({
   activePath: null,
@@ -44,6 +45,17 @@ const state = reactive({
 
 /** AudioBuffer 体积大且不需要响应式，放 shallowRef。 */
 const bufferRef = shallowRef(null);
+
+/**
+ * 资源库改名 / 移动后同步正在打开的音频。
+ * 编辑缓冲仍在内存里，只改路径与显示名即可，避免重新解码打断试听。
+ */
+onLibraryPathsMoved((moves) => {
+  const next = remapLibraryPath(state.activePath, moves);
+  if (next === state.activePath) return;
+  state.activePath = next;
+  state.name = next.split('/').pop() || state.name;
+});
 
 let audioContext = null;
 let gainNode = null;

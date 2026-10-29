@@ -38,11 +38,13 @@ import PixelPaintPanel from './components/PixelPaintPanel.vue';
 import StatusBar from './components/StatusBar.vue';
 import ChatDrawer from './components/ChatDrawer.vue';
 import UploadDialog from './components/UploadDialog.vue';
+import RenameDialog from './components/RenameDialog.vue';
 
 import { useWorkspace } from './composables/useWorkspace.js';
 import { useWatermark } from './composables/useWatermark.js';
-import { useAppMode, MODES } from './composables/useAppMode.js';
+import { useAppMode, MODES, IMAGE_MODES } from './composables/useAppMode.js';
 import { useLibrary } from './composables/useLibrary.js';
+import { importFilesToLibrary } from './composables/useLibraryImport.js';
 import { useVideo } from './composables/useVideo.js';
 import { useAudio } from './composables/useAudio.js';
 import { useEraser } from './composables/useEraser.js';
@@ -64,11 +66,19 @@ const mode = computed(() => appMode.mode);
 /** 这些图片工作区的舞台没有内置拖放，交给窗口级处理。 */
 const WINDOW_DROP_MODES = new Set(['cropimage', 'bgremove', 'eraser', 'pixel']);
 
-function importFiles(files, { toLibrary = false } = {}) {
+/** 资源库 / 视频 / 音频直接入库；图片工作区入库后自动载入素材列表。 */
+async function importFiles(files, { toLibrary = false } = {}) {
   const list = [...(files ?? [])].filter(Boolean);
   if (!list.length) return;
-  if (toLibrary) void libraryActions.uploadFiles(list, { dir: mode.value === 'audio' ? '音频' : '' });
-  else void actions.addFiles(list);
+  if (toLibrary) {
+    if (IMAGE_MODES.has(mode.value)) {
+      await importFilesToLibrary(list, { mode: mode.value });
+    } else {
+      await libraryActions.uploadFiles(list, { dir: mode.value === 'audio' ? '音频' : '' });
+    }
+    return;
+  }
+  void actions.addFiles(list);
 }
 
 /** 打开应用内的上传选择器：按当前工作区决定目标位置与文件类型。 */
@@ -82,8 +92,9 @@ function onPaste(event) {
   const files = [...(event.clipboardData?.files ?? [])];
   if (!files.length) return;
   event.preventDefault();
-  // 资源库/视频/音频模式：粘贴等于上传；图片工作区：进入素材列表
-  importFiles(files, { toLibrary: mode.value === 'library' || mode.value === 'video' || mode.value === 'audio' });
+  // 资源库/视频/音频模式：粘贴等于入库；图片工作区：入库后自动载入素材列表
+  const toLibrary = mode.value === 'library' || mode.value === 'video' || mode.value === 'audio' || IMAGE_MODES.has(mode.value);
+  void importFiles(files, { toLibrary });
 }
 
 /** 阻止拖到窗口其他位置时浏览器直接打开文件。 */
@@ -96,7 +107,8 @@ function onWindowDrop(event) {
   event.preventDefault();
   if (uploadState.open) return;
   if (!WINDOW_DROP_MODES.has(mode.value)) return;
-  importFiles(event.dataTransfer?.files);
+  // 图片工作区拖放同样先入库，保证所有模块共用素材库
+  void importFiles(event.dataTransfer?.files, { toLibrary: true });
 }
 
 function isTypingTarget(target) {
@@ -297,6 +309,7 @@ watch(
     <StatusBar />
     <ChatDrawer />
     <UploadDialog />
+    <RenameDialog />
   </div>
 </template>
 
