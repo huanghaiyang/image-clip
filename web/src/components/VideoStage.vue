@@ -25,6 +25,76 @@ const playing = ref(false);
 const dragging = ref(false);
 const videoError = ref('');
 
+/**
+ * 时间轴关键帧预览
+ * ----------------
+ * hoverVisible/hoverTime：悬停时显示光标处最近的一帧，移动指针即连续换帧（类似 GIF 的拖动预览）；
+ * gifPlaying：点按钮后按固定节奏轮播 filmstrip，方便快速回顾整段画面。
+ */
+const hoverVisible = ref(false);
+const hoverPercent = ref(0);
+const hoverTime = ref(0);
+const gifPlaying = ref(false);
+const gifIndex = ref(0);
+let gifTimer = 0;
+
+const previewFrame = computed(() => {
+  const frames = state.filmstrip;
+  if (!frames.length) return null;
+  if (gifPlaying.value) return frames[gifIndex.value % frames.length] ?? frames[0];
+  let best = frames[0];
+  let bestDiff = Infinity;
+  for (const frame of frames) {
+    const diff = Math.abs((frame.time ?? 0) - hoverTime.value);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = frame;
+    }
+  }
+  return best;
+});
+
+const previewStyle = computed(() => {
+  const percent = hoverPercent.value;
+  // 靠近两端时调整对齐方式，避免预览框超出时间轴被裁掉
+  const shift = percent < 12 ? '0' : percent > 88 ? '-100%' : '-50%';
+  return { left: `${percent}%`, transform: `translateX(${shift})` };
+});
+
+function onTrackHover(event) {
+  if (!hasVideo.value || !(duration.value > 0)) return;
+  const ratio = ratioAt(event);
+  hoverPercent.value = ratio * 100;
+  hoverTime.value = ratio * duration.value;
+  hoverVisible.value = true;
+}
+
+function onTrackLeave() {
+  hoverVisible.value = false;
+  stopGifPreview();
+}
+
+function toggleGifPreview() {
+  if (gifPlaying.value) {
+    stopGifPreview();
+    return;
+  }
+  if (!state.filmstrip.length) return;
+  gifPlaying.value = true;
+  gifIndex.value = 0;
+  gifTimer = window.setInterval(() => {
+    gifIndex.value = (gifIndex.value + 1) % state.filmstrip.length;
+  }, 260);
+}
+
+function stopGifPreview() {
+  if (gifTimer) {
+    clearInterval(gifTimer);
+    gifTimer = 0;
+  }
+  gifPlaying.value = false;
+}
+
 const PLAYBACK_RATES = [0.25, 0.5, 1, 1.5, 2];
 
 const MEDIA_ERRORS = {
@@ -178,6 +248,7 @@ function onTrackPointerDown(event) {
 }
 
 function onTrackPointerMove(event) {
+  onTrackHover(event);
   if (!dragging.value) return;
   const time = ratioAt(event) * duration.value;
   now.value = time;
@@ -203,6 +274,8 @@ watch(
     now.value = 0;
     playing.value = false;
     videoError.value = '';
+    hoverVisible.value = false;
+    stopGifPreview();
   },
 );
 
@@ -227,6 +300,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   // 必须注销，否则卸载后全局还持有已销毁的 DOM
   actions.setPlayer(null);
+  stopGifPreview();
 });
 </script>
 
@@ -296,6 +370,7 @@ onBeforeUnmount(() => {
             @pointermove="onTrackPointerMove"
             @pointerup="onTrackPointerUp"
             @pointercancel="onTrackPointerUp"
+            @pointerleave="onTrackLeave"
           >
             <div class="track-view">
               <div v-if="state.filmstrip.length" class="filmstrip">
@@ -334,6 +409,23 @@ onBeforeUnmount(() => {
             <!-- 播放头：白色竖线 + 顶部圆点 -->
             <div class="playhead" :style="playheadStyle">
               <span class="playhead-dot" />
+            </div>
+
+            <!-- 关键帧预览：悬停显示光标处最近的一帧，可切换成 GIF 式自动轮播 -->
+            <div
+              v-if="hoverVisible && previewFrame"
+              class="frame-preview"
+              :style="previewStyle"
+              @pointerdown.stop
+              @click.stop
+            >
+              <img class="frame-preview-img" :src="previewFrame.dataUrl" alt="" draggable="false" />
+              <div class="frame-preview-bar">
+                <span class="mono">{{ formatTimecode(previewFrame.time ?? 0, fps) }}</span>
+                <button class="frame-preview-btn" type="button" @click.stop="toggleGifPreview">
+                  {{ gifPlaying ? '暂停' : 'GIF 预览' }}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -598,7 +690,7 @@ onBeforeUnmount(() => {
 
 .track {
   position: relative;
-  height: 48px;
+  height: 56px;
   border-radius: var(--radius-sm);
   background: var(--panel-3);
   cursor: pointer;
@@ -632,8 +724,10 @@ onBeforeUnmount(() => {
   flex: 1;
   min-width: 0;
   width: 100%;
-  height: 48px;
-  object-fit: cover;
+  height: 56px;
+  /* contain：整帧完整显示（上下不裁切），留黑边而不是裁掉画面 */
+  object-fit: contain;
+  background: #0b0b0d;
   display: block;
 }
 
@@ -718,6 +812,51 @@ onBeforeUnmount(() => {
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+/* 关键帧悬停预览：浮在时间轴上方，靠近两端时自动换对齐方向 */
+.frame-preview {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  z-index: 6;
+  width: 224px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius-sm);
+  background: rgba(8, 8, 10, 0.94);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+}
+
+.frame-preview-img {
+  display: block;
+  width: 100%;
+  max-height: 140px;
+  object-fit: contain;
+  background: #000;
+}
+
+.frame-preview-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 6px;
+  color: #d8d8d8;
+  font-size: 10px;
+}
+
+.frame-preview-btn {
+  padding: 1px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 3px;
+  background: transparent;
+  color: #e8e8e8;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.frame-preview-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
 }
 
 .ticks {

@@ -17,6 +17,7 @@ import {
   fetchLibraryTree,
   moveLibraryItems,
   renameLibraryItems,
+  restoreLibraryVersion,
   uploadLibraryFile,
   uploadBlobToLibrary,
 } from '../lib/library.js';
@@ -24,6 +25,17 @@ import { useWorkspace } from './useWorkspace.js';
 import { setMode } from './useAppMode.js';
 
 const EMPTY_STATS = { files: 0, folders: 0, images: 0, videos: 0, audios: 0, bytes: 0, truncated: false };
+
+const BROWSE_MODE_KEY = 'image-clip:library-browse-mode';
+
+/** 资源库主列表的展示方式；刷新后保留用户上次的选择。 */
+function initialBrowseMode() {
+  try {
+    return localStorage.getItem(BROWSE_MODE_KEY) === 'tree' ? 'tree' : 'flat';
+  } catch {
+    return 'flat';
+  }
+}
 
 const tree = shallowRef({ folders: [], entries: [], stats: { ...EMPTY_STATS } });
 
@@ -38,9 +50,10 @@ const state = reactive({
   search: '',
   kindFilter: 'all', // all | image | video | audio | folder
   sort: 'name', // name | kind | mtime | size
+  browseMode: initialBrowseMode(), // flat | tree
   selected: [], // 相对路径数组，可包含文件夹
   previewPath: null,
-  upload: { active: false, name: '', percent: 0, index: 0, total: 0 },
+  upload: { active: false, name: '', percent: 0, index: 0, total: 0, skipped: [], failed: [] },
 });
 
 const entries = computed(() => tree.value.entries ?? []);
@@ -98,8 +111,16 @@ const previewEntry = computed(() => entries.value.find((entry) => entry.path ===
 const previewList = computed(() => {
   const keyword = state.search.trim().toLowerCase();
   let list = entries.value;
-  if (keyword) list = list.filter((entry) => entry.name.toLowerCase().includes(keyword));
-  else list = list.filter((entry) => entry.dir === state.currentDir);
+  if (keyword) {
+    // 与列表搜索保持一致：文件名和路径都参与匹配
+    list = list.filter((entry) => entry.name.toLowerCase().includes(keyword) || entry.path.toLowerCase().includes(keyword));
+  } else if (state.browseMode === 'tree') {
+    // 树形视图会显示当前目录的整棵子树，预览翻页也跟着这棵子树走
+    const root = state.currentDir;
+    list = list.filter((entry) => !root || entry.dir === root || entry.dir.startsWith(`${root}/`));
+  } else {
+    list = list.filter((entry) => entry.dir === state.currentDir);
+  }
   if (state.kindFilter !== 'all' && state.kindFilter !== 'folder') {
     list = list.filter((entry) => entry.kind === state.kindFilter);
   }
@@ -232,6 +253,15 @@ export function setSort(value) {
   state.sort = value;
 }
 
+export function setBrowseMode(value) {
+  state.browseMode = value === 'tree' ? 'tree' : 'flat';
+  try {
+    localStorage.setItem(BROWSE_MODE_KEY, state.browseMode);
+  } catch {
+    // 存不下不影响当前会话
+  }
+}
+
 export function setCurrentDir(path) {
   state.currentDir = path ?? '';
 }
@@ -265,6 +295,8 @@ export async function uploadFiles(fileList, options = {}) {
   state.upload.active = true;
   state.upload.index = 0;
   state.upload.total = files.length;
+  state.upload.skipped = [];
+  state.upload.failed = [];
   const uploaded = [];
 
   try {
@@ -278,17 +310,34 @@ export async function uploadFiles(fileList, options = {}) {
       const relativeDir = relative.includes('/') ? relative.split('/').slice(0, -1).join('/') : '';
       const dir = [baseDir, relativeDir].filter(Boolean).join('/');
 
-      const result = await uploadLibraryFile(file, {
-        dir,
-        onProgress: (percent) => {
-          state.upload.percent = percent;
-        },
-      });
-      if (result?.entry) uploaded.push(result.entry);
-      setStatus(`已上传 ${index + 1}/${files.length}：${file.name}`);
+      try {
+        // 手动上传默认开启 checksum 去重：内容完全相同的文件不再重复入库
+        const result = await uploadLibraryFile(file, {
+          dir,
+          dedup: options.dedup !== false,
+          onProgress: (percent) => {
+            state.upload.percent = percent;
+          },
+        });
+        if (result?.entry) uploaded.push(result.entry);
+      } catch (err) {
+        // 单个文件失败（含重复）不中断整批上传
+        if (err?.code === 'DUPLICATE') state.upload.skipped.push({ name: file.name, message: err.message });
+        else state.upload.failed.push({ name: file.name, message: err.message });
+      }
+      setStatus(`已处理 ${index + 1}/${files.length}：${file.name}`);
     }
+
     await refreshLibrary({ quiet: true });
-    setStatus(`已上传 ${uploaded.length} 个文件到资源库`);
+    const skipped = state.upload.skipped.length;
+    const failed = state.upload.failed.length;
+    if (failed) {
+      setError(`上传结束：成功 ${uploaded.length}，重复跳过 ${skipped}，失败 ${failed} —— ${state.upload.failed[0].message}`);
+    } else if (skipped) {
+      setStatus(`已上传 ${uploaded.length} 个文件，跳过 ${skipped} 个重复文件`);
+    } else {
+      setStatus(`已上传 ${uploaded.length} 个文件到资源库`);
+    }
   } catch (err) {
     setError(`上传失败：${err.message}`);
   } finally {
@@ -456,11 +505,64 @@ export async function deleteSelected() {
     state.selected = [];
     const failed = failedCount(result);
     if (failed) setError(`删除部分失败：${failed} 项`);
-    else setStatus(`已删除 ${result.succeeded} 项`);
+    else setStatus(`已将 ${result.succeeded} 项移入回收站`);
     return result.ok;
   } catch (err) {
     setError(`删除失败：${err.message}`);
     return false;
+  } finally {
+    state.busy = false;
+  }
+}
+
+/**
+ * 上传一个新版本覆盖已有文件（旧内容由服务端存为历史版本）。
+ * 用于资源检查器里的「上传新版本」，让编辑前后的内容都可以找回。
+ */
+export async function uploadNewVersion(entry, file) {
+  if (!entry || !file) return null;
+  state.busy = true;
+  state.error = '';
+  state.upload.active = true;
+  state.upload.name = file.name ?? entry.name;
+  state.upload.percent = 0;
+  try {
+    const result = await uploadLibraryFile(file, {
+      name: entry.name,
+      dir: entry.dir,
+      overwritePath: entry.path,
+      // 覆盖上传允许内容相同（用户可能只是想留一版记录），不做重复拦截
+      dedup: false,
+      onProgress: (percent) => {
+        state.upload.percent = percent;
+      },
+    });
+    await refreshLibrary({ quiet: true });
+    setStatus(`已保存新版本：${entry.path}（旧版本已存入历史）`);
+    return result?.entry ?? null;
+  } catch (err) {
+    setError(`保存新版本失败：${err.message}`);
+    return null;
+  } finally {
+    state.upload.active = false;
+    state.upload.name = '';
+    state.upload.percent = 0;
+    state.busy = false;
+  }
+}
+
+/** 恢复某个历史版本（当前内容会先自动存成一版）。 */
+export async function restoreVersionHistory(entry, versionId) {
+  if (!entry || !versionId) return null;
+  state.busy = true;
+  try {
+    const result = await restoreLibraryVersion(entry.path, versionId);
+    await refreshLibrary({ quiet: true });
+    setStatus(`已恢复历史版本：${entry.name}`);
+    return result?.entry ?? null;
+  } catch (err) {
+    setError(`恢复历史版本失败：${err.message}`);
+    return null;
   } finally {
     state.busy = false;
   }
@@ -566,6 +668,7 @@ export function useLibrary() {
       setSearch,
       setKindFilter,
       setSort,
+      setBrowseMode,
       setCurrentDir,
       toggleSelect,
       selectOnly,
@@ -573,6 +676,8 @@ export function useLibrary() {
       clearSelection,
       uploadFiles,
       saveBlobToLibrary,
+      uploadNewVersion,
+      restoreVersionHistory,
       createFolder,
       renameOne,
       previewBatchRename,

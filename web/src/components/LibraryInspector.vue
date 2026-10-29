@@ -13,7 +13,7 @@ import { useLibrary } from '../composables/useLibrary.js';
 import { useVideo } from '../composables/useVideo.js';
 import { useAudio } from '../composables/useAudio.js';
 import { setMode } from '../composables/useAppMode.js';
-import { formatDuration, formatSize } from '../lib/library.js';
+import { formatDuration, formatSize, fetchLibraryVersions } from '../lib/library.js';
 
 const { state, selectedEntries, selectedFolders, selectedSummary, moveTargets, actions } = useLibrary();
 const { actions: videoActions } = useVideo();
@@ -30,6 +30,12 @@ const firstSelected = computed(() => selectedEntries.value[0] ?? selectedFolders
 
 const renameName = ref('');
 const renaming = ref(false);
+
+/** 当前文件的历史版本（服务端在覆盖上传 / 恢复前自动留档）。 */
+const versions = ref([]);
+const versionsLoading = ref(false);
+const versionsError = ref('');
+const versionInput = ref(null);
 
 const config = ref({
   mode: 'sequence',
@@ -59,9 +65,59 @@ watch(
   (entry) => {
     renameName.value = entry?.name ?? '';
     renaming.value = false;
+    void loadVersions(entry);
   },
   { immediate: true },
 );
+
+async function loadVersions(entry) {
+  versions.value = [];
+  versionsError.value = '';
+  if (!entry) return;
+  versionsLoading.value = true;
+  try {
+    const data = await fetchLibraryVersions(entry.path);
+    // 切换选中后旧请求可能后返回，只在路径仍然匹配时写入
+    if (single.value?.path === entry.path) versions.value = data.versions ?? [];
+  } catch (err) {
+    if (single.value?.path === entry.path) versionsError.value = `读取历史版本失败：${err.message}`;
+  } finally {
+    versionsLoading.value = false;
+  }
+}
+
+function versionTime(value) {
+  if (!value) return '—';
+  return new Date(value).toLocaleString('zh-CN', { hour12: false });
+}
+
+function openVersion(version) {
+  window.open(version.url, '_blank', 'noopener');
+}
+
+function pickVersionFile() {
+  versionInput.value?.click();
+}
+
+async function onVersionFile(event) {
+  const input = event.target;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file || !single.value) return;
+  versionsError.value = '';
+  const result = await actions.uploadNewVersion(single.value, file);
+  if (result) await loadVersions(single.value);
+}
+
+async function restoreVersion(version) {
+  if (!single.value) return;
+  const ok = window.confirm(
+    `恢复「${single.value.name}」到 ${versionTime(version.at)} 的版本？当前内容会先存为一版，可再次恢复。`,
+  );
+  if (!ok) return;
+  const result = await actions.restoreVersionHistory(single.value, version.id);
+  if (result) await loadVersions(single.value);
+}
 
 function mtimeText(value) {
   if (!value) return '—';
@@ -82,7 +138,7 @@ async function submitRename() {
 
 async function removeAll() {
   if (!state.selected.length) return;
-  const ok = window.confirm(`确定删除选中的 ${state.selected.length} 项？删除后不可恢复。`);
+  const ok = window.confirm(`确定将选中的 ${state.selected.length} 项移入回收站？之后可在回收站恢复或彻底删除。`);
   if (ok) await actions.deleteSelected();
 }
 
@@ -163,6 +219,27 @@ function fileInfo(entry) {
             在音频工作区打开
           </button>
         </div>
+
+        <!-- 历史版本：覆盖上传会先把旧内容留在这里，随时可预览 / 恢复 -->
+        <div class="versions-head">
+          <span class="block-title">历史版本</span>
+          <span class="versions-count mono">{{ versions.length }}</span>
+        </div>
+        <div v-if="versionsLoading" class="hint">正在读取历史版本…</div>
+        <div v-else-if="versions.length" class="version-list">
+          <div v-for="version in versions" :key="version.id" class="version-row">
+            <span class="version-time mono" :title="versionTime(version.at)">{{ versionTime(version.at) }}</span>
+            <span class="version-size mono">{{ formatSize(version.bytes) }}</span>
+            <button class="link-action" type="button" title="在新标签页预览这一版" @click="openVersion(version)">预览</button>
+            <button class="link-action" type="button" :disabled="state.busy" @click="restoreVersion(version)">恢复</button>
+          </div>
+        </div>
+        <p v-else class="hint">还没有历史版本。上传新版本时会自动保留旧内容。</p>
+        <button class="btn is-block" type="button" :disabled="state.busy" @click="pickVersionFile">
+          上传新版本（保留旧版本）
+        </button>
+        <input ref="versionInput" class="hidden-input" type="file" @change="onVersionFile" />
+        <p v-if="versionsError" class="version-error">{{ versionsError }}</p>
       </section>
 
       <section v-else-if="firstSelected" class="block">
@@ -512,6 +589,82 @@ function fileInfo(entry) {
 .hint {
   font-size: 10px;
   color: var(--text-muted);
+}
+
+.versions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+
+.versions-count {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.version-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.version-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+}
+
+.version-time {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+}
+
+.version-size {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.link-action {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.link-action:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.link-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.hidden-input {
+  display: none;
+}
+
+.version-error {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--danger);
 }
 
 .empty {

@@ -14,9 +14,23 @@ import { useVideo } from '../composables/useVideo.js';
 import { useAudio } from '../composables/useAudio.js';
 import { setMode } from '../composables/useAppMode.js';
 import { formatDuration, formatSize, libraryFileUrl, libraryThumbUrl } from '../lib/library.js';
+import { buildResourceTree, flattenResourceTree } from '../lib/resourceTree.js';
+import TrashDialog from './TrashDialog.vue';
+import ViewToggle from './ui/ViewToggle.vue';
 
-const { state, currentEntries, currentFolders, breadcrumbs, canGoUp, previewEntry, previewIndex, previewList, actions } =
-  useLibrary();
+const {
+  state,
+  entries,
+  folders,
+  currentEntries,
+  currentFolders,
+  breadcrumbs,
+  canGoUp,
+  previewEntry,
+  previewIndex,
+  previewList,
+  actions,
+} = useLibrary();
 const { actions: videoActions } = useVideo();
 const { actions: audioActions } = useAudio();
 
@@ -38,11 +52,82 @@ const KIND_ICON = { image: '▣', video: '▶', audio: '♪', file: '▤' };
 
 const failedThumbs = ref(new Set());
 const previewError = ref(false);
+const trashOpen = ref(false);
 
 const selectedSet = computed(() => new Set(state.selected));
 const totalVisible = computed(() => currentFolders.value.length + currentEntries.value.length);
 
 const previewCount = computed(() => previewList.value.length);
+
+// --------------------------------------------------------------- 树形视图
+const collapsed = ref(new Set());
+
+/** 排序规则与平铺视图保持一致；名称排序交给 buildResourceTree 的对照器。 */
+function compareEntries(a, b) {
+  if (state.sort === 'mtime') return (b.mtime ?? 0) - (a.mtime ?? 0);
+  if (state.sort === 'size') return (b.bytes ?? 0) - (a.bytes ?? 0);
+  if (state.sort === 'kind') return a.kind.localeCompare(b.kind);
+  return 0;
+}
+
+/** 树形视图下的文件：搜索跨目录，否则只取当前目录整棵子树（由 buildResourceTree 过滤）。 */
+const treeEntries = computed(() => {
+  const keyword = state.search.trim().toLowerCase();
+  let list = entries.value;
+  if (keyword) {
+    list = list.filter((entry) => entry.name.toLowerCase().includes(keyword) || entry.path.toLowerCase().includes(keyword));
+  }
+  if (state.kindFilter !== 'all') list = list.filter((entry) => entry.kind === state.kindFilter);
+  return list;
+});
+
+const treeRoot = computed(() => {
+  const searching = Boolean(state.search.trim());
+  return buildResourceTree(treeEntries.value, {
+    root: searching ? '' : state.currentDir,
+    // 搜索或类型筛选时只保留命中的文件及其祖先目录，不显示无关的空文件夹
+    folders: searching || state.kindFilter !== 'all' ? [] : folders.value,
+    compareFiles: compareEntries,
+  });
+});
+
+const treeRows = computed(() => flattenResourceTree(treeRoot.value, collapsed.value));
+
+const hasVisible = computed(() => (state.browseMode === 'tree' ? treeRoot.value.children.length > 0 : totalVisible.value > 0));
+
+const visibleCount = computed(() => (state.browseMode === 'tree' ? treeRoot.value.count : totalVisible.value));
+
+function toggleFolder(path) {
+  const next = new Set(collapsed.value);
+  if (next.has(path)) next.delete(path);
+  else next.add(path);
+  collapsed.value = next;
+}
+
+function openTreeFolder(row) {
+  actions.setDir(row.path);
+}
+
+/** 树形视图的「全选」包含当前子树里的文件夹与文件；已选中的不重复切换。 */
+function selectAllVisible() {
+  if (state.browseMode !== 'tree') {
+    actions.selectAllVisible();
+    return;
+  }
+  const selected = new Set(state.selected);
+  const walk = (node) => {
+    for (const child of node.children) {
+      if (!selected.has(child.path)) actions.toggleSelect(child.path);
+      if (child.type === 'folder') walk(child);
+    }
+  };
+  walk(treeRoot.value);
+}
+
+// 切换目录或搜索条件后回到默认全展开，避免残留的折叠状态藏着搜索结果
+watch([() => state.currentDir, () => state.search], () => {
+  collapsed.value = new Set();
+});
 
 function select(event, entry) {
   const meta = event.ctrlKey || event.metaKey;
@@ -91,6 +176,11 @@ function entryMeta(entry) {
   return parts.join(' · ');
 }
 
+/** 缩略图左上角的尺寸徽标：图片/视频始终能看到真实分辨率，不受文本截断影响。 */
+function entrySize(entry) {
+  return entry.width && entry.height ? `${entry.width}×${entry.height}` : '';
+}
+
 function onPreviewKey(event) {
   if (!state.previewPath) return;
   if (event.key === 'Escape') actions.closePreview();
@@ -131,6 +221,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
         :value="state.search"
         @input="actions.setSearch($event.target.value)"
       />
+      <ViewToggle :model-value="state.browseMode" @update:model-value="actions.setBrowseMode($event)" />
     </div>
 
     <div class="subbar">
@@ -152,26 +243,29 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
           <option v-for="item in SORTS" :key="item.value" :value="item.value">{{ item.label }}</option>
         </select>
       </label>
-      <span class="count mono">{{ totalVisible }} 项</span>
+      <span class="count mono">{{ visibleCount }} 项</span>
       <div class="spacer" />
-      <button class="btn is-mini is-ghost" type="button" :disabled="!totalVisible" @click="actions.selectAllVisible()">
+      <button class="btn is-mini is-ghost" type="button" :disabled="!hasVisible" @click="selectAllVisible">
         全选
       </button>
       <button class="btn is-mini is-ghost" type="button" :disabled="!state.selected.length" @click="actions.clearSelection()">
         清除选择
       </button>
       <button class="btn is-mini is-ghost" type="button" :disabled="state.refreshing" @click="actions.refresh()">刷新</button>
+      <button class="btn is-mini is-ghost" type="button" title="查看已删除的资源" @click="trashOpen = true">
+        回收站
+      </button>
     </div>
 
     <div class="grid-wrap">
       <div v-if="state.loading && !state.initialized" class="placeholder">正在读取资源库…</div>
-      <div v-else-if="!totalVisible" class="placeholder">
+      <div v-else-if="!hasVisible" class="placeholder">
         <div class="placeholder-title">{{ state.search ? '没有匹配的文件' : '这个目录还是空的' }}</div>
         <div class="placeholder-hint">
           上传图片或视频，或在视频工作区截取关键帧 —— 关键帧会默认保存到「关键帧/视频名/」。
         </div>
       </div>
-      <div v-else class="grid">
+      <div v-else-if="state.browseMode === 'flat'" class="grid">
         <button
           v-for="folder in currentFolders"
           :key="`folder:${folder.path}`"
@@ -205,11 +299,73 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
               @error="onThumbError(entry.path)"
             />
             <span v-else class="thumb-icon">{{ KIND_ICON[entry.kind] ?? '▤' }}</span>
+            <span v-if="entrySize(entry)" class="badge-size mono">{{ entrySize(entry) }}</span>
             <span v-if="entry.kind === 'video'" class="badge-video">▶</span>
           </span>
           <span class="card-name" :title="entry.name">{{ entry.name }}</span>
           <span class="card-meta mono">{{ entryMeta(entry) }}</span>
         </button>
+      </div>
+
+      <!-- 树形视图：箭头展开/折叠，单击选中，双击进入目录；文件双击打开 -->
+      <div v-else class="tree-list">
+        <template v-for="row in treeRows" :key="row.key">
+          <button
+            v-if="row.type === 'folder'"
+            class="tree-row is-folder"
+            :class="{ 'is-selected': selectedSet.has(row.path) }"
+            type="button"
+            :title="row.path"
+            :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
+            @click="select($event, row)"
+            @dblclick="openTreeFolder(row)"
+          >
+            <span
+              class="chev"
+              :class="{ 'is-open': !collapsed.has(row.path) }"
+              role="button"
+              :title="collapsed.has(row.path) ? '展开' : '折叠'"
+              @click.stop="toggleFolder(row.path)"
+              >›</span
+            >
+            <svg class="tree-folder-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M1.8 4.1c0-.6.5-1.1 1.1-1.1h3l1.3 1.4h5.9c.6 0 1.1.5 1.1 1.1v5.4c0 .6-.5 1.1-1.1 1.1H2.9c-.6 0-1.1-.5-1.1-1.1V4.1Z"
+                stroke="currentColor"
+                stroke-width="1.2"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <span class="tree-row-name">{{ row.name }}</span>
+            <span class="tree-row-count mono">{{ row.count }}</span>
+          </button>
+
+          <button
+            v-else
+            class="tree-row is-file"
+            :class="{ 'is-selected': selectedSet.has(row.path) }"
+            type="button"
+            :title="row.path"
+            :style="{ paddingLeft: `${8 + row.depth * 16 + 14}px` }"
+            @click="select($event, row.entry)"
+            @dblclick="openEntry(row.entry)"
+          >
+            <span class="tree-thumb">
+              <img
+                v-if="thumbOf(row.entry)"
+                :src="thumbOf(row.entry)"
+                alt=""
+                loading="lazy"
+                @error="onThumbError(row.entry.path)"
+              />
+              <span v-else class="tree-kind">{{ KIND_ICON[row.entry.kind] ?? '▤' }}</span>
+            </span>
+            <span class="tree-file-body">
+              <span class="tree-row-name">{{ row.name }}</span>
+              <span class="tree-row-meta mono">{{ entryMeta(row.entry) }}</span>
+            </span>
+          </button>
+        </template>
       </div>
     </div>
 
@@ -258,6 +414,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
         </button>
       </div>
     </div>
+    <!-- 回收站：删除的资源先放这里，可预览、恢复或彻底删除 -->
+    <TrashDialog v-if="trashOpen" :open="trashOpen" @close="trashOpen = false" />
   </section>
 </template>
 
@@ -387,6 +545,125 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
   gap: 10px;
 }
 
+.tree-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tree-row:hover {
+  background: var(--hover);
+}
+
+.tree-row.is-selected {
+  background: var(--accent-soft);
+  border-color: rgba(13, 153, 255, 0.45);
+}
+
+.tree-row.is-folder .tree-row-name {
+  color: var(--text-2);
+}
+
+.chev {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+  transition: transform 0.12s ease, color 0.12s ease;
+}
+
+.chev:hover {
+  color: var(--text);
+  background: var(--panel-3);
+}
+
+.chev.is-open {
+  transform: rotate(90deg);
+}
+
+.tree-folder-icon {
+  flex: none;
+  color: var(--accent);
+}
+
+.tree-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.tree-row-count {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--panel-3);
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.tree-thumb {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 20px;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.tree-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.tree-kind {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.tree-file-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.tree-row-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
 .card {
   display: flex;
   flex-direction: column;
@@ -445,12 +722,25 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
 .thumb img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  /* 完整显示缩略图，不裁切上下/左右 */
+  object-fit: contain;
 }
 
 .thumb-icon {
   font-size: 22px;
   color: var(--text-muted);
+}
+
+.badge-size {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 9px;
+  line-height: 14px;
 }
 
 .badge-video {

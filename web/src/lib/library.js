@@ -44,7 +44,15 @@ export function fetchLibraryTree() {
 /**
  * 上传一个 File/Blob 到资源库。
  * @param {File|Blob} file
- * @param {{dir?:string, name?:string, onProgress?:(percent:number, loaded:number, total:number)=>void}} [options]
+ * @param {{
+ *   dir?:string,
+ *   name?:string,
+ *   dedup?:boolean,
+ *   overwritePath?:string,
+ *   onProgress?:(percent:number, loaded:number, total:number)=>void,
+ * }} [options]
+ *   dedup：由服务端按 sha256 查重，内容相同直接拒绝（用户手动上传默认开启）；
+ *   overwritePath：覆盖资源库中的指定文件，服务端会先保存旧内容为历史版本。
  */
 export function uploadLibraryFile(file, options = {}) {
   const name = options.name || file.name || `upload-${Date.now()}`;
@@ -56,6 +64,8 @@ export function uploadLibraryFile(file, options = {}) {
     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
     xhr.setRequestHeader('X-File-Name', encodeURIComponent(name));
     xhr.setRequestHeader('X-File-Dir', encodeURIComponent(dir));
+    if (options.dedup) xhr.setRequestHeader('X-Dedup', '1');
+    if (options.overwritePath) xhr.setRequestHeader('X-Overwrite-Path', encodeURIComponent(options.overwritePath));
 
     if (typeof options.onProgress === 'function') {
       xhr.upload.onprogress = (event) => {
@@ -117,6 +127,42 @@ export function deleteLibraryItems(paths) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ paths }),
+  });
+}
+
+// --------------------------------------------------------------- 回收站
+
+export function fetchLibraryTrash() {
+  return requestJson('/api/library/trash', { cache: 'no-store' });
+}
+
+export function restoreLibraryTrash(ids) {
+  return requestJson('/api/library/trash/restore', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+}
+
+export function purgeLibraryTrash(ids, all = false) {
+  return requestJson('/api/library/trash/purge', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(all ? { all: true } : { ids }),
+  });
+}
+
+// --------------------------------------------------------------- 历史版本
+
+export function fetchLibraryVersions(path) {
+  return requestJson(`/api/library/versions?path=${encodeURIComponent(path)}`, { cache: 'no-store' });
+}
+
+export function restoreLibraryVersion(path, id) {
+  return requestJson('/api/library/versions/restore', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, id }),
   });
 }
 

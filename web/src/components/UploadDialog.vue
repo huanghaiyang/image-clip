@@ -30,6 +30,8 @@ const success = ref(false);
 const error = ref('');
 const notice = ref('');
 const targetDir = ref('');
+/** 上传结果统计：跳过的重复文件单独提示，不算失败。 */
+const resultInfo = ref({ uploaded: 0, skipped: 0 });
 
 let closeTimer = 0;
 
@@ -199,10 +201,14 @@ async function submit() {
     if (config.value.dest === 'library') {
       uploaded = await libraryActions.uploadFiles(files, { dir: targetDir.value });
       if (libraryState.error && libraryState.error !== beforeLibraryError) throw new Error(libraryState.error);
-      if (uploaded.length !== files.length) throw new Error('部分文件上传失败，请重试');
+      // checksum 去重会跳过与库内完全相同的文件：跳过不等于失败
+      const skipped = libraryState.upload.skipped?.length ?? 0;
+      if (!uploaded.length && !skipped) throw new Error('上传失败，请重试');
+      resultInfo.value = { uploaded: uploaded.length, skipped };
     } else {
       await workspaceActions.addFiles(files);
       if (workspaceState.error && workspaceState.error !== beforeWorkspaceError) throw new Error(workspaceState.error);
+      resultInfo.value = { uploaded: files.length, skipped: 0 };
     }
 
     uploading.value = false;
@@ -240,6 +246,7 @@ function resetState() {
   error.value = '';
   notice.value = '';
   dragging.value = false;
+  resultInfo.value = { uploaded: 0, skipped: 0 };
 }
 
 watch(
@@ -406,7 +413,9 @@ onBeforeUnmount(() => {
 
             <p v-if="error" class="upload-error">{{ error }}</p>
             <p v-else-if="success" class="upload-success">
-              {{ config.dest === 'library' ? '已上传' : '已导入' }} {{ items.length }} 个文件，正在关闭…
+              {{ config.dest === 'library' ? '已上传' : '已导入' }} {{ resultInfo.uploaded }} 个文件
+              <template v-if="resultInfo.skipped">，跳过 {{ resultInfo.skipped }} 个重复文件</template>
+              ，正在关闭…
             </p>
           </div>
 

@@ -12,7 +12,10 @@ import { computed, onMounted, ref } from 'vue';
 import { useLibrary } from '../composables/useLibrary.js';
 import { useVideo } from '../composables/useVideo.js';
 import { openUploadPicker } from '../composables/useUploadPicker.js';
+import { useResourceViewMode } from '../composables/useResourceViewMode.js';
 import { formatDuration, formatSize, libraryThumbUrl } from '../lib/library.js';
+import { buildResourceTree, flattenResourceTree } from '../lib/resourceTree.js';
+import ViewToggle from './ui/ViewToggle.vue';
 
 const { state: libraryState, entries, actions: libraryActions } = useLibrary();
 const { state, actions } = useVideo();
@@ -30,6 +33,18 @@ const videos = computed(() =>
     .filter((entry) => entry.kind === 'video')
     .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN')),
 );
+
+const viewMode = useResourceViewMode('video', 'flat');
+const collapsed = ref(new Set());
+const treeRoot = computed(() => buildResourceTree(videos.value));
+const treeRows = computed(() => flattenResourceTree(treeRoot.value, collapsed.value));
+
+function toggleFolder(path) {
+  const next = new Set(collapsed.value);
+  if (next.has(path)) next.delete(path);
+  else next.add(path);
+  collapsed.value = next;
+}
 
 const healthReady = computed(() => Boolean(state.health.ffmpeg?.available));
 
@@ -101,18 +116,21 @@ onMounted(() => {
   <aside class="sidebar panel">
     <div class="panel-title">
       <span>视频 · 资源库</span>
-      <button
-        class="btn is-ghost is-icon"
-        type="button"
-        title="刷新资源库列表"
-        :disabled="libraryState.refreshing"
-        @click="refreshList"
-      >
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-          <path d="M13.2 8a5.2 5.2 0 1 1-1.5-3.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-          <path d="M13 1.9v3.4h-3.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-        </svg>
-      </button>
+      <div class="title-actions">
+        <ViewToggle v-model="viewMode" />
+        <button
+          class="btn is-ghost is-icon"
+          type="button"
+          title="刷新资源库列表"
+          :disabled="libraryState.refreshing"
+          @click="refreshList"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M13.2 8a5.2 5.2 0 1 1-1.5-3.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            <path d="M13 1.9v3.4h-3.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          </svg>
+        </button>
+      </div>
     </div>
 
     <!-- FFmpeg 健康徽标：绿点=可用，黄点=不可用（悬浮看原因） -->
@@ -126,32 +144,87 @@ onMounted(() => {
         资源库里还没有视频。<br />请先在资源库上传视频。
       </p>
 
-      <button
-        v-for="entry in videos"
-        :key="entry.path"
-        class="video-item"
-        :class="{ 'is-active': state.activePath === entry.path }"
-        type="button"
-        :title="entry.path"
-        @click="actions.selectVideo(entry)"
-      >
-        <span class="video-thumb">
-          <img
-            v-if="libraryThumbUrl(entry) && !failedThumbs.includes(entry.path)"
-            :src="libraryThumbUrl(entry)"
-            :alt="entry.name"
-            loading="lazy"
-            @error="onThumbError(entry.path)"
-          />
-          <span v-else class="thumb-fallback" aria-hidden="true">▶</span>
-        </span>
-        <span class="video-body">
-          <span class="video-name">{{ entry.name }}</span>
-          <span class="video-meta mono">
-            {{ formatDuration(entry.duration) }} · {{ formatSize(entry.bytes) }}
+      <template v-else-if="viewMode === 'flat'">
+        <button
+          v-for="entry in videos"
+          :key="entry.path"
+          class="video-item"
+          :class="{ 'is-active': state.activePath === entry.path }"
+          type="button"
+          :title="entry.path"
+          @click="actions.selectVideo(entry)"
+        >
+          <span class="video-thumb">
+            <img
+              v-if="libraryThumbUrl(entry) && !failedThumbs.includes(entry.path)"
+              :src="libraryThumbUrl(entry)"
+              :alt="entry.name"
+              loading="lazy"
+              @error="onThumbError(entry.path)"
+            />
+            <span v-else class="thumb-fallback" aria-hidden="true">▶</span>
           </span>
-        </span>
-      </button>
+          <span class="video-body">
+            <span class="video-name">{{ entry.name }}</span>
+            <span class="video-meta mono">
+              {{ formatDuration(entry.duration) }} · {{ formatSize(entry.bytes) }}
+            </span>
+          </span>
+        </button>
+      </template>
+
+      <!-- 树形视图：文件夹行点击展开/折叠，文件行沿用平铺列表样式 -->
+      <template v-else>
+        <template v-for="row in treeRows" :key="row.key">
+          <button
+            v-if="row.type === 'folder'"
+            class="folder-row"
+            type="button"
+            :title="row.path"
+            :style="{ paddingLeft: `${2 + row.depth * 14}px` }"
+            @click="toggleFolder(row.path)"
+          >
+            <span class="chev" :class="{ 'is-open': !collapsed.has(row.path) }">›</span>
+            <svg class="folder-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M1.8 4.1c0-.6.5-1.1 1.1-1.1h3l1.3 1.4h5.9c.6 0 1.1.5 1.1 1.1v5.4c0 .6-.5 1.1-1.1 1.1H2.9c-.6 0-1.1-.5-1.1-1.1V4.1Z"
+                stroke="currentColor"
+                stroke-width="1.2"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <span class="folder-name">{{ row.name }}</span>
+            <span class="folder-count mono">{{ row.count }}</span>
+          </button>
+
+          <button
+            v-else
+            class="video-item"
+            :class="{ 'is-active': state.activePath === row.path }"
+            type="button"
+            :title="row.path"
+            :style="{ paddingLeft: `${6 + row.depth * 14}px` }"
+            @click="actions.selectVideo(row.entry)"
+          >
+            <span class="video-thumb">
+              <img
+                v-if="libraryThumbUrl(row.entry) && !failedThumbs.includes(row.path)"
+                :src="libraryThumbUrl(row.entry)"
+                :alt="row.name"
+                loading="lazy"
+                @error="onThumbError(row.path)"
+              />
+              <span v-else class="thumb-fallback" aria-hidden="true">▶</span>
+            </span>
+            <span class="video-body">
+              <span class="video-name">{{ row.name }}</span>
+              <span class="video-meta mono">
+                {{ formatDuration(row.entry.duration) }} · {{ formatSize(row.entry.bytes) }}
+              </span>
+            </span>
+          </button>
+        </template>
+      </template>
     </div>
 
     <div class="sidebar-footer">
@@ -172,6 +245,69 @@ onMounted(() => {
   width: 252px;
   flex: none;
   border-right: 1px solid var(--border);
+}
+
+.title-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 26px;
+  padding: 3px 6px;
+  margin-bottom: 1px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.folder-row:hover {
+  background: var(--hover);
+}
+
+.chev {
+  display: grid;
+  place-items: center;
+  width: 13px;
+  height: 13px;
+  flex: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  transition: transform 0.12s ease;
+}
+
+.chev.is-open {
+  transform: rotate(90deg);
+}
+
+.folder-icon {
+  flex: none;
+  color: var(--accent);
+}
+
+.folder-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.folder-count {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--panel-3);
+  color: var(--text-muted);
+  font-size: 9px;
 }
 
 .health-strip {
@@ -258,7 +394,9 @@ onMounted(() => {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  /* 缩略图完整显示，不裁切画面 */
+  object-fit: contain;
+  background: #0b0b0d;
 }
 
 .thumb-fallback {
