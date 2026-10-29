@@ -6,6 +6,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import { useWorkspace } from '../composables/useWorkspace.js';
+import { openUploadPicker } from '../composables/useUploadPicker.js';
 
 const { state, selected, actions } = useWorkspace();
 
@@ -265,12 +266,13 @@ function onDragLeave() {
 }
 
 function pickFiles() {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'image/*';
-  input.multiple = true;
-  input.onchange = () => actions.addFiles(input.files);
-  input.click();
+  openUploadPicker({
+    title: '导入图片',
+    description: '图片会加入左侧素材列表，不会写入资源库',
+    accept: 'image/*',
+    dest: 'workspace',
+    actionLabel: '导入',
+  });
 }
 
 // ------------------------------------------------------------- 生命周期

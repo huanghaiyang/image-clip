@@ -118,6 +118,37 @@ export async function recomputeAll() {
 
 // --------------------------------------------------------------- 动作
 
+/** 导入单个图片文件：解码 → 建立素材项 → 自动检测 AABB。 */
+async function addOneFile(file) {
+  const buffer = await file.arrayBuffer();
+  const { bitmap, imageData, width, height } = await decodeToRgba(file);
+  const item = reactive({
+    id: `img-${++uid}`,
+    name: file.name || `image-${uid}`,
+    type: file.type || 'application/octet-stream',
+    bytes: buffer.byteLength,
+    width,
+    height,
+    thumbnail: markRaw(makeThumbnail(bitmap, 160)),
+    bitmap: markRaw(bitmap),
+    imageData: markRaw(imageData),
+    buffer: markRaw(buffer),
+    bounds: null,
+    trimmed: null,
+    resultEmpty: false,
+    contentPixels: 0,
+    contentRatio: 0,
+    engine: '',
+    elapsedMs: 0,
+    error: '',
+    detectedAt: 0,
+  });
+  state.items.push(item);
+  state.selectedId = item.id;
+  await recomputeItem(item);
+  return item;
+}
+
 export async function addFiles(fileList) {
   const files = [...(fileList ?? [])].filter((file) => file && /^image\//.test(file.type || '') );
   const fallbackFiles = [...(fileList ?? [])].filter((file) => file && !/^image\//.test(file.type || ''));
@@ -128,39 +159,35 @@ export async function addFiles(fileList) {
   state.error = '';
   for (const file of all) {
     try {
-      const buffer = await file.arrayBuffer();
-      const { bitmap, imageData, width, height } = await decodeToRgba(file);
-      const item = reactive({
-        id: `img-${++uid}`,
-        name: file.name || `image-${uid}`,
-        type: file.type || 'application/octet-stream',
-        bytes: buffer.byteLength,
-        width,
-        height,
-        thumbnail: markRaw(makeThumbnail(bitmap, 160)),
-        bitmap: markRaw(bitmap),
-        imageData: markRaw(imageData),
-        buffer: markRaw(buffer),
-        bounds: null,
-        trimmed: null,
-        resultEmpty: false,
-        contentPixels: 0,
-        contentRatio: 0,
-        engine: '',
-        elapsedMs: 0,
-        error: '',
-        detectedAt: 0,
-      });
-      state.items.push(item);
-      state.selectedId = item.id;
-      await recomputeItem(item);
-      setStatus(`已导入 ${item.name}（${width}×${height}）`);
+      const item = await addOneFile(file);
+      setStatus(`已导入 ${item.name}（${item.width}×${item.height}）`);
     } catch (err) {
       const message = err instanceof ImageDecodeError ? err.message : `无法读取「${file.name}」：${err.message}`;
       setError(message);
     }
   }
   state.busy = false;
+}
+
+/**
+ * 把处理结果（Blob）作为新素材加入工作区。
+ * 裁剪 / 背景去除 / 橡皮擦都通过它产出新图，原始素材保持不变，便于对比与继续处理。
+ */
+export async function addImageBlob(blob, name) {
+  if (!blob) return null;
+  state.busy = true;
+  state.error = '';
+  try {
+    const file = new File([blob], name || `result-${Date.now()}.png`, { type: blob.type || 'image/png' });
+    const item = await addOneFile(file);
+    setStatus(`已生成新素材 ${item.name}（${item.width}×${item.height}）`);
+    return item;
+  } catch (err) {
+    setError(`生成素材失败：${err.message}`);
+    return null;
+  } finally {
+    state.busy = false;
+  }
 }
 
 /** 从 Node 服务端拉取 samples/ 里的示例图片。 */
@@ -345,6 +372,7 @@ export function useWorkspace() {
     stats,
     actions: {
       addFiles,
+      addImageBlob,
       loadSamples,
       removeItem,
       clearItems,

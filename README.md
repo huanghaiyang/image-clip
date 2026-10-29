@@ -29,6 +29,15 @@ npm run build        # 构建 web/dist
 npm start            # http://127.0.0.1:8787
 ```
 
+视频工作区（第 2 章）还需要本机 FFmpeg。它只影响**探测 / 截帧 / 提取音频 / 时间轴缩略图**，
+播放本身走浏览器的 `<video>`，没有 FFmpeg 也能看视频。音频工作区（第 8 个工作区）
+走 Web Audio，完全不需要 FFmpeg：
+
+```bash
+# 把 ffmpeg 与 ffprobe 放到 D:\thirdparty\ffmpeg\bin 即可，无需配置 PATH
+curl http://127.0.0.1:8787/api/video/health    # 查看搜索过的路径与可用性
+```
+
 打开后点 **载入示例** 会把 `samples/` 里的三张蝴蝶图读进来看效果；也可以直接把图片
 拖进画布、`Ctrl+V` 粘贴、或点「导入图片」。
 
@@ -48,18 +57,27 @@ npm start            # http://127.0.0.1:8787
 image-clip/
 ├─ shared/aabb.js          ★ 核心算法：AABB 检测（零依赖，前后端共用同一份源码）
 ├─ shared/aabb.test.js       算法单测（19 项，构造像素级 fixture）
+├─ shared/bgremove.js      ★ 背景去除：边框主色聚类 + 颜色距离 + 边缘漫水 + 收放边
+├─ shared/selection.js     ★ 选区与裁剪数学：套索栅格化、比例矩形、归一化取景
 ├─ server/
 │  ├─ src/imaging.js          sharp 解码 → RGBA → 调 shared/aabb → 裁剪编码
+│  ├─ src/ffmpeg.js           FFmpeg 定位 / 探测 / 单帧 / 音频 / 时间轴缩略图
+│  ├─ src/library.js          资源库：扫描、上传、子目录、批量改名、缩略图、文件服务
+│  ├─ src/video.js            视频路由：probe / filmstrip / frames / audio
 │  ├─ src/index.js            Express API + 生产环境静态托管
 │  └─ test/api.test.js        真实起 HTTP 服务的集成测试（14 项）
 ├─ web/
-│  ├─ src/components/         TopBar / AssetPanel / StageCanvas / InspectorPanel / StatusBar
-│  ├─ src/composables/useWorkspace.js   全部状态与动作
+│  ├─ src/components/         9 个工作区的三栏组件（资源库/视频/裁剪/抠图/橡皮擦/水印/音频/像素笔绘）
+│  ├─ src/composables/        useAppMode / useLibrary / useVideo / useAudio / useBgRemoval / useCropTool / useEraser / usePixelPaint / useWorkspace
 │  ├─ src/lib/imaging.js      浏览器解码 / 检测 / 裁剪导出
+│  ├─ src/lib/library.js      资源库与视频 API 客户端（含 XHR 上传进度）
+│  ├─ src/lib/audio.js        音频波形 / 频谱 / 裁剪 / PCM16 WAV 编码
+│  ├─ src/lib/imageops.js     裁剪 / 合成 → PNG 输出
 │  ├─ src/lib/engine.js       浏览器引擎 ↔ Node 引擎的统一契约
 │  ├─ src/lib/zip.js          纯 JS 打包 ZIP（批量导出，无第三方依赖）
 │  ├─ scripts/vite-runner.mjs 受限环境下的 Vite 启动器（见 §6）
 │  └─ vite.noesbuild.config.js 无 esbuild 构建配置（见 §6）
+├─ data/library/             资源库磁盘目录（运行时创建，gitignore）
 ├─ samples/                  示例图片（用户提供的三张蝴蝶，含 alpha）
 └─ scripts/verify-samples.mjs 真图回归脚本
 ```
@@ -446,7 +464,12 @@ npm install --cache .npm-cache     # npm 不接受 .npmrc 里的相对 cache 路
 * 单张上限：64MB / 6400 万像素（两端都有校验，服务端返回 413）。
 * 批量导出 ZIP 使用 store 模式（不二次压缩）—— 图片本身已是压缩格式，
   这样还能省掉一个依赖。
-* 目前只实现「透明区域裁剪」这一个功能，其余功能（缩放、水印、批量重命名等）未开发。
+* 视频的探测/截帧/音频/时间轴缩略图依赖本机 FFmpeg；没有 FFmpeg 时视频工作区
+  只保留播放与手动标记。
+* 背景去除是**颜色算法**，不做语义分割：背景纹理复杂、前景与背景同色时需要靠
+  取色器、容差与套索配合。
+* 资源库单文件上限 2GB、最多 20000 个文件（`IMAGE_CLIP_MAX_UPLOAD_BYTES` /
+  `IMAGE_CLIP_LIBRARY_MAX_FILES` 可调）。
 
 ---
 
@@ -454,13 +477,18 @@ npm install --cache .npm-cache     # npm 不接受 .npmrc 里的相对 cache 路
 
 | 操作 | 说明 |
 | --- | --- |
-| 拖放 / `Ctrl+V` | 导入图片 |
+| `1`~`9` | 切换工作区（资源库 / 视频 / 透明裁剪 / 图片裁剪 / 背景去除 / 橡皮擦 / 水印 / 音频 / 像素笔绘） |
+| 拖放 / `Ctrl+V` | 导入；资源库、视频与音频模式下直接上传到服务端 |
 | `Ctrl+O` | 打开文件选择框 |
 | 滚轮 | 以光标为中心缩放 |
-| 拖拽画布 | 平移 |
+| 拖拽画布 | 平移（背景去除的「平移」工具下） |
 | `0` | 适应窗口 |
-| `R` | 源图 ↔ 裁剪结果 |
-| `Delete` / `Backspace` | 移除当前素材 |
+| `R` | 源图 ↔ 裁剪结果（透明裁剪 / 水印） |
+| `Delete` / `Backspace` | 移除当前素材（资源库中为删除选中项） |
+| `[` / `]` | 调小 / 调大笔刷（水印、橡皮擦） |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | 橡皮擦撤销 / 重做 |
+| `←` / `→` | 资源库预览中前后翻页；音频工作区微调播放头（`Shift` 为 5 秒） |
+| `空格` | 音频工作区播放 / 暂停 |
 
 画布左下角会实时显示光标处的图像坐标与 RGBA（`A 0` 高亮），
 调阈值时可以直接看着 alpha 判断边界。
@@ -544,3 +572,169 @@ npm run llm:serve                          # 起 OpenAI 兼容侧车（127.0.0.1
 - 大模型（DeepSeek-VL2）目前仍跑 CPU：venv 里的 torch 是 `+cpu` 轮子（当初为导出 ONNX 装的）。
   上 GPU 需换 `torch+cu121`（2.27GB）并解决显存：权重 6.4GB > 6GB 显存，需要 4-bit 量化或
   offload；换 2B 级视觉模型（如 Qwen2-VL-2B）则可直接放显存。
+
+---
+
+## 10. 多工作区：资源库 / 视频 / 抠图 / 裁剪 / 橡皮擦 / 音频 / 像素笔绘
+
+顶栏第二行是工作区切换，键盘 `1`~`9` 依次对应：
+
+| 键 | 工作区 | 能力 |
+| --- | --- | --- |
+| `1` | 资源库 | `data/library` 的统一管理：子目录、上传、批量改名、移动/删除、预览、一键转入编辑 |
+| `2` | 视频 | 播放器 + 完整时间轴（胶片缩略图 / 刻度 / 标记）、关键帧截取、音频提取 |
+| `3` | 透明裁剪 | 原有 AABB 功能（§3） |
+| `4` | 图片裁剪 | 常用比例、自定义尺寸与尺寸预设、针对一组素材的批量裁剪 |
+| `5` | 背景去除 | 自动识别任意底色 + 取色器 + 套索选区 |
+| `6` | 橡皮擦 | 硬度/强度可调、擦除与还原两种模式、撤销/重做 |
+| `7` | 水印去除 | 原有水印功能（§6） |
+| `8` | 音频 | 频谱 + 波形时间轴，框选区间裁剪并保存 PCM16 WAV |
+| `9` | 像素笔绘 | 像素级画笔/橡皮/吸管/平移，像素网格与脏矩形撤销，导出 PNG 或生成新素材 |
+
+九个工作区共用同一个三栏骨架：左侧「资源 / 素材」，中间「舞台」，右侧「参数面板」。
+图片类工作区共享同一份素材列表（`useWorkspace`），所以「资源库 → 转入编辑 → 换工具」
+不需要重新导入。
+
+### 10.1 FFmpeg 定位与安装
+
+`server/src/ffmpeg.js` 按下面顺序找二进制，第一个可用的胜出：
+
+1. 环境变量 `FFMPEG_PATH` / `FFPROBE_PATH`（单文件），或 `FFMPEG_DIR`（目录）；
+2. `<repo>/models/ffmpeg/bin`；
+3. **`D:\thirdparty\ffmpeg\bin`**（本项目的约定目录，三方软件统一放这里）；
+4. `C:\ffmpeg\bin`、`C:\Program Files\ffmpeg\bin`、`C:\ProgramData\chocolatey\bin`；
+5. 最后回退到 PATH 里的 `ffmpeg` / `ffprobe`。
+
+安装就是把 [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) 的 essentials 压缩包解压，
+保证 `D:\thirdparty\ffmpeg\bin\ffmpeg.exe` 与 `bin\ffprobe.exe` 同时存在。
+`GET /api/video/health` 会返回 `available`、版本号、实际路径，以及**所有搜索过的路径**，
+排查时不用猜。
+
+失败时的行为是降级而不是报错：视频仍能播放、能打标记，只是截帧/音频/时间轴缩略图
+会返回明确的错误码（`FFMPEG_NOT_FOUND` 等）。
+
+### 10.2 资源库
+
+资源库不是虚拟列表，磁盘目录就是唯一事实来源：
+
+```
+data/library/                    ← IMAGE_CLIP_LIBRARY_DIR 可覆盖
+├─ 关键帧/<视频名>/frame-0001.png   ← 视频截帧默认落点
+├─ 音频/<视频名>.mp3              ← 音频提取默认落点
+├─ 导出/                         ← 图片工具「保存到资源库」的默认落点
+└─ …用户自建子目录
+data/library-thumbs/             ← 缩略图缓存（按 路径+mtime 命名）
+data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime+数量+宽度 哈希）
+```
+
+* **上传**：`POST /api/library/upload`，流式落盘到 `.part-` 临时文件，完成后原子改名，
+  列表里不会出现半截文件。文件名和目录放在 `X-File-Name` / `X-File-Dir` 头里
+  （前端已 `encodeURIComponent`，所以中文名不会乱码）。默认上限 2GB
+  （`IMAGE_CLIP_MAX_UPLOAD_BYTES`）。
+* **路径安全**：所有相对路径都在服务端 `resolve()` 里校验，拒绝 `..`、绝对路径和越界，
+  前端拿到的永远是相对资源库根目录的 POSIX 路径。
+* **批量改名**：`buildBatchNames(list, config)` 是纯函数，支持编号（起始值/步长/补零）、
+  查找替换、前后缀、大小写；UI 先预览新旧对照再提交，冲突与非法字符在后端返回逐条结果。
+* **预览**：`previewPath` + 左右方向键在**当前筛选结果**里前后翻页，不跳出当前目录/搜索。
+* **一键转入编辑**：把资源库文件取成 Blob → `workspace.addFiles` → 切到对应的图片工作区；
+  批量选中多张时可以直接进入裁剪工作区做批量裁剪。
+* **文件服务**：`GET /api/library/file` 走 `res.sendFile`，因此支持 Range 请求，
+  `<video>` 可以拖动进度条、只加载需要的片段。
+
+### 10.3 视频工作区
+
+* **探测**：`ffprobe` 给出时长、宽高、帧率、编码、码率、是否有音轨。
+* **完整时间轴**：服务端用 FFmpeg 均匀抽 `count` 帧、缩到 `width` 拼成胶片条；
+  前端按 `flex:1` 平铺，叠加自适应刻度（0.5s~600s 里挑一个让标签 ≤12 个的步长）、
+  手动标记（红竖线）和播放头。拖动时间轴会持续 seek，按下即暂停。
+* **三种截帧模式**（`POST /api/video/frames`）：
+  * `interval`：固定间隔（0.05s~3600s）；
+  * `count`：在整段视频上均匀取 N 帧；
+  * `times`：只截时间轴上手动打的点。
+
+  单次最多 **120 帧**（`MAX_FRAMES`），输出默认 `关键帧/<视频名>/`，
+  支持 png/jpg、输出宽度、文件名前缀。返回 `requested/extracted/failed/entries/folder/elapsedMs`，
+  单帧失败不影响其它帧。
+* **提取音频**（`POST /api/video/audio`）：mp3 / m4a / wav / flac，默认落到 `音频/`；
+  没有音轨时直接返回 422 `AUDIO_MISSING`，前端按钮同步禁用。
+* 播放过程中的真实位置由 `<video>` 的 `timeupdate` 维护，`state.currentTime` 只在
+  `seekTo()` 时写入 —— 这样播放头不会因为状态回写而抖动。
+
+### 10.4 背景去除（`shared/bgremove.js`）
+
+纯算法、零依赖，浏览器与 Node 都能跑同一份代码：
+
+1. **边框取色**：统计画面四周 `ring=2px` 环带里的颜色，按每通道 4bit 量化后聚类，
+   得到 1~3 个候选背景色（纯色、双色渐变、简单扎染底都能覆盖）；
+2. **颜色距离 + 连通性**：加权 RGB 距离（0.299R²+0.587G²+0.114B²）判定“像不像背景”，
+   默认从四条边做 4 邻域漫水，只抠**与边缘连通**的区域 —— 人物身上的白衣服不会被误抠；
+   需要“全图同色都去掉”时可以关掉连通性；
+3. **收放边**：先按 `erode` 收缩（切掉底色描边），再按 `feather` 羽化，让 alpha 平滑过渡；
+   勾选「反混合」时按 `B = (I − α·C)/(1 − α)` 把半透明边缘的底色污染一起解掉。
+
+参数默认值在 `BG_DEFAULTS`：容差 32、连通开、羽化 2px、收缩 0、`maxColors 3`。
+界面上的取色器可以直接在图上点任意位置取色（存原图坐标，预览缩放不影响精度）。
+
+**套索**（`shared/selection.js`）用扫描线多边形栅格化（按像素中心判定，边界不吃像素），
+选区模式三种：`inside` 只处理选区内、`outside` 只处理选区外、`all` 忽略套索。
+套索点存的是**原图坐标**，所以「1600px 预览上画的套索 → 原分辨率应用」结果一致。
+
+预览与导出分离：预览最长边 1600px 保证交互跟手，「按原图分辨率应用」时才用原图重算，
+避免大图每次都跑全量算法。
+
+### 10.5 图片裁剪（`shared/selection.js` + `useCropTool`）
+
+* 内置比例：1:1、4:3、3:2、16:9、9:16、4:5、3:4、2:3，另有自由比例；
+* 裁剪框可输入 X/Y/宽/高精确值，滚轮缩放、拖动平移，8 个手柄缩放（锁比例时按角缩放）；
+* **输出尺寸**：`natural`（裁剪框原尺寸）或 `resize`（指定宽/高，另一边按比例推算，
+  上限 20000px 收敛）；内置常用尺寸（头像 512、1080p、4K 等）并可**保存自定义尺寸**，
+  存在 localStorage，跨会话可用；
+* **批量裁剪**：以「归一化矩形」描述取景（`rectFromNormalized`），套到**每一张尺寸不同的图**
+  上都保持同样的构图。典型用法：选中视频批量截出来的关键帧 → 一次裁剪全部；
+  结果可写回资源库（`裁剪结果/`）或打包 ZIP 下载，面板里有逐张进度。
+
+### 10.6 橡皮擦（`useEraser`）
+
+* 每个素材一块工作画布（`markRaw` 保存，避免 Vue 深度代理 4K 画布）；
+* 用 `destination-out` + 径向渐变实现硬度/强度；「还原」模式用印章 canvas 走
+  `destination-in` 把原图重新盖回来；
+* **脏矩形撤销**：一笔只记录笔迹包围盒（首次整块截图，扩张时补录新增条带），
+  避免每次操作都存整图 ImageData（24MP ≈ 96MB/次）。历史上限 20 步；
+* 导出 `xxx-擦除.png`，可「生成新素材」「仅下载」「保存到资源库」。
+
+### 10.7 音频（`useAudio`）
+
+* 音频统一走资源库：`fetch` 取 Blob → `AudioContext.decodeAudioData` 得到 `AudioBuffer`，
+  播放链路为 `AudioBufferSourceNode → GainNode → destination`，播放头按 `AudioContext` 时钟推算，
+  完全不依赖 FFmpeg；
+* 舞台是一块 canvas：上层是解码后离线 FFT 的频谱热力图（360 列 × 96 个对数频段），
+  下层是峰值降采样的波形包络；单击定位播放头，横向拖动框选保留区间，选区可循环试听；
+* 裁剪生成新的 **PCM16 WAV** 写入资源库（默认 `音频/`），**原文件不动**；
+  也可以只裁剪内存缓冲继续试听，或直接下载 WAV；采样率与声道跟随源文件，不做重采样；
+* 资源库双击音频、检查器「在音频工作区打开」都会直接载入到第 8 个工作区。
+
+### 10.8 新增 HTTP API
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/library/tree` | 文件 + 文件夹扁平列表与统计（前端组树） |
+| GET | `/api/library/file?path=` | 原文件（支持 Range，可直接给 `<video>` 用） |
+| GET | `/api/library/thumb?path=` | WebP 缩略图（按 mtime 缓存） |
+| POST | `/api/library/upload` | 流式上传（`X-File-Name` / `X-File-Dir`） |
+| POST | `/api/library/mkdir` | 新建子目录 |
+| POST | `/api/library/rename` | 批量改名（逐条返回成功/失败） |
+| POST | `/api/library/move` | 批量移动（文件与目录） |
+| POST | `/api/library/delete` | 批量删除 |
+| GET | `/api/video/health` | FFmpeg 可用性、版本、搜索过的路径 |
+| GET | `/api/video/probe?path=` | ffprobe 元信息（时长/帧率/编码/音轨） |
+| POST | `/api/video/filmstrip` | 时间轴缩略图（`path`、`count`、`width`） |
+| POST | `/api/video/frames` | 截帧（`mode`+`interval`/`count`/`times`、`format`、`width`、`prefix`、`dir`） |
+| POST | `/api/video/audio` | 提取音轨（`format`、`name`、`dir`） |
+
+### 10.8 测试
+
+`npm test` 里新增了两组共享算法单测：
+
+* `shared/selection.test.js`：比例矩形、归一化往返、套索栅格化、选区模式、预览缩放换算；
+* `shared/bgremove.test.js`：边框主色识别（含双色渐变）、连通漫水、套索限制、羽化/收缩、反混合。
+

@@ -46,6 +46,9 @@ import { textModelStatus } from './text-detect.js';
 import { wmModelStatus } from './wm-model.js';
 import { createLlmRouter } from './llm/routes.js';
 import { DETECT_METHODS, DEFAULT_DETECT_OPTIONS } from '../../shared/watermark/detect.js';
+import { ffmpegStatus } from './ffmpeg.js';
+import { createLibrary, createLibraryRouter } from './library.js';
+import { createVideoRouter } from './video.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '../..');
@@ -60,6 +63,10 @@ export function createApp() {
   const app = express();
   app.disable('x-powered-by');
 
+  // 资源库与视频工作区共用同一个 library 实例：视频接口也通过它做路径校验与落盘。
+  const library = createLibrary();
+  library.init().catch((err) => console.warn('[image-clip] 资源库初始化失败:', err.message));
+
   // 所有写接口都用“原始二进制”接收，JSON 负载由 extractInput 内部分支处理。
   const rawBody = express.raw({ type: () => true, limit: LIMITS.maxUploadBytes });
 
@@ -71,6 +78,7 @@ export function createApp() {
     } catch {
       /* sharp 不可用时仍然报告服务状态，便于定位 */
     }
+    const ffmpeg = await ffmpegStatus();
     res.json({
       ok: true,
       service: 'image-clip-server',
@@ -78,6 +86,8 @@ export function createApp() {
       engine: 'node-sharp',
       sharp: sharpVersion,
       sharpAvailable: Boolean(sharpVersion),
+      ffmpeg,
+      library: { root: library.root, thumbnails: library.thumbnailRoot },
       outputFormats: OUTPUT_FORMATS,
       limits: LIMITS,
       defaults: DEFAULT_OPTIONS,
@@ -313,6 +323,10 @@ export function createApp() {
       next(err);
     }
   });
+
+  // 资源库 & 视频工作区（放在图片接口之后、静态资源之前；路径互不冲突）。
+  app.use('/api/library', createLibraryRouter(library));
+  app.use('/api/video', createVideoRouter(library));
 
   // 大模型接入（提供方注册、对话、工具调用）。放在静态资源之前挂载。
   app.use('/api/llm', createLlmRouter());

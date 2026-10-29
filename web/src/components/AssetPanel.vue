@@ -2,6 +2,7 @@
 /** 左侧素材列表（对应 Figma 的图层/资源面板）。 */
 import { computed } from 'vue';
 import { useWorkspace } from '../composables/useWorkspace.js';
+import { openUploadPicker } from '../composables/useUploadPicker.js';
 import { formatBytes, formatRatio } from '../lib/imaging.js';
 
 const { state, selected, stats, actions } = useWorkspace();
@@ -17,12 +18,13 @@ function savedRatio(item) {
 }
 
 function pickFiles() {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'image/*';
-  input.multiple = true;
-  input.onchange = () => actions.addFiles(input.files);
-  input.click();
+  openUploadPicker({
+    title: '导入图片',
+    description: '图片会加入左侧素材列表，不会写入资源库',
+    accept: 'image/*',
+    dest: 'workspace',
+    actionLabel: '导入',
+  });
 }
 </script>
 

@@ -1,28 +1,42 @@
 <script setup>
-/** 顶部工具栏：品牌、当前素材、模式/引擎切换、导入入口、主题。 */
+/**
+ * 顶部工具栏（两行）
+ * ------------------
+ * 第一行：品牌、当前文档、AI 对话、主题、导入。
+ * 第二行：9 个工作区切换 + 当前工作区相关的能力/引擎控件。
+ *
+ * 为什么分成两行：工作区从 2 个涨到 9 个以后，和引擎控件挤在 48px 里一定会
+ * 把文字压扁；拆成「内容行 + 模式行」既保留了原有视觉，也让每个模式都有稳定宽度。
+ */
 import { computed } from 'vue';
+
 import SegmentedControl from './ui/SegmentedControl.vue';
 import { useWorkspace } from '../composables/useWorkspace.js';
 import { useWatermark } from '../composables/useWatermark.js';
 import { useLlmChat } from '../composables/useLlmChat.js';
+import { useAppMode, MODES } from '../composables/useAppMode.js';
+import { useLibrary } from '../composables/useLibrary.js';
+import { useVideo } from '../composables/useVideo.js';
+import { useAudio } from '../composables/useAudio.js';
+import { openImportPicker } from '../composables/useUploadPicker.js';
 import { ENGINES } from '../lib/engine.js';
 import { formatBytes } from '../lib/imaging.js';
+import { formatDuration, formatSize } from '../lib/library.js';
 import { SERVER_HINT } from '../lib/watermark.js';
 
 const { state, selected, stats, actions, meta } = useWorkspace();
 const { state: watermarkState, actions: watermarkActions } = useWatermark();
 const { state: llmState, actions: llmActions } = useLlmChat();
+const { state: appMode, currentMode, actions: modeActions } = useAppMode();
+const { state: libraryState, stats: libraryStats } = useLibrary();
+const { state: videoState, videoName } = useVideo();
+const { state: audioState } = useAudio();
 
-const MODES = [
-  { value: 'crop', label: '透明裁剪', hint: '检测 AABB 透明区域并裁剪' },
-  { value: 'watermark', label: '水印去除', hint: '识别水印掩膜并做内容修复' },
-];
+const mode = computed(() => appMode.mode);
+const isImageMode = computed(() => ['crop', 'cropimage', 'bgremove', 'eraser', 'watermark', 'pixel'].includes(mode.value));
 
-/**
- * 水印模式的引擎取自 health 能力报告（缺项时退回契约里固定的三个值）。
- * 后端把 unblend 与 opencv 都归为“本地 OpenCV”一类，但 value 原样透传，
- * 后端仍然能区分是反混合还是修补。
- */
+const engineOptions = computed(() => ENGINES.map((engine) => ({ value: engine.value, label: engine.label, hint: engine.hint })));
+
 const WATERMARK_ENGINES = {
   auto: { label: '自动', hint: '按可用性自动挑选去除引擎' },
   unblend: { label: '本地 OpenCV', hint: '半透明水印反混合，推荐首选' },
@@ -30,21 +44,13 @@ const WATERMARK_ENGINES = {
   lama: { label: 'LaMa 深度', hint: '深度模型修复，复杂纹理最好，显存占用高' },
 };
 
-const engineOptions = computed(() =>
-  ENGINES.map((engine) => ({
-    value: engine.value,
-    label: engine.label,
-    hint: engine.hint,
-  })),
-);
-
 const watermarkEngineOptions = computed(() => {
   const list = watermarkState.health.checked ? watermarkState.health.engines : [];
   const usable = list.length ? list : Object.keys(WATERMARK_ENGINES);
   return usable.map((value) => ({ value, ...(WATERMARK_ENGINES[value] ?? { label: value }) }));
 });
 
-const engineHint = computed(() => {
+const watermarkHint = computed(() => {
   if (!watermarkState.health.checked) return '正在检查水印服务…';
   if (!watermarkState.health.ok) return SERVER_HINT;
   const { lama, lamaBytes, opencv } = watermarkState.health;
@@ -53,112 +59,175 @@ const engineHint = computed(() => {
   return parts.join(' · ');
 });
 
-const currentLabel = computed(() => {
-  if (state.items.length === 0) return '未导入素材';
-  if (!selected.value) return `${state.items.length} 张素材`;
+/** 第一行左侧显示的“当前文档”。 */
+const docLabel = computed(() => {
+  if (mode.value === 'library') return libraryState.currentDir ? `资源库 / ${libraryState.currentDir}` : '资源库';
+  if (mode.value === 'video') return videoName.value || '视频工作区';
+  if (mode.value === 'audio') return audioState.name || '音频工作区';
+  if (!selected.value) return '未导入素材';
   return selected.value.name;
 });
 
+const docMeta = computed(() => {
+  if (mode.value === 'library') {
+    return `${libraryStats.value.files} 个文件 · ${libraryStats.value.folders} 个目录 · ${formatSize(libraryStats.value.bytes)}`;
+  }
+  if (mode.value === 'video') {
+    const info = videoState.meta;
+    if (!info) return '从左侧选择视频';
+    return `${info.width || '?'}×${info.height || '?'} · ${formatDuration(info.duration)}${info.fps ? ` · ${info.fps.toFixed(2)}fps` : ''}`;
+  }
+  if (mode.value === 'audio') {
+    if (!audioState.activePath) return '从左侧选择音频';
+    const rate = audioState.sampleRate ? `${(audioState.sampleRate / 1000).toFixed(1)}kHz` : '—';
+    const channels = audioState.channels === 1 ? '单声道' : audioState.channels === 2 ? '立体声' : `${audioState.channels || '?'} 声道`;
+    return `${formatDuration(audioState.duration)} · ${rate} · ${channels}`;
+  }
+  return `${stats.value.total} 张素材 · ${formatBytes(stats.value.sourceBytes)}`;
+});
+
+const importLabel = computed(() => {
+  if (mode.value === 'video') return '导入视频';
+  if (mode.value === 'audio') return '导入音频';
+  if (mode.value === 'library') return '上传文件';
+  return '导入图片';
+});
+
+/** 统一走应用内上传弹窗（按当前工作区决定目标位置与文件类型）。 */
 function pickFiles() {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'image/*';
-  input.multiple = true;
-  input.onchange = () => actions.addFiles(input.files);
-  input.click();
+  openImportPicker(mode.value);
 }
 </script>
 
 <template>
   <header class="topbar">
-    <div class="topbar-left">
-      <span class="logo" aria-hidden="true">
-        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-          <path d="M3 7V4.5A1.5 1.5 0 0 1 4.5 3H7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-          <path d="M13 3h2.5A1.5 1.5 0 0 1 17 4.5V7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-          <path d="M17 13v2.5A1.5 1.5 0 0 1 15.5 17H13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-          <path d="M7 17H4.5A1.5 1.5 0 0 1 3 15.5V13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-          <rect x="6.5" y="6.5" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.4" />
-        </svg>
-      </span>
-      <div class="brand">
-        <span class="brand-name">ImageClip</span>
-        <span class="chip">{{ meta.ALGORITHM }}</span>
-      </div>
-      <span class="divider" />
-      <div class="doc">
-        <span class="doc-name">{{ currentLabel }}</span>
-        <span class="doc-meta muted">
-          {{ stats.total }} 张 · {{ stats.ready }} 张可裁剪
-          <template v-if="stats.sourceBytes"> · {{ formatBytes(stats.sourceBytes) }}</template>
+    <div class="topbar-main">
+      <div class="topbar-left">
+        <span class="logo" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M3 7V4.5A1.5 1.5 0 0 1 4.5 3H7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+            <path d="M13 3h2.5A1.5 1.5 0 0 1 17 4.5V7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+            <path d="M17 13v2.5A1.5 1.5 0 0 1 15.5 17H13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+            <path d="M7 17H4.5A1.5 1.5 0 0 1 3 15.5V13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+            <rect x="6.5" y="6.5" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.4" />
+          </svg>
         </span>
+        <div class="brand">
+          <span class="brand-name">ImageClip</span>
+          <span class="chip">{{ meta.ALGORITHM }}</span>
+        </div>
+        <span class="divider" />
+        <div class="doc">
+          <span class="doc-name" :title="docLabel">{{ docLabel }}</span>
+          <span class="doc-meta muted">{{ docMeta }}</span>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <button
+          class="btn is-ghost"
+          type="button"
+          :title="llmState.providers.length ? '用自然语言操作图片（本地大模型）' : '还没有可用的模型端点'"
+          @click="llmActions.toggle()"
+        >
+          <span class="ai-dot" :class="llmState.activeError ? 'bad' : llmState.activeReachable ? 'ok' : 'idle'" />
+          AI 对话
+        </button>
+        <button class="btn is-ghost is-icon" type="button" title="切换主题" @click="actions.toggleTheme()">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path
+              d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linecap="round"
+            />
+            <circle cx="8" cy="8" r="2.6" stroke="currentColor" stroke-width="1.3" />
+          </svg>
+        </button>
+        <button v-if="isImageMode" class="btn" type="button" :disabled="state.busy" @click="actions.loadSamples()">载入示例</button>
+        <button class="btn is-primary" type="button" @click="pickFiles">{{ importLabel }}</button>
       </div>
     </div>
 
-    <div class="topbar-center">
-      <SegmentedControl
-        :model-value="watermarkState.mode"
-        :options="MODES"
-        size="sm"
-        @update:model-value="watermarkActions.setMode($event)"
-      />
-      <span class="divider" />
-      <!-- 两种模式的引擎语义完全不同：裁剪模式是“在哪算”，水印模式是“用什么算法修”，因此按模式替换而不是并排 -->
-      <SegmentedControl
-        v-if="watermarkState.mode === 'crop'"
-        :model-value="state.engine"
-        :options="engineOptions"
-        size="sm"
-        @update:model-value="actions.setEngine($event)"
-      />
-      <template v-else>
-        <SegmentedControl
-          :model-value="watermarkState.options.engine"
-          :options="watermarkEngineOptions"
-          size="sm"
-          @update:model-value="watermarkActions.setOption('engine', $event)"
-        />
-        <span class="engine-hint muted" :title="engineHint">{{ engineHint }}</span>
-      </template>
-    </div>
+    <div class="topbar-modes">
+      <nav class="mode-tabs" role="tablist">
+        <button
+          v-for="item in MODES"
+          :key="item.value"
+          class="mode-tab"
+          :class="{ 'is-active': item.value === mode }"
+          type="button"
+          role="tab"
+          :aria-selected="item.value === mode"
+          :title="`${item.hint}（快捷键 ${item.key}）`"
+          @click="modeActions.setMode(item.value)"
+        >
+          <span class="mode-key">{{ item.key }}</span>
+          {{ item.label }}
+        </button>
+      </nav>
 
-    <div class="topbar-right">
-      <button
-        class="btn is-ghost"
-        type="button"
-        :title="llmState.providers.length ? '用自然语言操作图片（本地大模型）' : '还没有可用的模型端点'"
-        @click="llmActions.toggle()"
-      >
-        <span class="ai-dot" :class="llmState.activeError ? 'bad' : llmState.activeReachable ? 'ok' : 'idle'" />
-        AI 对话
-      </button>
-      <button class="btn is-ghost is-icon" type="button" title="切换主题" @click="actions.toggleTheme()">
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
-          <path
-            d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"
-            stroke="currentColor"
-            stroke-width="1.3"
-            stroke-linecap="round"
+      <div class="mode-controls">
+        <template v-if="mode === 'crop'">
+          <SegmentedControl
+            :model-value="state.engine"
+            :options="engineOptions"
+            size="sm"
+            @update:model-value="actions.setEngine($event)"
           />
-          <circle cx="8" cy="8" r="2.6" stroke="currentColor" stroke-width="1.3" />
-        </svg>
-      </button>
-      <button class="btn" type="button" :disabled="state.busy" @click="actions.loadSamples()">载入示例</button>
-      <button class="btn is-primary" type="button" :disabled="state.busy" @click="pickFiles">导入图片</button>
+        </template>
+        <template v-else-if="mode === 'watermark'">
+          <SegmentedControl
+            :model-value="watermarkState.options.engine"
+            :options="watermarkEngineOptions"
+            size="sm"
+            @update:model-value="watermarkActions.setOption('engine', $event)"
+          />
+          <span class="engine-hint muted" :title="watermarkHint">{{ watermarkHint }}</span>
+        </template>
+        <template v-else-if="mode === 'video'">
+          <span class="engine-hint muted">
+            {{ videoState.health.checked ? (videoState.health.ok ? 'FFmpeg 就绪' : 'FFmpeg 未就绪') : '正在检查 FFmpeg…' }}
+          </span>
+        </template>
+        <template v-else-if="mode === 'audio'">
+          <span class="engine-hint muted">
+            {{ audioState.loading ? '正在解码…' : audioState.sampleRate ? `${(audioState.sampleRate / 1000).toFixed(1)}kHz · Web Audio` : 'Web Audio · 支持框选裁剪' }}
+          </span>
+        </template>
+        <template v-else>
+          <span class="mode-hint muted">{{ currentMode.hint }}</span>
+        </template>
+      </div>
     </div>
   </header>
 </template>
 
 <style scoped>
 .topbar {
+  flex: none;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar-main {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   height: 48px;
   padding: 0 12px;
+}
+
+.topbar-modes {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 34px;
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
   background: var(--panel);
-  border-bottom: 1px solid var(--border);
 }
 
 .topbar-left,
@@ -173,20 +242,65 @@ function pickFiles() {
   flex: 1;
 }
 
-.topbar-center {
+.topbar-right {
+  flex: none;
+}
+
+.mode-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.mode-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.mode-tab:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.mode-tab.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.mode-key {
+  font-family: var(--mono);
+  font-size: 9px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--panel-3);
+  color: var(--text-muted);
+}
+
+.mode-tab.is-active .mode-key {
+  background: var(--accent);
+  color: #fff;
+}
+
+.mode-controls {
   display: flex;
   align-items: center;
   gap: 8px;
   flex: none;
+  max-width: 42%;
 }
 
-.topbar-right {
-  flex: 1;
-  justify-content: flex-end;
-}
-
-.engine-hint {
-  max-width: 240px;
+.engine-hint,
+.mode-hint {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
