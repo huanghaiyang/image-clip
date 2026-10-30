@@ -15,6 +15,7 @@ import { useWorkspace } from '../composables/useWorkspace.js';
 import { useVideo } from '../composables/useVideo.js';
 import { useAudio } from '../composables/useAudio.js';
 import { useRenamePrompt } from '../composables/useRenamePrompt.js';
+import { useConfirm } from '../composables/useConfirm.js';
 import { setMode } from '../composables/useAppMode.js';
 import { formatDuration, formatSize, libraryFileUrl, libraryThumbUrl } from '../lib/library.js';
 import { buildResourceTree, flattenResourceTree } from '../lib/resourceTree.js';
@@ -38,6 +39,7 @@ const { actions: videoActions, state: videoState } = useVideo();
 const { actions: audioActions, state: audioState } = useAudio();
 const { selected: workspaceSelected } = useWorkspace();
 const { actions: renameActions } = useRenamePrompt();
+const { confirm } = useConfirm();
 
 const KIND_FILTERS = [
   { value: 'all', label: '全部' },
@@ -180,6 +182,18 @@ function startRename(item, isFolder = false) {
   renameActions.open(item, isFolder);
 }
 
+/** 整个文件夹连同子目录一起移入回收站。 */
+async function removeFolder(folder) {
+  const ok = await confirm({
+    title: '删除文件夹',
+    message: `将文件夹「${folder.name}」及其中的全部内容移入回收站？`,
+    detail: folder.path,
+    confirmText: '移入回收站',
+    danger: true,
+  });
+  if (ok) void actions.deleteFolder(folder);
+}
+
 function thumbOf(entry) {
   return failedThumbs.value.has(entry.path) ? '' : libraryThumbUrl(entry);
 }
@@ -305,6 +319,22 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
             @dblclick.stop
             >✎</span
           >
+          <span
+            class="folder-delete"
+            role="button"
+            title="删除文件夹（移入回收站）"
+            @click.stop="removeFolder(folder)"
+            @dblclick.stop
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+              <path
+                d="M3 4.5h10M6.2 4.5V3.2h3.6v1.3M4.4 4.5l.6 8h6l.6-8"
+                stroke="currentColor"
+                stroke-width="1.2"
+                stroke-linecap="round"
+              />
+            </svg>
+          </span>
         </button>
 
         <button
@@ -381,6 +411,22 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
               @dblclick.stop
               >✎</span
             >
+            <span
+              class="folder-delete"
+              role="button"
+              title="删除文件夹（移入回收站）"
+              @click.stop="removeFolder(row)"
+              @dblclick.stop
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                <path
+                  d="M3 4.5h10M6.2 4.5V3.2h3.6v1.3M4.4 4.5l.6 8h6l.6-8"
+                  stroke="currentColor"
+                  stroke-width="1.2"
+                  stroke-linecap="round"
+                />
+              </svg>
+            </span>
             <span class="tree-row-count mono">{{ row.count }}</span>
           </button>
 
@@ -854,9 +900,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
   font-size: 9px;
 }
 
-/* 卡片 / 树形行上的重命名快捷入口：常驻但低调，悬停放大可点区域 */
+/* 卡片 / 树形行上的重命名与删除快捷入口：常驻但低调，悬停放大可点区域 */
 .folder-rename,
-.row-rename {
+.row-rename,
+.folder-delete {
   flex: none;
   display: grid;
   place-items: center;
@@ -872,10 +919,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
 }
 
 .folder-rename:hover,
-.row-rename:hover {
+.row-rename:hover,
+.folder-delete:hover {
   opacity: 1;
   background: var(--panel-3);
   color: var(--accent);
+}
+
+.folder-delete:hover {
+  color: var(--danger);
 }
 
 .thumb-rename {

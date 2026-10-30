@@ -10,12 +10,14 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 
 import { useLibrary } from '../composables/useLibrary.js';
+import { useConfirm } from '../composables/useConfirm.js';
 import { fetchLibraryTrash, formatDuration, formatSize, purgeLibraryTrash, restoreLibraryTrash } from '../lib/library.js';
 
 defineProps({ open: { type: Boolean, default: false } });
 const emit = defineEmits(['close']);
 
 const { actions } = useLibrary();
+const { confirm } = useConfirm();
 
 const items = ref([]);
 const loading = ref(false);
@@ -81,7 +83,14 @@ async function restore(item) {
 }
 
 async function purge(item) {
-  if (!window.confirm(`彻底删除「${item.name}」？此操作不可撤销。`)) return;
+  const ok = await confirm({
+    title: '彻底删除',
+    message: `「${item.name}」将被永久删除。`,
+    detail: item.originalPath ? `原位置：${item.originalPath}` : '',
+    confirmText: '彻底删除',
+    danger: true,
+  });
+  if (!ok) return;
   busy.value = true;
   error.value = '';
   try {
@@ -97,7 +106,14 @@ async function purge(item) {
 
 async function purgeAll() {
   if (!items.value.length) return;
-  if (!window.confirm(`清空回收站？将彻底删除 ${items.value.length} 项，此操作不可撤销。`)) return;
+  const ok = await confirm({
+    title: '清空回收站',
+    message: `将永久删除回收站中的 ${items.value.length} 项。`,
+    detail: '此操作不可撤销。',
+    confirmText: '清空回收站',
+    danger: true,
+  });
+  if (!ok) return;
   busy.value = true;
   error.value = '';
   try {

@@ -9,11 +9,13 @@ import { computed, ref } from 'vue';
 
 import { useLibrary } from '../composables/useLibrary.js';
 import { useRenamePrompt } from '../composables/useRenamePrompt.js';
+import { useConfirm } from '../composables/useConfirm.js';
 import { openUploadPicker } from '../composables/useUploadPicker.js';
 import { formatSize } from '../lib/library.js';
 
 const { state, folderTree, currentFolders, currentEntries, stats, actions } = useLibrary();
 const { actions: renameActions } = useRenamePrompt();
+const { confirm } = useConfirm();
 
 const creating = ref(false);
 const folderName = ref('');
@@ -56,6 +58,18 @@ async function submitFolder() {
 /** 目录树上的重命名入口；根目录不可改名。 */
 function renameFolder(folder) {
   renameActions.open(folder, true);
+}
+
+/** 整个文件夹连同子目录一起移入回收站。 */
+async function removeFolder(folder) {
+  const ok = await confirm({
+    title: '删除文件夹',
+    message: `将文件夹「${folder.name}」及其中的全部内容移入回收站？`,
+    detail: folder.path,
+    confirmText: '移入回收站',
+    danger: true,
+  });
+  if (ok) void actions.deleteFolder(folder);
 }
 </script>
 
@@ -104,6 +118,22 @@ function renameFolder(folder) {
           @click.stop="renameFolder(folder)"
           >✎</span
         >
+        <span
+          v-if="!folder.isRoot"
+          class="tree-delete"
+          role="button"
+          title="删除文件夹（移入回收站）"
+          @click.stop="removeFolder(folder)"
+        >
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+            <path
+              d="M3 4.5h10M6.2 4.5V3.2h3.6v1.3M4.4 4.5l.6 8h6l.6-8"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+            />
+          </svg>
+        </span>
         <span v-if="childCount.has(folder.path)" class="tree-badge">·</span>
       </button>
       <div v-if="folderTree.length <= 1" class="tree-empty">还没有子目录，可在下方新建</div>
@@ -266,7 +296,8 @@ function renameFolder(folder) {
   color: var(--accent);
 }
 
-.tree-rename {
+.tree-rename,
+.tree-delete {
   flex: none;
   display: grid;
   place-items: center;
@@ -281,10 +312,15 @@ function renameFolder(folder) {
   transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
 }
 
-.tree-rename:hover {
+.tree-rename:hover,
+.tree-delete:hover {
   opacity: 1;
   background: var(--panel-3);
   color: var(--accent);
+}
+
+.tree-delete:hover {
+  color: var(--danger);
 }
 
 .tree-empty {

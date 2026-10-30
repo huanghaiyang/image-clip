@@ -539,6 +539,40 @@ export async function deleteSelected() {
 }
 
 /**
+ * 删除整个文件夹（连同子目录与文件一起移入回收站）。
+ * 与 deleteSelected 的区别：不依赖当前选中项，且会处理“正在浏览/预览/选中”
+ * 恰好位于该文件夹内部的情况，避免刷新后停在已不存在的目录。
+ */
+export async function deleteFolder(folder) {
+  const path = folder?.path ?? '';
+  if (!path) return false;
+  const name = folder?.name || path.split('/').pop();
+  state.busy = true;
+  try {
+    const result = await deleteLibraryItems([path]);
+    const inside = (value) => Boolean(value) && (value === path || value.startsWith(`${path}/`));
+    // 先退出被删目录，再刷新，避免请求已不存在的路径
+    if (inside(state.currentDir)) {
+      state.currentDir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+    }
+    if (inside(state.previewPath)) {
+      state.previewPath = '';
+    }
+    state.selected = state.selected.filter((item) => !inside(item));
+    await refreshLibrary({ quiet: true });
+    const failed = failedCount(result);
+    if (failed) setError(`删除文件夹部分失败：${failed} 项`);
+    else setStatus(`已将文件夹「${name}」及其内容移入回收站`);
+    return result.ok;
+  } catch (err) {
+    setError(`删除文件夹失败：${err.message}`);
+    return false;
+  } finally {
+    state.busy = false;
+  }
+}
+
+/**
  * 上传一个新版本覆盖已有文件（旧内容由服务端存为历史版本）。
  * 用于资源检查器里的「上传新版本」，让编辑前后的内容都可以找回。
  */
@@ -719,6 +753,7 @@ export function useLibrary() {
       batchRename,
       moveSelected,
       deleteSelected,
+      deleteFolder,
       openPreview,
       closePreview,
       stepPreview,

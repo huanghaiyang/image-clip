@@ -532,6 +532,25 @@ export function createLibrary(options = {}) {
 
   // ------------------------------------------------------------- 回收站
 
+  /** 删除前统计目录的真实占用（回收站列表里文件夹不再是 0 B）。 */
+  async function pathBytes(abs, stat) {
+    if (!stat.isDirectory()) return stat.size;
+    let total = 0;
+    let dirents = [];
+    try {
+      dirents = await fs.readdir(abs, { withFileTypes: true });
+    } catch {
+      return 0;
+    }
+    for (const dirent of dirents) {
+      const childAbs = path.join(abs, dirent.name);
+      const childStat = await fs.lstat(childAbs).catch(() => null);
+      if (!childStat) continue;
+      total += childStat.isDirectory() ? await pathBytes(childAbs, childStat) : childStat.size;
+    }
+    return total;
+  }
+
   /**
    * 删除 = 移入回收站。
    * 每项单独放进 `.trash/<id>/`：`item.<ext>` 保存原文件（目录则整体移动），
@@ -557,7 +576,7 @@ export function createLibrary(options = {}) {
           name: path.basename(abs),
           payload,
           isDir,
-          bytes: stat.size,
+          bytes: await pathBytes(abs, stat),
           deletedAt: Date.now(),
         };
         await fs.writeFile(path.join(itemDir, 'meta.json'), JSON.stringify(record, null, 2), 'utf8');
@@ -613,13 +632,13 @@ export function createLibrary(options = {}) {
           dir: posixDir(record.path),
           isDir: Boolean(record.isDir),
           deletedAt: record.deletedAt ?? null,
-          kind: info.kind,
-          bytes: stat.size,
+          kind: record.isDir ? 'folder' : info.kind,
+          bytes: record.isDir ? record.bytes ?? 0 : stat.size,
           width: info.width ?? null,
           height: info.height ?? null,
           duration: info.duration ?? null,
-          url: info.url,
-          thumbUrl: info.thumbUrl,
+          url: record.isDir ? null : info.url,
+          thumbUrl: record.isDir ? null : info.thumbUrl,
         });
       } catch {
         /* 单条损坏不影响整个回收站列表 */

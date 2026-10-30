@@ -10,12 +10,14 @@
 import { computed, ref, watch } from 'vue';
 
 import { useLibrary } from '../composables/useLibrary.js';
+import { useConfirm } from '../composables/useConfirm.js';
 import { useVideo } from '../composables/useVideo.js';
 import { useAudio } from '../composables/useAudio.js';
 import { setMode } from '../composables/useAppMode.js';
 import { formatDuration, formatSize, fetchLibraryVersions } from '../lib/library.js';
 
 const { state, selectedEntries, selectedFolders, selectedSummary, moveTargets, actions } = useLibrary();
+const { confirm } = useConfirm();
 const { actions: videoActions } = useVideo();
 const { actions: audioActions } = useAudio();
 
@@ -117,9 +119,12 @@ async function onVersionFile(event) {
 
 async function restoreVersion(version) {
   if (!single.value) return;
-  const ok = window.confirm(
-    `恢复「${single.value.name}」到 ${versionTime(version.at)} 的版本？当前内容会先存为一版，可再次恢复。`,
-  );
+  const ok = await confirm({
+    title: '恢复历史版本',
+    message: `将「${single.value.name}」恢复到 ${versionTime(version.at)} 的版本？`,
+    detail: '当前内容会先存为一版，之后可以再次恢复。',
+    confirmText: '恢复',
+  });
   if (!ok) return;
   const result = await actions.restoreVersionHistory(single.value, version.id);
   if (result) await loadVersions(single.value);
@@ -144,8 +149,28 @@ async function submitRename() {
 
 async function removeAll() {
   if (!state.selected.length) return;
-  const ok = window.confirm(`确定将选中的 ${state.selected.length} 项移入回收站？之后可在回收站恢复或彻底删除。`);
+  const ok = await confirm({
+    title: '删除选中项',
+    message: `将选中的 ${state.selected.length} 项移入回收站？`,
+    detail: '之后可在回收站恢复或彻底删除。',
+    confirmText: '移入回收站',
+    danger: true,
+  });
   if (ok) await actions.deleteSelected();
+}
+
+/** 删除当前查看的整个文件夹（含子目录与文件）。 */
+async function removeFolder() {
+  if (!singleFolder.value) return;
+  const folder = singleFolder.value;
+  const ok = await confirm({
+    title: '删除文件夹',
+    message: `将文件夹「${folder.name}」及其中的全部内容移入回收站？`,
+    detail: folder.path,
+    confirmText: '移入回收站',
+    danger: true,
+  });
+  if (ok) await actions.deleteFolder(folder);
 }
 
 async function moveAll() {
@@ -282,6 +307,14 @@ function fileInfo(entry) {
         </table>
         <div class="actions">
           <button class="btn is-block" type="button" @click="actions.openFolder(singleFolder)">进入文件夹</button>
+          <button
+            class="btn is-block is-ghost is-danger"
+            type="button"
+            :disabled="state.busy"
+            @click="removeFolder"
+          >
+            删除文件夹（移入回收站）
+          </button>
         </div>
         <p class="hint">改名后，文件夹内文件的尺寸缓存与历史版本记录会一起迁移。</p>
       </section>

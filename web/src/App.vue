@@ -39,6 +39,7 @@ import StatusBar from './components/StatusBar.vue';
 import ChatDrawer from './components/ChatDrawer.vue';
 import UploadDialog from './components/UploadDialog.vue';
 import RenameDialog from './components/RenameDialog.vue';
+import ConfirmDialog from './components/ConfirmDialog.vue';
 
 import { useWorkspace } from './composables/useWorkspace.js';
 import { useWatermark } from './composables/useWatermark.js';
@@ -310,6 +311,7 @@ watch(
     <ChatDrawer />
     <UploadDialog />
     <RenameDialog />
+    <ConfirmDialog />
   </div>
 </template>
 
