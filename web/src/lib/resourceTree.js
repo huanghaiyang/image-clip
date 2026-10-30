@@ -84,6 +84,24 @@ export function buildResourceTree(entries, options = {}) {
 }
 
 /**
+ * 收集树中所有文件夹路径（不含根节点），供「全部展开 / 全部折叠」使用。
+ * @param {object} node 根节点
+ * @returns {string[]}
+ */
+export function collectFolderPaths(node) {
+  const paths = [];
+  const walk = (parent) => {
+    for (const child of parent.children) {
+      if (child.type !== 'folder') continue;
+      paths.push(child.path);
+      walk(child);
+    }
+  };
+  walk(node);
+  return paths;
+}
+
+/**
  * 按折叠状态展开成可渲染的行。
  * @param {object} node 根节点
  * @param {Set<string>} collapsed 已折叠文件夹的相对路径

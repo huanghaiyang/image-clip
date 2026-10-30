@@ -109,6 +109,25 @@ const treeRoot = computed(() => {
 
 const treeRows = computed(() => flattenResourceTree(treeRoot.value, collapsed.value));
 
+/** 当前树中的所有文件夹路径，用于「全部展开 / 全部折叠」。 */
+const treeFolderPaths = computed(() => {
+  const paths = [];
+  const walk = (node) => {
+    for (const child of node.children) {
+      if (child.type !== 'folder') continue;
+      paths.push(child.path);
+      walk(child);
+    }
+  };
+  walk(treeRoot.value);
+  return paths;
+});
+
+const allCollapsed = computed(() => {
+  const paths = treeFolderPaths.value;
+  return paths.length > 0 && paths.every((path) => collapsed.value.has(path));
+});
+
 const hasVisible = computed(() => (state.browseMode === 'tree' ? treeRoot.value.children.length > 0 : totalVisible.value > 0));
 
 const visibleCount = computed(() => (state.browseMode === 'tree' ? treeRoot.value.count : totalVisible.value));
@@ -118,6 +137,16 @@ function toggleFolder(path) {
   if (next.has(path)) next.delete(path);
   else next.add(path);
   collapsed.value = next;
+}
+
+/** 展开当前树中的全部文件夹。 */
+function expandAllTree() {
+  collapsed.value = new Set();
+}
+
+/** 折叠全部文件夹，只保留最外层目录行。 */
+function collapseAllTree() {
+  collapsed.value = new Set(treeFolderPaths.value);
 }
 
 function openTreeFolder(row) {
@@ -278,6 +307,24 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
       </label>
       <span class="count mono">{{ visibleCount }} 项</span>
       <div class="spacer" />
+      <template v-if="state.browseMode === 'tree'">
+        <button
+          class="btn is-mini is-ghost"
+          type="button"
+          :disabled="!treeFolderPaths.length || collapsed.size === 0"
+          @click="expandAllTree"
+        >
+          全部展开
+        </button>
+        <button
+          class="btn is-mini is-ghost"
+          type="button"
+          :disabled="!treeFolderPaths.length || allCollapsed"
+          @click="collapseAllTree"
+        >
+          全部折叠
+        </button>
+      </template>
       <button class="btn is-mini is-ghost" type="button" :disabled="!hasVisible" @click="selectAllVisible">
         全选
       </button>

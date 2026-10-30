@@ -5,7 +5,7 @@
  * 目录树直接用服务端返回的扁平文件夹列表（每个条目带 parent/depth），
  * 前端不再递归建树 —— 这样搜索、批量移动都不需要遍历 UI 结构。
  */
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 import { useLibrary } from '../composables/useLibrary.js';
 import { useRenamePrompt } from '../composables/useRenamePrompt.js';
@@ -31,6 +31,81 @@ const childCount = computed(() => {
   for (const folder of currentFolders.value) map.set(folder.path, 1);
   return map;
 });
+
+// ------------------------------------------------------------ 目录树折叠
+const collapsed = ref(new Set());
+
+/** 每个文件夹的直接子文件夹，决定是否显示展开箭头。 */
+const subFolders = computed(() => {
+  const map = new Map();
+  for (const folder of folderTree.value) {
+    if (folder.isRoot) continue;
+    const parent = folder.parent ?? '';
+    if (!map.has(parent)) map.set(parent, []);
+    map.get(parent).push(folder);
+  }
+  return map;
+});
+
+const allFolders = computed(() => folderTree.value.filter((folder) => !folder.isRoot));
+
+const allCollapsed = computed(
+  () => allFolders.value.length > 0 && allFolders.value.every((folder) => collapsed.value.has(folder.path)),
+);
+
+/** 祖先目录被折叠时，该行不显示。 */
+function isHidden(folder) {
+  let parent = folder.parent;
+  while (parent) {
+    if (collapsed.value.has(parent)) return true;
+    parent = parent.includes('/') ? parent.slice(0, parent.lastIndexOf('/')) : '';
+  }
+  return false;
+}
+
+const visibleFolders = computed(() => folderTree.value.filter((folder) => !isHidden(folder)));
+
+function toggleFolder(folder) {
+  if (!folder.path) return;
+  const next = new Set(collapsed.value);
+  if (next.has(folder.path)) next.delete(folder.path);
+  else next.add(folder.path);
+  collapsed.value = next;
+}
+
+function expandAllFolders() {
+  collapsed.value = new Set();
+}
+
+function collapseAllFolders() {
+  collapsed.value = new Set(allFolders.value.map((folder) => folder.path));
+}
+
+/** 点击目录行进入该目录；若它处于折叠状态，顺手展开。 */
+function openFolder(folder) {
+  if (folder.path && collapsed.value.has(folder.path)) {
+    const next = new Set(collapsed.value);
+    next.delete(folder.path);
+    collapsed.value = next;
+  }
+  actions.setDir(folder.path);
+}
+
+/** 通过面包屑或主列表切换目录时，保证当前目录在树中可见。 */
+watch(
+  () => state.currentDir,
+  (dir) => {
+    if (!dir || collapsed.value.size === 0) return;
+    const next = new Set(collapsed.value);
+    next.delete(dir);
+    let parent = dir.includes('/') ? dir.slice(0, dir.lastIndexOf('/')) : '';
+    while (parent) {
+      next.delete(parent);
+      parent = parent.includes('/') ? parent.slice(0, parent.lastIndexOf('/')) : '';
+    }
+    if (next.size !== collapsed.value.size) collapsed.value = next;
+  },
+);
 
 /** 当前目录就是上传目标，弹窗里仍可改子目录。 */
 function upload() {
@@ -97,18 +172,46 @@ async function removeFolder(folder) {
       <span class="dirlabel-count">{{ currentFolders.length }} 夹 / {{ currentEntries.length }} 文件</span>
     </div>
 
+    <div class="tree-tools">
+      <button
+        class="tree-tool"
+        type="button"
+        :disabled="!allFolders.length || collapsed.size === 0"
+        @click="expandAllFolders"
+      >
+        全部展开
+      </button>
+      <button
+        class="tree-tool"
+        type="button"
+        :disabled="!allFolders.length || allCollapsed"
+        @click="collapseAllFolders"
+      >
+        全部折叠
+      </button>
+    </div>
+
     <div class="tree">
       <button
-        v-for="folder in folderTree"
+        v-for="folder in visibleFolders"
         :key="folder.path || '__root__'"
         class="tree-row"
         :class="{ 'is-active': folder.path === state.currentDir, 'is-root': folder.isRoot }"
         type="button"
         :style="{ paddingLeft: folder.isRoot ? '10px' : indentOf(folder) }"
         :title="folder.path || '资源库根目录'"
-        @click="actions.setDir(folder.path)"
+        @click="openFolder(folder)"
       >
-        <span class="tree-icon">{{ folder.isRoot ? '⌂' : '▸' }}</span>
+        <span v-if="folder.isRoot" class="tree-icon">⌂</span>
+        <span
+          v-else-if="subFolders.has(folder.path)"
+          class="tree-icon tree-toggle"
+          role="button"
+          :title="collapsed.has(folder.path) ? '展开' : '折叠'"
+          @click.stop="toggleFolder(folder)"
+          >{{ collapsed.has(folder.path) ? '▸' : '▾' }}</span
+        >
+        <span v-else class="tree-icon" />
         <span class="tree-name">{{ folder.name }}</span>
         <span
           v-if="!folder.isRoot"
@@ -227,9 +330,39 @@ async function removeFolder(folder) {
   justify-content: space-between;
   gap: 6px;
   padding: 7px 12px;
-  border-bottom: 1px solid var(--border);
   font-size: 10px;
   color: var(--text-muted);
+}
+
+/* 目录树全部展开 / 全部折叠 */
+.tree-tools {
+  display: flex;
+  gap: 4px;
+  padding: 0 10px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tree-tool {
+  flex: 1;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--text-muted);
+  font-size: 9px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+.tree-tool:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tree-tool:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .dirlabel-text {
@@ -281,6 +414,14 @@ async function removeFolder(folder) {
   width: 10px;
   font-size: 9px;
   color: var(--text-muted);
+}
+
+.tree-toggle {
+  cursor: pointer;
+}
+
+.tree-toggle:hover {
+  color: var(--accent);
 }
 
 .tree-name {

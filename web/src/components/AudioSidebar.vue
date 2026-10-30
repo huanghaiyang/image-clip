@@ -13,7 +13,7 @@ import { useLibrary } from '../composables/useLibrary.js';
 import { openUploadPicker } from '../composables/useUploadPicker.js';
 import { useResourceViewMode } from '../composables/useResourceViewMode.js';
 import { formatDuration, formatSize } from '../lib/library.js';
-import { buildResourceTree, flattenResourceTree } from '../lib/resourceTree.js';
+import { buildResourceTree, collectFolderPaths, flattenResourceTree } from '../lib/resourceTree.js';
 import ViewToggle from './ui/ViewToggle.vue';
 
 const { state: libraryState, entries, actions: libraryActions } = useLibrary();
@@ -36,6 +36,21 @@ function toggleFolder(path) {
   if (next.has(path)) next.delete(path);
   else next.add(path);
   collapsed.value = next;
+}
+
+/** 树中所有文件夹路径，用于「全部展开 / 全部折叠」。 */
+const treeFolderPaths = computed(() => collectFolderPaths(treeRoot.value));
+
+const allCollapsed = computed(
+  () => treeFolderPaths.value.length > 0 && treeFolderPaths.value.every((path) => collapsed.value.has(path)),
+);
+
+function expandAllFolders() {
+  collapsed.value = new Set();
+}
+
+function collapseAllFolders() {
+  collapsed.value = new Set(treeFolderPaths.value);
 }
 
 const uploadText = computed(() => {
@@ -84,6 +99,25 @@ onMounted(() => {
           </svg>
         </button>
       </div>
+    </div>
+
+    <div v-if="viewMode === 'tree' && audios.length" class="tree-tools">
+      <button
+        class="tree-tool"
+        type="button"
+        :disabled="!treeFolderPaths.length || collapsed.size === 0"
+        @click="expandAllFolders"
+      >
+        全部展开
+      </button>
+      <button
+        class="tree-tool"
+        type="button"
+        :disabled="!treeFolderPaths.length || allCollapsed"
+        @click="collapseAllFolders"
+      >
+        全部折叠
+      </button>
     </div>
 
     <div class="audio-list">
@@ -180,6 +214,38 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* 树形列表全部展开 / 全部折叠 */
+.tree-tools {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px 5px;
+  flex: none;
+  border-bottom: 1px solid var(--border);
+}
+
+.tree-tool {
+  flex: 1;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--text-muted);
+  font-size: 9px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+.tree-tool:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tree-tool:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .folder-row {
