@@ -136,6 +136,10 @@ export function fetchLibraryTrash() {
   return requestJson('/api/library/trash', { cache: 'no-store' });
 }
 
+export function fetchLibraryTrashContents(id) {
+  return requestJson(`/api/library/trash/contents?id=${encodeURIComponent(id)}`, { cache: 'no-store' });
+}
+
 export function restoreLibraryTrash(ids) {
   return requestJson('/api/library/trash/restore', {
     method: 'POST',

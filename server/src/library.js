@@ -616,6 +616,57 @@ export function createLibrary(options = {}) {
     return { id: clean, itemDir, record, abs, stat };
   }
 
+  /**
+   * 回收站文件夹内容预览：递归列出文件（最多 200 个，避免大目录拖慢接口）。
+   * 返回的条目带原文件 URL 与缩略图 URL，前端可直接展示或在文件夹内继续预览。
+   */
+  async function trashContents(id) {
+    const { record, abs } = await readTrashRecord(id);
+    if (!record.isDir) throw new LibraryError('该项目不是文件夹', 'BAD_INPUT', 400);
+    const MAX_FILES = 200;
+    const items = [];
+    let fileCount = 0;
+    let folderCount = 0;
+    let truncated = false;
+
+    async function walk(dirAbs, prefix) {
+      const dirents = await fs.readdir(dirAbs, { withFileTypes: true }).catch(() => []);
+      dirents.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN', { numeric: true }));
+      for (const dirent of dirents) {
+        if (dirent.name.startsWith('.')) continue;
+        const childAbs = path.join(dirAbs, dirent.name);
+        const relativePath = prefix ? `${prefix}/${dirent.name}` : dirent.name;
+        if (dirent.isDirectory()) {
+          folderCount += 1;
+          await walk(childAbs, relativePath);
+          continue;
+        }
+        if (!dirent.isFile()) continue;
+        fileCount += 1;
+        if (items.length >= MAX_FILES) {
+          truncated = true;
+          continue;
+        }
+        const stat = await fs.stat(childAbs).catch(() => null);
+        if (!stat) continue;
+        const info = await describeEntry({ abs: childAbs, rel: toRel(childAbs), name: dirent.name, stat });
+        items.push({ ...info, relativePath });
+      }
+    }
+
+    await walk(abs, '');
+    items.sort((a, b) => a.relativePath.localeCompare(b.relativePath, 'zh-Hans-CN', { numeric: true }));
+    return {
+      id,
+      name: record.name,
+      originalPath: record.path,
+      count: fileCount,
+      folderCount,
+      truncated,
+      items,
+    };
+  }
+
   /** 回收站列表：带缩略图/尺寸/时长，前端可以直接预览。 */
   async function listTrash() {
     const dirents = await fs.readdir(path.join(root, TRASH_DIR), { withFileTypes: true }).catch(() => []);
@@ -951,6 +1002,7 @@ export function createLibrary(options = {}) {
     movePaths,
     trashPaths,
     listTrash,
+    trashContents,
     restoreTrash,
     purgeTrash,
     snapshotVersion,
@@ -990,6 +1042,7 @@ export class LibraryError extends Error {
  *   POST /api/library/move                 { paths, target }
  *   POST /api/library/delete               { paths } 移入回收站
  *   GET  /api/library/trash                回收站列表（含缩略图/尺寸）
+ *   GET  /api/library/trash/contents?id=   回收站文件夹内容预览
  *   POST /api/library/trash/restore        { ids }
  *   POST /api/library/trash/purge          { ids } 或 { all:true }
  *   GET  /api/library/versions?path=       历史版本列表
@@ -1158,6 +1211,13 @@ export function createLibraryRouter(library) {
         succeeded: results.filter((r) => r.ok !== false).length,
         results,
       });
+    }),
+  );
+
+  router.get(
+    '/trash/contents',
+    wrap(async (req, res) => {
+      res.json(await library.trashContents(req.query.id));
     }),
   );
 
