@@ -712,12 +712,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
   gap: 10px;
+  /* Shift / Alt 多选时不要连带选中文字，避免出现蓝色选区 */
+  user-select: none;
 }
 
 .tree-list {
   display: flex;
   flex-direction: column;
   gap: 1px;
+  /* 同上：树形行多选时屏蔽原生的文字选区 */
+  user-select: none;
 }
 
 .tree-row {

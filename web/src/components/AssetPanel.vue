@@ -548,6 +548,7 @@ onMounted(() => {
   border-radius: var(--radius-sm);
   text-align: left;
   cursor: pointer;
+  user-select: none;
 }
 
 .folder-row:hover {
@@ -759,6 +760,8 @@ onMounted(() => {
   border-radius: var(--radius);
   border: 1px solid transparent;
   transition: background 0.12s ease;
+  /* Shift / Alt 多选时不要连带选中文字，避免出现蓝色选区 */
+  user-select: none;
 }
 
 .asset:hover {
