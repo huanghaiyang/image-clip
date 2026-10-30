@@ -101,6 +101,42 @@ function toggleSelect(entry) {
   if (next.has(entry.path)) next.delete(entry.path);
   else next.add(entry.path);
   selectedPaths.value = next;
+  selectionAnchor.value = entry.path;
+}
+
+/** 上一次单击的文件，Shift 连选以它为起点；连选本身不改起点。 */
+const selectionAnchor = ref('');
+
+/** 当前可见的文件行顺序（树形只算文件行），决定 Shift 连选的范围。 */
+const visibleFilePaths = computed(() => {
+  if (viewMode.value === 'tree') {
+    return treeRows.value.filter((row) => row.type === 'file').map((row) => row.path);
+  }
+  return libraryImages.value.map((entry) => entry.path);
+});
+
+/**
+ * 单击只选这一张；Ctrl/Cmd/Alt 切换该张；Shift 从上次单击的文件连选，
+ * Shift + Ctrl/Alt 把这一段并入已有选择。
+ */
+function selectEntry(event, entry) {
+  const additive = event.ctrlKey || event.metaKey || event.altKey;
+  if (event.shiftKey) {
+    const paths = visibleFilePaths.value;
+    const from = paths.indexOf(selectionAnchor.value);
+    const to = paths.indexOf(entry.path);
+    if (from >= 0 && to >= 0) {
+      const range = paths.slice(Math.min(from, to), Math.max(from, to) + 1);
+      selectedPaths.value = additive ? new Set([...selectedPaths.value, ...range]) : new Set(range);
+      return;
+    }
+  }
+  if (additive) {
+    toggleSelect(entry);
+    return;
+  }
+  selectedPaths.value = new Set([entry.path]);
+  selectionAnchor.value = entry.path;
 }
 
 function rowClass(entry) {
@@ -239,7 +275,7 @@ onMounted(() => {
         </button>
       </template>
 
-      <!-- 资源库图片：平铺 / 树形，支持多选后加入当前素材 -->
+      <!-- 资源库图片：平铺 / 树形，支持 Shift / Alt 多选后加入当前素材 -->
       <template v-else>
         <input v-model="keyword" class="library-search" type="search" placeholder="搜索资源库图片" />
         <div class="library-head">
@@ -304,7 +340,7 @@ onMounted(() => {
             tabindex="0"
             :title="row.entry.path"
             :style="{ paddingLeft: `${6 + (viewMode === 'tree' ? row.depth * 12 : 0)}px` }"
-            @click="toggleSelect(row.entry)"
+            @click="selectEntry($event, row.entry)"
             @dblclick="loadFromLibrary(row.entry)"
             @keydown.enter.prevent="toggleSelect(row.entry)"
             @keydown.space.prevent="toggleSelect(row.entry)"

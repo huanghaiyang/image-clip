@@ -3,7 +3,7 @@
  * 资源库中间舞台：面包屑 + 搜索/筛选 + 文件夹与文件网格 + 预览大图
  * ---------------------------------------------------------------
  * 交互约定：
- *  - 单击选中（Ctrl/Cmd 追加选择），双击打开（文件夹进入 / 图片预览 / 视频或音频切到对应工作区）；
+ *  - 单击选中（Ctrl/Cmd/Alt 追加选择，Shift 连选），双击打开（文件夹进入 / 图片预览 / 视频或音频切到对应工作区）；
  *  - 预览层支持 ← → 翻页、Esc 关闭；
  *  - 改名入口：卡片 / 树形行上的 ✎ 打开全局重命名弹窗，右侧检查器也可改名；
  *  - 右键不处理，批量操作都在右侧检查器里。
@@ -109,6 +109,15 @@ const treeRoot = computed(() => {
 
 const treeRows = computed(() => flattenResourceTree(treeRoot.value, collapsed.value));
 
+/** 当前可见行的路径顺序（文件夹 + 文件），决定 Shift 连选的范围。 */
+const visibleRowPaths = computed(() => {
+  if (state.browseMode === 'tree') return treeRows.value.map((row) => row.path);
+  return [...currentFolders.value.map((folder) => folder.path), ...currentEntries.value.map((entry) => entry.path)];
+});
+
+/** 上一次单击的行，Shift 连选以它为起点；标准行为下连选不改起点。 */
+const selectionAnchor = ref('');
+
 /** 当前树中的所有文件夹路径，用于「全部展开 / 全部折叠」。 */
 const treeFolderPaths = computed(() => {
   const paths = [];
@@ -174,10 +183,24 @@ watch([() => state.currentDir, () => state.search], () => {
   collapsed.value = new Set();
 });
 
-function select(event, entry) {
-  const meta = event.ctrlKey || event.metaKey;
-  if (meta) actions.toggleSelect(entry.path);
-  else actions.selectOnly(entry.path);
+function select(event, item) {
+  const path = item.path;
+  if (!path) return;
+  const additive = event.ctrlKey || event.metaKey || event.altKey;
+  if (event.shiftKey) {
+    const paths = visibleRowPaths.value;
+    const from = paths.indexOf(selectionAnchor.value);
+    const to = paths.indexOf(path);
+    if (from >= 0 && to >= 0) {
+      const range = paths.slice(Math.min(from, to), Math.max(from, to) + 1);
+      if (additive) actions.addSelection(range);
+      else actions.setSelection(range);
+      return;
+    }
+  }
+  if (additive) actions.toggleSelect(path);
+  else actions.selectOnly(path);
+  selectionAnchor.value = path;
 }
 
 function openEntry(entry) {

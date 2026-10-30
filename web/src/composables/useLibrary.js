@@ -293,6 +293,16 @@ export function selectOnly(path) {
   state.selected = path ? [path] : [];
 }
 
+/** 用一组路径替换当前选择（Shift 连选）。 */
+export function setSelection(paths) {
+  state.selected = [...new Set((paths ?? []).filter(Boolean))];
+}
+
+/** 把一组路径并入当前选择（Shift + Ctrl/Alt 追加连选）。 */
+export function addSelection(paths) {
+  state.selected = [...new Set([...state.selected, ...(paths ?? []).filter(Boolean)])];
+}
+
 export function selectAllVisible() {
   state.selected = [...currentFolders.value.map((folder) => folder.path), ...currentEntries.value.map((entry) => entry.path)];
 }
@@ -741,6 +751,8 @@ export function useLibrary() {
       setCurrentDir,
       toggleSelect,
       selectOnly,
+      setSelection,
+      addSelection,
       selectAllVisible,
       clearSelection,
       uploadFiles,
