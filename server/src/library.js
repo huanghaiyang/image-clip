@@ -961,6 +961,8 @@ export function createLibrary(options = {}) {
       for (const dirent of dirents) {
         if (stopped) return;
         if (dirent.name.startsWith('.')) continue;
+        // 跳过历史遗留的上传临时文件（旧命名不以「.」开头），防止它们被当成重复内容
+        if (dirent.name.includes('.part-')) continue;
         const abs = path.join(dirAbs, dirent.name);
         if (dirent.isDirectory()) {
           await walk(abs);
@@ -1104,7 +1106,12 @@ export function createLibraryRouter(library) {
       const target = overwriteRel
         ? await library.prepareOverwrite(overwriteRel)
         : await library.prepareUpload(dir, name);
-      const temp = `${target.abs}.part-${crypto.randomBytes(4).toString('hex')}`;
+      // 临时文件用「.」开头：scan() 与查重都会跳过隐藏文件，避免把正在上传的
+      // 半成品当成资源库里的文件（查重时甚至会把它自己当成重复项）。
+      const temp = path.join(
+        path.dirname(target.abs),
+        `.${path.basename(target.abs)}.part-${crypto.randomBytes(4).toString('hex')}`,
+      );
       await fs.mkdir(path.dirname(target.abs), { recursive: true });
 
       const hash = crypto.createHash('sha256');
