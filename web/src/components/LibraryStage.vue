@@ -19,6 +19,7 @@ import { useConfirm } from '../composables/useConfirm.js';
 import { setMode } from '../composables/useAppMode.js';
 import { formatDuration, formatSize, libraryFileUrl, libraryThumbUrl } from '../lib/library.js';
 import { buildResourceTree, flattenResourceTree } from '../lib/resourceTree.js';
+import LibrarySlideshow from './LibrarySlideshow.vue';
 import TrashDialog from './TrashDialog.vue';
 import ViewToggle from './ui/ViewToggle.vue';
 
@@ -108,6 +109,30 @@ const treeRoot = computed(() => {
 });
 
 const treeRows = computed(() => flattenResourceTree(treeRoot.value, collapsed.value));
+
+/** 选中的图片，按当前列表的可见顺序排列（树形视图包含子树里的图片）。 */
+const selectedImages = computed(() => {
+  const selected = selectedSet.value;
+  if (state.browseMode === 'tree') {
+    return treeRows.value
+      .filter((row) => row.type === 'file' && row.entry.kind === 'image' && selected.has(row.path))
+      .map((row) => row.entry);
+  }
+  return currentEntries.value.filter((entry) => entry.kind === 'image' && selected.has(entry.path));
+});
+
+/** 轮播层状态：打开时把选中的图片拍成快照，播放过程中不受资源库刷新影响。 */
+const slideshowOpen = ref(false);
+const slideshowImages = ref([]);
+const slideshowStart = ref('');
+
+function openSlideshow() {
+  const images = selectedImages.value;
+  if (images.length < 2) return;
+  slideshowImages.value = images;
+  slideshowStart.value = images[0].path;
+  slideshowOpen.value = true;
+}
 
 /** 当前可见行的路径顺序（文件夹 + 文件），决定 Shift 连选的范围。 */
 const visibleRowPaths = computed(() => {
@@ -348,6 +373,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
           全部折叠
         </button>
       </template>
+      <button
+        v-if="selectedImages.length >= 2"
+        class="btn is-mini is-primary"
+        type="button"
+        :title="`用幻灯片播放选中的 ${selectedImages.length} 张图片`"
+        @click="openSlideshow"
+      >
+        ▶ 轮播 ({{ selectedImages.length }})
+      </button>
       <button class="btn is-mini is-ghost" type="button" :disabled="!hasVisible" @click="selectAllVisible">
         全选
       </button>
@@ -583,6 +617,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
         </button>
       </div>
     </div>
+    <!-- 多选图片轮播：关闭后回到资源库，原选择保留 -->
+    <LibrarySlideshow
+      v-if="slideshowOpen"
+      :images="slideshowImages"
+      :start-path="slideshowStart"
+      @close="slideshowOpen = false"
+    />
     <!-- 回收站：删除的资源先放这里，可预览、恢复或彻底删除 -->
     <TrashDialog v-if="trashOpen" :open="trashOpen" @close="trashOpen = false" />
   </section>
