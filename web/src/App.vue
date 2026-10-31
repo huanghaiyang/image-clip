@@ -53,6 +53,7 @@ import { useEraser } from './composables/useEraser.js';
 import { usePixelPaint } from './composables/usePixelPaint.js';
 import { openImportPicker, useUploadPicker } from './composables/useUploadPicker.js';
 import { useWorkSession } from './composables/useWorkSession.js';
+import { useUndo } from './composables/useUndo.js';
 
 const { state, actions } = useWorkspace();
 const { state: watermarkState, actions: watermarkActions } = useWatermark();
@@ -64,6 +65,7 @@ const { state: eraserState, actions: eraserActions } = useEraser();
 const { state: pixelState, actions: pixelActions } = usePixelPaint();
 const { state: uploadState } = useUploadPicker();
 const { state: sessionState, actions: sessionActions } = useWorkSession();
+const { actions: undoActions } = useUndo();
 
 const mode = computed(() => appMode.mode);
 
@@ -137,6 +139,14 @@ function onKeydown(event) {
 
   if (typing) return;
 
+  // 全局撤销 / 重做：Ctrl/Cmd+Z 撤销，Ctrl/Cmd+Shift+Z 或 Ctrl/Cmd+Y 重做
+  if (meta && (event.key.toLowerCase() === 'z' || event.key.toLowerCase() === 'y')) {
+    event.preventDefault();
+    if (event.key.toLowerCase() === 'y' || event.shiftKey) undoActions.redo();
+    else undoActions.undo();
+    return;
+  }
+
   // 数字键切换工作区
   if (!meta && /^[1-9]$/.test(event.key)) {
     const next = MODES[Number(event.key) - 1];
@@ -175,13 +185,7 @@ function onKeydown(event) {
   }
 
   if (mode.value === 'eraser') {
-    // 橡皮擦：Ctrl/Cmd+Z 撤销、Shift 重做，[ ] 调笔刷大小
-    if (meta && event.key.toLowerCase() === 'z') {
-      event.preventDefault();
-      if (event.shiftKey) eraserActions.redo();
-      else eraserActions.undo();
-      return;
-    }
+    // 橡皮擦：撤销/重做走全局 Ctrl+Z，这里只处理笔刷大小
     if (event.key === '[' || event.key === ']') {
       const step = event.key === ']' ? 2 : -2;
       const next = Math.min(400, Math.max(2, eraserState.brush.size + step));
@@ -191,13 +195,7 @@ function onKeydown(event) {
   }
 
   if (mode.value === 'pixel') {
-    // 像素笔绘：Ctrl/Cmd+Z 撤销、Shift 重做；[ ] 调笔刷；B/E/I 切换画笔/橡皮/吸管；G 网格
-    if (meta && event.key.toLowerCase() === 'z') {
-      event.preventDefault();
-      if (event.shiftKey) pixelActions.redo();
-      else pixelActions.undo();
-      return;
-    }
+    // 像素笔绘：撤销/重做走全局 Ctrl+Z；[ ] 调笔刷；B/E/I 切换画笔/橡皮/吸管；G 网格
     if (event.key === '[' || event.key === ']') {
       const step = event.key === ']' ? 1 : -1;
       pixelActions.setBrush('size', pixelState.brush.size + step);

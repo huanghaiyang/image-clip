@@ -372,13 +372,19 @@ async function restoreFromDoc(doc) {
   await watermark.actions.importSession(doc.watermark, blobs);
 
   restoreCrop(doc.crop);
+  // 恢复写入的是“当前现场”，不该变成可撤销步骤
+  crop.actions.resetCropHistory();
   restoreLibrary(doc.library);
 
   chat.actions.restoreSession(doc.chat);
 
   if (doc.video?.activePath) {
     const meta = await video.actions.selectVideo(doc.video.activePath);
-    if (meta) restoreVideo(doc.video);
+    if (meta) {
+      restoreVideo(doc.video);
+      // 标记恢复过程本身会入栈，清掉后从干净的撤销起点开始
+      video.actions.resetMarkHistory();
+    }
   }
 
   if (doc.audio?.activePath) {

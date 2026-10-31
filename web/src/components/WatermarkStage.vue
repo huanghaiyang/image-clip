@@ -14,11 +14,14 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import { useWorkspace } from '../composables/useWorkspace.js';
 import { useWatermark } from '../composables/useWatermark.js';
+import { useSpaceHeld } from '../composables/useStageViewport.js';
 import { importFilesToLibrary, pickLibraryImages } from '../composables/useLibraryImport.js';
 import { createMaskLayer, maskToImageData } from '../lib/watermark.js';
 
 const { state: workspaceState, selected, actions: workspaceActions } = useWorkspace();
-const { state, selectedEntry, hasMask, coverage, actions } = useWatermark();
+const { state, selectedEntry, hasMask, coverage, canUndoMask, canRedoMask, actions } = useWatermark();
+/** 空格 / 中键：临时进入平移，不打断画笔工具 */
+const spaceHeld = useSpaceHeld();
 
 const stageEl = ref(null);
 const baseEl = ref(null);
@@ -445,6 +448,16 @@ function onPointerDown(event) {
   if (!stage || !item.value) return;
   if (event.target.closest?.('.stage-toolbar, .stage-zoom, .empty-actions, .split-handle')) return;
 
+  // 空格 + 左键 / 中键：任何位置都能平移，优先级高于对比分隔条
+  const panning = event.button === 1 || (event.button === 0 && spaceHeld.value);
+  if (panning) {
+    event.preventDefault();
+    panState = { x: event.clientX, y: event.clientY, ox: offset.value.x, oy: offset.value.y };
+    dragging.value = true;
+    stage.setPointerCapture?.(event.pointerId);
+    return;
+  }
+
   // 前后对比：落在分隔条附近时优先拖动分隔条，而不是涂抹
   if (isCompare.value && event.button === 0) {
     if (Math.abs(pointerLocalX(event) - splitLocal.value) <= 10) {
@@ -452,14 +465,6 @@ function onPointerDown(event) {
       stage.setPointerCapture?.(event.pointerId);
       return;
     }
-  }
-
-  const panning = event.button === 1;
-  if (panning) {
-    panState = { x: event.clientX, y: event.clientY, ox: offset.value.x, oy: offset.value.y };
-    dragging.value = true;
-    stage.setPointerCapture?.(event.pointerId);
-    return;
   }
 
   if (event.button !== 0 && event.button !== 2) return;
@@ -687,7 +692,12 @@ watch(
   <section
     ref="stageEl"
     class="stage"
-    :class="{ 'is-dragging': dragging, 'is-drop': dropActive, 'is-brush': hasMask && view.mode !== 'result' }"
+    :class="{
+      'is-dragging': dragging,
+      'is-drop': dropActive,
+      'is-brush': hasMask && view.mode !== 'result',
+      'is-space': spaceHeld,
+    }"
     @pointerdown="onPointerDown"
     @pointermove="onPointerMove"
     @pointerup="onPointerUp"
@@ -734,7 +744,8 @@ watch(
         前后对比
       </button>
       <span class="toolbar-sep" />
-      <button class="btn is-ghost" type="button" :disabled="!hasMask" @click="actions.undoMask()">撤销涂抹</button>
+      <button class="btn is-ghost" type="button" :disabled="!canUndoMask" @click="actions.undoMask()">撤销涂抹</button>
+      <button class="btn is-ghost" type="button" :disabled="!canRedoMask" @click="actions.redoMask()">重做涂抹</button>
       <button class="btn is-ghost" type="button" :disabled="!hasMask" @click="actions.clearMask()">清空掩膜</button>
     </div>
 
@@ -754,7 +765,7 @@ watch(
       <span class="readout-tool">{{ state.brush.tool === 'erase' ? '橡皮' : '画笔' }}</span>
       <span class="mono">Ø{{ state.brush.radius * 2 }}px</span>
       <span class="readout-sep" />
-      <span>左键涂抹 · Alt/右键擦除 · 中键拖动平移 · 滚轮缩放</span>
+      <span>左键涂抹 · Alt/右键擦除 · 空格 / 中键拖动平移 · 滚轮缩放</span>
       <span class="readout-sep" />
       <span v-if="boxCount" class="readout-boxes mono">检出 {{ boxCount }} 处</span>
       <span class="mono">覆盖 {{ (coverage * 100).toFixed(2) }}%</span>
@@ -806,12 +817,20 @@ watch(
   touch-action: none;
 }
 
-.stage.is-dragging {
-  cursor: grabbing;
-}
-
 .stage.is-brush {
   cursor: crosshair;
+}
+
+/* 空格 / 中键平移；拖动时 grabbing 要压过画笔的十字光标 */
+.stage.is-space,
+.stage.is-space.is-brush {
+  cursor: grab;
+}
+
+.stage.is-dragging,
+.stage.is-dragging.is-brush,
+.stage.is-dragging.is-space {
+  cursor: grabbing;
 }
 
 .stage.is-drop::after {

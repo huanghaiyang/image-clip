@@ -34,7 +34,15 @@ const DEFAULT_OPTIONS = {
   decontaminate: true,
   selectionMode: 'inside', // inside | outside | all（仅在存在套索选区时生效）
   showMask: false,
+  lassoMode: 'smart', // smart | free：智能套索会吸附到边缘并简化顶点
 };
+
+/** 智能套索参数（预览图坐标系）。 */
+const SNAP_RADIUS = 5;
+const SNAP_MIN_GRADIENT = 24;
+const SNAP_TOLERANCE = 2;
+const HISTORY_LIMIT = 30;
+const OPTION_RECORD_GAP = 500;
 
 const workspace = useWorkspace();
 
@@ -142,6 +150,9 @@ function ensureEntry(item = activeItem.value) {
     draftPoints: [],
     drawing: false,
     selectionMask: null,
+    snapMap: null,
+    history: [],
+    redo: [],
     coverage: 0,
     removedPixels: 0,
     elapsedMs: 0,
@@ -242,6 +253,177 @@ function tintMask(ctx, mask, width, height) {
   ctx.putImageData(image, 0, 0);
 }
 
+// --------------------------------------------------------------- 历史
+
+let lastRecord = { id: '', group: '', at: 0 };
+
+function entrySnapshot(entry) {
+  return {
+    colors: entry.colors.map((color) => ({ ...color })),
+    options: { ...entry.options },
+    polygon: entry.polygon.map((point) => ({ x: point.x, y: point.y })),
+    detected: entry.detected.map((color) => ({ ...color })),
+    transparentRatio: entry.transparentRatio,
+  };
+}
+
+/**
+ * 记录一次可撤销的编辑。
+ * group 相同的连续操作（例如拖动同一个滑块）在 500ms 内合并为一条，
+ * 避免撤销时要点十几次才回到拖动前。
+ */
+function recordEntryHistory(entry, group = '') {
+  if (!entry) return;
+  const now = performance.now();
+  if (group && lastRecord.id === entry.id && lastRecord.group === group && now - lastRecord.at < OPTION_RECORD_GAP) {
+    lastRecord.at = now;
+    return;
+  }
+  lastRecord = { id: entry.id, group, at: now };
+  entry.history.push(entrySnapshot(entry));
+  if (entry.history.length > HISTORY_LIMIT) entry.history.shift();
+  entry.redo = [];
+}
+
+function applyEntrySnapshot(entry, snapshot) {
+  if (!entry || !snapshot) return;
+  entry.colors = snapshot.colors.map((color) => ({ ...color }));
+  entry.options = { ...DEFAULT_OPTIONS, ...snapshot.options };
+  entry.detected = snapshot.detected.map((color) => ({ ...color }));
+  entry.transparentRatio = snapshot.transparentRatio;
+  entry.polygon = snapshot.polygon.map((point) => ({ x: point.x, y: point.y }));
+  entry.draftPoints = [];
+  entry.drawing = false;
+  entry.selectionMask =
+    entry.polygon.length >= 3 ? markRaw(rasterizePolygon(entry.polygon, entry.width, entry.height)) : null;
+  scheduleRecompute(entry);
+}
+
+export function undoBg() {
+  const entry = activeEntry.value;
+  if (!entry?.history.length) return false;
+  entry.redo.push(entrySnapshot(entry));
+  applyEntrySnapshot(entry, entry.history.pop());
+  markSessionDirty('bgremove');
+  setStatus('已撤销上一步背景去除操作');
+  return true;
+}
+
+export function redoBg() {
+  const entry = activeEntry.value;
+  if (!entry?.redo.length) return false;
+  entry.history.push(entrySnapshot(entry));
+  applyEntrySnapshot(entry, entry.redo.pop());
+  markSessionDirty('bgremove');
+  setStatus('已重做背景去除操作');
+  return true;
+}
+
+const canUndoBg = computed(() => Boolean(activeEntry.value?.history.length));
+const canRedoBg = computed(() => Boolean(activeEntry.value?.redo.length));
+
+// --------------------------------------------------------------- 智能套索
+
+/**
+ * 在预览图上做一次 Sobel 梯度扫描，缓存边缘强度图。
+ * 用预览分辨率而不是原图，套索过程中每次吸附都能即时响应。
+ */
+function ensureSnapMap(entry) {
+  if (!entry) return null;
+  const preview = entry.preview;
+  if (entry.snapMap && entry.snapMap.width === preview.width && entry.snapMap.height === preview.height) {
+    return entry.snapMap;
+  }
+  const { data, width, height } = preview;
+  const gray = new Uint8ClampedArray(width * height);
+  for (let i = 0, p = 0; i < gray.length; i += 1, p += 4) {
+    // 透明区按“最亮”处理，让图标轮廓天然形成强边缘
+    if (data[p + 3] === 0) {
+      gray[i] = 255;
+      continue;
+    }
+    gray[i] = Math.round(0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2]);
+  }
+
+  const magnitude = new Uint16Array(width * height);
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const i = y * width + x;
+      const gx =
+        -gray[i - width - 1] - 2 * gray[i - 1] - gray[i + width - 1] +
+        gray[i - width + 1] + 2 * gray[i + 1] + gray[i + width + 1];
+      const gy =
+        -gray[i - width - 1] - 2 * gray[i - width] - gray[i - width + 1] +
+        gray[i + width - 1] + 2 * gray[i + width] + gray[i + width + 1];
+      magnitude[i] = Math.min(65535, Math.abs(gx) + Math.abs(gy));
+    }
+  }
+  entry.snapMap = markRaw({ width, height, magnitude });
+  return entry.snapMap;
+}
+
+/** 把落点吸附到邻域内梯度最强的像素（原图坐标进、原图坐标出）。 */
+function snapPoint(entry, point) {
+  const map = ensureSnapMap(entry);
+  if (!map) return { x: point.x, y: point.y };
+  const scale = entry.preview.scale || 1;
+  const px = Math.round(point.x * scale);
+  const py = Math.round(point.y * scale);
+  let best = null;
+  let bestScore = 0;
+  for (let dy = -SNAP_RADIUS; dy <= SNAP_RADIUS; dy += 1) {
+    for (let dx = -SNAP_RADIUS; dx <= SNAP_RADIUS; dx += 1) {
+      const dist2 = dx * dx + dy * dy;
+      if (dist2 > SNAP_RADIUS * SNAP_RADIUS) continue;
+      const x = px + dx;
+      const y = py + dy;
+      if (x < 1 || y < 1 || x >= map.width - 1 || y >= map.height - 1) continue;
+      const gradient = map.magnitude[y * map.width + x];
+      if (gradient < SNAP_MIN_GRADIENT) continue;
+      const score = gradient / (1 + Math.sqrt(dist2));
+      if (score > bestScore) {
+        bestScore = score;
+        best = { x, y };
+      }
+    }
+  }
+  if (!best) return { x: point.x, y: point.y };
+  return { x: best.x / scale, y: best.y / scale };
+}
+
+/** Ramer–Douglas–Peucker 折线简化（用于抹掉吸附后多余的小抖动）。 */
+function simplifyPath(points, tolerance) {
+  if (points.length < 3) return points.slice();
+  const first = points[0];
+  const last = points[points.length - 1];
+  const dx = last.x - first.x;
+  const dy = last.y - first.y;
+  const length = Math.hypot(dx, dy) || 1;
+  let maxDistance = 0;
+  let splitIndex = 0;
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const p = points[i];
+    const distance = Math.abs(dy * (p.x - first.x) - dx * (p.y - first.y)) / length;
+    if (distance > maxDistance) {
+      maxDistance = distance;
+      splitIndex = i;
+    }
+  }
+  if (maxDistance <= tolerance) return [first, last];
+  const left = simplifyPath(points.slice(0, splitIndex + 1), tolerance);
+  const right = simplifyPath(points.slice(splitIndex), tolerance);
+  return left.slice(0, -1).concat(right);
+}
+
+/** 智能模式收尾：先在预览坐标简化，再换回原图坐标。 */
+function refineSmartPath(entry, points) {
+  const scale = entry.preview.scale || 1;
+  const previewPoints = points.map((point) => ({ x: point.x * scale, y: point.y * scale }));
+  const simplified = simplifyPath(previewPoints, SNAP_TOLERANCE);
+  if (simplified.length < 3) return points;
+  return simplified.map((point) => ({ x: point.x / scale, y: point.y / scale }));
+}
+
 // --------------------------------------------------------------- 参数
 
 export function prepareSelected() {
@@ -255,7 +437,14 @@ export function setTool(tool) {
 
 export function setOption(key, value) {
   const entry = ensureEntry(activeItem.value);
-  if (!entry || !(key in entry.options)) return;
+  if (!entry || !(key in entry.options) || entry.options[key] === value) return;
+  // 这两项只影响工具行为/显示，不改变抠图结果，不进撤销栈
+  if (key === 'lassoMode' || key === 'showMask') {
+    entry.options[key] = value;
+    markSessionDirty('bgremove');
+    return;
+  }
+  recordEntryHistory(entry, `option:${key}`);
   entry.options[key] = value;
   scheduleRecompute(entry);
   markSessionDirty('bgremove');
@@ -264,6 +453,9 @@ export function setOption(key, value) {
 export function resetOptions() {
   const entry = ensureEntry(activeItem.value);
   if (!entry) return;
+  const unchanged = Object.keys(DEFAULT_OPTIONS).every((key) => entry.options[key] === DEFAULT_OPTIONS[key]);
+  if (unchanged) return;
+  recordEntryHistory(entry);
   Object.assign(entry.options, DEFAULT_OPTIONS);
   scheduleRecompute(entry);
   markSessionDirty('bgremove');
@@ -276,6 +468,7 @@ export function autoDetectColors() {
   const item = activeItem.value;
   const entry = ensureEntry(item);
   if (!entry) return;
+  recordEntryHistory(entry);
   const detected = detectColors(item);
   entry.detected = detected.colors;
   entry.transparentRatio = detected.transparentRatio;
@@ -292,6 +485,7 @@ export function autoDetectColors() {
 export function toggleColor(index) {
   const entry = ensureEntry(activeItem.value);
   if (!entry?.colors[index]) return;
+  recordEntryHistory(entry);
   entry.colors[index].enabled = !entry.colors[index].enabled;
   scheduleRecompute(entry);
   markSessionDirty('bgremove');
@@ -302,6 +496,7 @@ export function useColor(input, { exclusive = false } = {}) {
   const entry = ensureEntry(activeItem.value);
   const color = parseColor(input);
   if (!entry || !color) return;
+  recordEntryHistory(entry);
   const hex = colorToHex(color);
   const found = entry.colors.find((item) => item.hex.toLowerCase() === hex.toLowerCase());
   if (found) found.enabled = true;
@@ -317,6 +512,7 @@ export function useColor(input, { exclusive = false } = {}) {
 export function removeColor(index) {
   const entry = ensureEntry(activeItem.value);
   if (!entry?.colors[index]) return;
+  recordEntryHistory(entry);
   entry.colors.splice(index, 1);
   scheduleRecompute(entry);
   markSessionDirty('bgremove');
@@ -359,30 +555,40 @@ export function isBackgroundLike(r, g, b) {
 export function beginLasso(point) {
   const entry = ensureEntry(activeItem.value);
   if (!entry || !point) return;
+  // 历史只在真正生成选区时记录：单点点击（顶点不足被取消）不该产生可撤销步骤
   entry.drawing = true;
-  entry.draftPoints = [{ x: point.x, y: point.y }];
+  const smart = entry.options.lassoMode === 'smart';
+  const start = smart ? snapPoint(entry, point) : { x: point.x, y: point.y };
+  entry.draftPoints = [start];
 }
 
 export function extendLasso(point) {
   const entry = activeEntry.value;
   if (!entry?.drawing || !point) return;
+  const smart = entry.options.lassoMode === 'smart';
+  const next = smart ? snapPoint(entry, point) : point;
   const last = entry.draftPoints[entry.draftPoints.length - 1];
-  if (last && Math.hypot(point.x - last.x, point.y - last.y) < 1.5) return;
-  entry.draftPoints.push({ x: point.x, y: point.y });
+  if (last && Math.hypot(next.x - last.x, next.y - last.y) < 1.5) return;
+  entry.draftPoints.push(next);
 }
 
 export function endLasso({ close = true } = {}) {
   const entry = activeEntry.value;
   if (!entry?.drawing) return;
   entry.drawing = false;
-  const points = entry.draftPoints;
+  let points = entry.draftPoints;
   entry.draftPoints = [];
+  if (entry.options.lassoMode === 'smart' && points.length >= 3) {
+    points = refineSmartPath(entry, points);
+  }
   if (close && points.length >= 3 && polygonArea(points) >= 4) {
+    recordEntryHistory(entry);
     entry.polygon = points;
     entry.selectionMask = markRaw(rasterizePolygon(points, entry.width, entry.height));
     scheduleRecompute(entry);
     markSessionDirty('bgremove');
-    setStatus(`已建立套索选区（${points.length} 个顶点），可切换“仅选区内 / 保护选区”`);
+    const mode = entry.options.lassoMode === 'smart' ? '智能套索（已吸附边缘）' : '套索';
+    setStatus(`已建立${mode}选区（${points.length} 个顶点），可切换“仅选区内 / 保护选区”`);
   } else {
     setStatus('套索顶点太少，已取消');
   }
@@ -390,7 +596,8 @@ export function endLasso({ close = true } = {}) {
 
 export function clearSelection() {
   const entry = ensureEntry(activeItem.value);
-  if (!entry) return;
+  if (!entry || (!entry.polygon.length && !entry.draftPoints.length)) return;
+  recordEntryHistory(entry);
   entry.polygon = [];
   entry.draftPoints = [];
   entry.selectionMask = null;
@@ -504,6 +711,10 @@ export function importSession(doc) {
     entry.selectionMask = entry.polygon.length >= 3
       ? markRaw(rasterizePolygon(entry.polygon, entry.width, entry.height))
       : null;
+    // 历史栈不随会话持久化，恢复后从干净的起点开始
+    entry.history = [];
+    entry.redo = [];
+    entry.snapMap = null;
     scheduleRecompute(entry);
   }
 }
@@ -521,6 +732,8 @@ export function useBgRemoval() {
     state: readonly(state),
     activeItem,
     activeEntry,
+    canUndoBg,
+    canRedoBg,
     actions: {
       prepareSelected,
       setTool,
@@ -537,6 +750,8 @@ export function useBgRemoval() {
       endLasso,
       clearSelection,
       applyBackgroundRemoval,
+      undoBg,
+      redoBg,
       exportSession,
       importSession,
       clearSession,

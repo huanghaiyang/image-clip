@@ -16,10 +16,30 @@ import { useStageViewport } from '../composables/useStageViewport.js';
 
 const { selected } = useWorkspace();
 const { state, activeEntry, actions } = useEraser();
-const { container, baseEl, view, frameStyle, displayWidth, displayHeight, zoomPercent, setImage, zoomIn, zoomOut, resetView, toImage, frameOrigin } =
-  useStageViewport();
+const {
+  container,
+  baseEl,
+  view,
+  frameStyle,
+  displayWidth,
+  displayHeight,
+  zoomPercent,
+  spaceHeld,
+  setImage,
+  zoomIn,
+  zoomOut,
+  resetView,
+  zoomAt,
+  isPanGesture,
+  beginPan,
+  movePan,
+  endPan,
+  toImage,
+  frameOrigin,
+} = useStageViewport();
 
 const overlayEl = ref(null);
+const panning = ref(false);
 const item = computed(() => selected.value ?? null);
 const entry = computed(() => activeEntry.value);
 
@@ -38,6 +58,7 @@ function pointFromEvent(event) {
 }
 
 function onPointerDown(event) {
+  if (isPanGesture(event)) return; // 交给舞台容器处理平移
   if (!entry.value || event.button !== 0) return;
   const point = pointFromEvent(event);
   if (!point) return;
@@ -47,6 +68,7 @@ function onPointerDown(event) {
 }
 
 function onPointerMove(event) {
+  if (panning.value) return;
   updateCursor(event);
   if (!painting) return;
   const point = pointFromEvent(event);
@@ -61,6 +83,31 @@ function onPointerUp(event) {
   event.currentTarget.releasePointerCapture?.(event.pointerId);
   actions.endStroke();
   painting = false;
+}
+
+// --------------------------------------------------------------- 画布平移
+
+function onStagePointerDown(event) {
+  if (!entry.value || !isPanGesture(event)) return;
+  event.preventDefault();
+  beginPan(event);
+  panning.value = true;
+  cursor.value = null;
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  scheduleOverlay();
+}
+
+function onStagePointerMove(event) {
+  if (!panning.value) return;
+  event.preventDefault();
+  movePan(event);
+}
+
+function onStagePointerUp(event) {
+  if (!panning.value) return;
+  panning.value = false;
+  endPan();
+  event.currentTarget.releasePointerCapture?.(event.pointerId);
 }
 
 /** 指针离开画面：结束当前笔画并隐藏笔刷光标。 */
@@ -208,17 +255,21 @@ onBeforeUnmount(() => {
 
 function onWheel(event) {
   if (!entry.value) return;
-  const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
-  view.zoom = Math.min(16, Math.max(0.05, view.zoom * factor));
-  if (view.zoom <= 1.0001) {
-    view.panX = 0;
-    view.panY = 0;
-  }
+  zoomAt(event, event.deltaY < 0 ? 1.1 : 1 / 1.1);
 }
 </script>
 
 <template>
-  <section ref="container" class="stage" @wheel.prevent="onWheel">
+  <section
+    ref="container"
+    class="stage"
+    :class="{ 'is-pan-ready': spaceHeld, 'is-panning': panning }"
+    @wheel.prevent="onWheel"
+    @pointerdown="onStagePointerDown"
+    @pointermove="onStagePointerMove"
+    @pointerup="onStagePointerUp"
+    @pointercancel="onStagePointerUp"
+  >
     <div v-if="!item" class="stage-empty">
       <p>还没有可擦除的素材</p>
       <p class="muted">从左侧选择图片，或把图片拖进窗口</p>
@@ -248,8 +299,8 @@ function onWheel(event) {
 
       <div class="stage-hint muted">
         <template v-if="state.brush.showOriginal">正在对比原图（关闭开关后继续编辑）</template>
-        <template v-else-if="state.brush.mode === 'restore'">还原笔刷：把原图像素画回去</template>
-        <template v-else>擦除笔刷：拖动擦成透明 · [ / ] 调整笔刷大小</template>
+        <template v-else-if="state.brush.mode === 'restore'">还原笔刷：把原图像素画回去 · 空格 / 中键拖动平移</template>
+        <template v-else>擦除笔刷：拖动擦成透明 · [ / ] 调整笔刷大小 · 空格 / 中键拖动平移</template>
         <template v-if="entry?.dirty"> · 有未导出的修改</template>
       </div>
     </template>
@@ -291,6 +342,14 @@ function onWheel(event) {
   position: relative;
   flex: none;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+/* 空格 / 中键拖动平移：覆盖全局的十字光标 */
+.stage.is-pan-ready {
+  cursor: grab;
+}
+.stage.is-panning {
+  cursor: grabbing;
 }
 
 .base {

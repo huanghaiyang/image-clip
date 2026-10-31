@@ -22,9 +22,14 @@ const customColor = ref('#ffffff');
 const saveToLibrary = ref(false);
 
 const toolOptions = [
-  { value: 'lasso', label: '套索', hint: '手绘选区，限定去除范围或保护内容' },
+  { value: 'lasso', label: '套索', hint: '手绘或智能选区，限定去除范围或保护内容' },
   { value: 'pick', label: '取色器', hint: '点击画面取背景色' },
   { value: 'pan', label: '平移', hint: '拖动查看大图' },
+];
+
+const lassoModeOptions = [
+  { value: 'smart', label: '智能套索', hint: '落点自动吸附到图像边缘，松开后自动简化顶点' },
+  { value: 'free', label: '手绘套索', hint: '完全按拖动轨迹生成选区' },
 ];
 
 const selectionModeOptions = [
@@ -148,6 +153,14 @@ function addCustomColor() {
             </button>
           </div>
           <SegmentedControl
+            v-if="state.tool === 'lasso'"
+            :model-value="entry.options.lassoMode"
+            :options="lassoModeOptions"
+            size="sm"
+            block
+            @update:model-value="actions.setOption('lassoMode', $event)"
+          />
+          <SegmentedControl
             :model-value="entry.options.selectionMode"
             :options="selectionModeOptions"
             size="sm"
@@ -157,6 +170,9 @@ function addCustomColor() {
           <p class="hint">
             <template v-if="entry.polygon.length">
               选区有 {{ entry.polygon.length }} 个顶点，当前模式生效中。
+            </template>
+            <template v-else-if="entry.options.lassoMode === 'smart'">
+              还没有套索选区：切到「套索」后按住拖动，落点会自动吸附到图像边缘。
             </template>
             <template v-else>还没有套索选区：切到「套索」后在画面上按住拖动即可。</template>
           </p>

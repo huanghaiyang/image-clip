@@ -104,6 +104,8 @@ const hasMask = computed(() => Boolean(selectedEntry.value?.maskReady));
 const coverage = computed(() => selectedEntry.value?.coverage ?? 0);
 
 const serverReady = computed(() => state.health.checked && state.health.ok);
+const canUndoMask = computed(() => Boolean(selectedEntry.value?.history?.length));
+const canRedoMask = computed(() => Boolean(selectedEntry.value?.redo?.length));
 
 // --------------------------------------------------------------- 内部工具
 
@@ -820,6 +822,8 @@ export function useWatermark() {
     hasMask,
     coverage,
     serverReady,
+    canUndoMask,
+    canRedoMask,
     actions: {
       setMode,
       setOption,

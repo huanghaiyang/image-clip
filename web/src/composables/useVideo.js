@@ -121,6 +121,7 @@ export function resetSession() {
   state.error = '';
   state.status = '';
   state.progress = '';
+  resetMarkHistory();
 }
 
 export function getPlayer() {
@@ -164,6 +165,7 @@ export async function selectVideo(pathOrEntry) {
   state.filmstrip = [];
   state.marks = [];
   state.lastExtract = null;
+  resetMarkHistory();
 
   void checkVideoHealth();
 
@@ -273,12 +275,49 @@ export function toggleMute() {
 
 // --------------------------------------------------------------- 标记点
 
+// --------------------------------------------------------------- 标记历史
+
+const MARK_HISTORY_LIMIT = 40;
+const markHistory = reactive([]);
+const markRedo = reactive([]);
+
+function pushMarkHistory() {
+  markHistory.push([...state.marks]);
+  if (markHistory.length > MARK_HISTORY_LIMIT) markHistory.shift();
+  markRedo.splice(0, markRedo.length);
+}
+
+function resetMarkHistory() {
+  markHistory.splice(0, markHistory.length);
+  markRedo.splice(0, markRedo.length);
+}
+
+export function undoMarks() {
+  if (!markHistory.length) return false;
+  markRedo.push([...state.marks]);
+  state.marks = [...markHistory.pop()];
+  setStatus(`已撤销标记操作（共 ${state.marks.length} 个标记）`);
+  return true;
+}
+
+export function redoMarks() {
+  if (!markRedo.length) return false;
+  markHistory.push([...state.marks]);
+  state.marks = [...markRedo.pop()];
+  setStatus(`已重做标记操作（共 ${state.marks.length} 个标记）`);
+  return true;
+}
+
+const canUndoMarks = computed(() => markHistory.length > 0);
+const canRedoMarks = computed(() => markRedo.length > 0);
+
 export function addMark(time = state.currentTime) {
   const value = Math.max(0, Math.min(duration.value || 0, Number(time) || 0));
   if (state.marks.some((mark) => Math.abs(mark - value) < 0.02)) {
     setStatus('该时间点已经在标记列表中');
     return;
   }
+  pushMarkHistory();
   state.marks.push(value);
   state.marks.sort((a, b) => a - b);
   setStatus(`已添加标记 ${value.toFixed(2)}s（共 ${state.marks.length} 个）`);
@@ -286,10 +325,14 @@ export function addMark(time = state.currentTime) {
 
 export function removeMark(time) {
   const index = state.marks.findIndex((mark) => Math.abs(mark - time) < 0.001);
-  if (index >= 0) state.marks.splice(index, 1);
+  if (index < 0) return;
+  pushMarkHistory();
+  state.marks.splice(index, 1);
 }
 
 export function clearMarks() {
+  if (!state.marks.length) return;
+  pushMarkHistory();
   state.marks = [];
   setStatus('已清空标记点');
 }
@@ -403,6 +446,8 @@ export function useVideo() {
     manualTimes,
     frameStep,
     canExtract,
+    canUndoMarks,
+    canRedoMarks,
     actions: {
       checkHealth: checkVideoHealth,
       selectVideo,
@@ -420,6 +465,9 @@ export function useVideo() {
       addMark,
       removeMark,
       clearMarks,
+      undoMarks,
+      redoMarks,
+      resetMarkHistory,
       addMarkAtCurrentTime,
       extractFrames,
       extractAudio,

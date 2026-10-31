@@ -17,10 +17,30 @@ import { useStageViewport } from '../composables/useStageViewport.js';
 
 const { selected } = useWorkspace();
 const { state, activeEntry, actions } = useBgRemoval();
-const { container, baseEl, view, frameStyle, displayWidth, displayHeight, zoomPercent, setImage, zoomIn, zoomOut, resetView, toImage, frameOrigin } =
-  useStageViewport();
+const {
+  container,
+  baseEl,
+  view,
+  frameStyle,
+  displayWidth,
+  displayHeight,
+  zoomPercent,
+  spaceHeld,
+  setImage,
+  zoomIn,
+  zoomOut,
+  resetView,
+  zoomAt,
+  isPanGesture,
+  beginPan,
+  movePan,
+  endPan,
+  toImage,
+  frameOrigin,
+} = useStageViewport();
 
 const overlayEl = ref(null);
+const panning = ref(false);
 const item = computed(() => selected.value ?? null);
 const entry = computed(() => activeEntry.value);
 
@@ -57,10 +77,12 @@ function pointFromEvent(event) {
 // --------------------------------------------------------------- 指针交互
 
 function onPointerDown(event) {
+  if (isPanGesture(event)) return; // 交给舞台容器处理平移
   if (!entry.value || event.button !== 0) return;
   if (state.tool === 'pan') {
     drag = { mode: 'pan', clientX: event.clientX, clientY: event.clientY };
     event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.stopPropagation();
     return;
   }
 
@@ -79,7 +101,7 @@ function onPointerDown(event) {
 }
 
 function onPointerMove(event) {
-  if (!drag) return;
+  if (panning.value || !drag) return;
 
   if (drag.mode === 'pan') {
     const dx = event.clientX - drag.clientX;
@@ -101,6 +123,31 @@ function onPointerUp(event) {
   event.currentTarget.releasePointerCapture?.(event.pointerId);
   if (drag.mode === 'lasso') actions.endLasso({ close: true });
   drag = null;
+}
+
+// --------------------------------------------------------------- 画布平移
+
+function onStagePointerDown(event) {
+  if (!entry.value) return;
+  const wantsPan = isPanGesture(event) || (state.tool === 'pan' && event.button === 0);
+  if (!wantsPan) return;
+  event.preventDefault();
+  beginPan(event);
+  panning.value = true;
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+}
+
+function onStagePointerMove(event) {
+  if (!panning.value) return;
+  event.preventDefault();
+  movePan(event);
+}
+
+function onStagePointerUp(event) {
+  if (!panning.value) return;
+  panning.value = false;
+  endPan();
+  event.currentTarget.releasePointerCapture?.(event.pointerId);
 }
 
 // --------------------------------------------------------------- 绘制
@@ -257,17 +304,21 @@ onBeforeUnmount(() => {
 
 function onWheel(event) {
   if (!entry.value) return;
-  const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
-  view.zoom = Math.min(16, Math.max(0.05, view.zoom * factor));
-  if (view.zoom <= 1.0001) {
-    view.panX = 0;
-    view.panY = 0;
-  }
+  zoomAt(event, event.deltaY < 0 ? 1.1 : 1 / 1.1);
 }
 </script>
 
 <template>
-  <section ref="container" class="stage" @wheel.prevent="onWheel">
+  <section
+    ref="container"
+    class="stage"
+    :class="{ 'is-pan-ready': spaceHeld, 'is-panning': panning }"
+    @wheel.prevent="onWheel"
+    @pointerdown="onStagePointerDown"
+    @pointermove="onStagePointerMove"
+    @pointerup="onStagePointerUp"
+    @pointercancel="onStagePointerUp"
+  >
     <div v-if="!item" class="stage-empty">
       <p>还没有可抠图的素材</p>
       <p class="muted">从左侧选择图片，或把图片拖进窗口</p>
@@ -296,9 +347,12 @@ function onWheel(event) {
       </div>
 
       <div class="stage-hint muted">
-        <template v-if="state.tool === 'lasso'">按住拖动绘制套索，松开自动闭合</template>
-        <template v-else-if="state.tool === 'pick'">点击画面取背景色（仅去除该颜色）</template>
-        <template v-else>拖动平移画面</template>
+        <template v-if="state.tool === 'lasso'">
+          {{ entry?.options.lassoMode === 'smart' ? '智能套索：落点吸附图像边缘，松开自动简化' : '按住拖动绘制套索，松开自动闭合' }} ·
+          空格 / 中键拖动平移
+        </template>
+        <template v-else-if="state.tool === 'pick'">点击画面取背景色（仅去除该颜色） · 空格 / 中键拖动平移</template>
+        <template v-else>拖动平移画面 · 空格 / 中键也可拖动</template>
         <template v-if="entry?.computing"> · 计算中…</template>
         <template v-else-if="entry"> · {{ (entry.coverage * 100).toFixed(1) }}% 透明</template>
       </div>
@@ -355,6 +409,16 @@ function onWheel(event) {
 }
 
 .cursor-grab:active {
+  cursor: grabbing;
+}
+
+/* 空格 / 中键拖动平移：光标提示要压过工具光标 */
+.stage.is-pan-ready,
+.stage.is-pan-ready .frame {
+  cursor: grab;
+}
+.stage.is-panning,
+.stage.is-panning .frame {
   cursor: grabbing;
 }
 

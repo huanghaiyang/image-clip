@@ -104,6 +104,130 @@ const normalizedRect = computed(() => {
 const aspectLabel = computed(() => CROP_RATIOS.find((item) => Math.abs(item.value - state.aspect) < 0.001)?.label ?? state.aspect.toFixed(2));
 const canApply = computed(() => Boolean(activeItem.value) && state.rect.width >= 1 && state.rect.height >= 1);
 
+// --------------------------------------------------------------- 历史
+
+const HISTORY_LIMIT = 30;
+const RECORD_GAP = 500;
+const history = reactive([]);
+const redo = reactive([]);
+/** 拖动裁剪框时先记下起点，松开后确认真的变了才入栈。 */
+let pendingEdit = null;
+let lastRecord = { key: '', group: '', at: 0 };
+
+function currentKey() {
+  return state.atlas.enabled ? '__atlas__' : state.imageId;
+}
+
+function cropSnapshot() {
+  return {
+    key: currentKey(),
+    imageId: state.imageId,
+    aspect: state.aspect,
+    rect: { ...state.rect },
+    output: { ...state.output },
+    atlasEnabled: state.atlas.enabled,
+    atlasLayer: state.atlas.layer,
+    atlasNorm: state.atlasNorm ? { ...state.atlasNorm } : null,
+  };
+}
+
+function sameSnapshot(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function pushHistory(snapshot) {
+  history.push(snapshot);
+  if (history.length > HISTORY_LIMIT) history.shift();
+  redo.splice(0, redo.length);
+}
+
+/**
+ * 记录一次裁剪编辑。
+ * 切换素材后旧图的撤销栈没有意义，直接清空，避免撤销时套用错图的框。
+ */
+function recordCropHistory(group = '') {
+  const now = performance.now();
+  if (group && lastRecord.key === currentKey() && lastRecord.group === group && now - lastRecord.at < RECORD_GAP) {
+    lastRecord.at = now;
+    return;
+  }
+  const snapshot = cropSnapshot();
+  if (snapshot.key !== lastRecord.key) {
+    history.splice(0, history.length);
+    redo.splice(0, redo.length);
+  }
+  lastRecord = { key: snapshot.key, group, at: now };
+  pushHistory(snapshot);
+}
+
+/** 指针按下：暂存编辑前状态；指针抬起由 endCropEdit 决定是否入栈。 */
+export function beginCropEdit() {
+  if (!pendingEdit) pendingEdit = cropSnapshot();
+}
+
+export function endCropEdit() {
+  if (!pendingEdit) return;
+  const before = pendingEdit;
+  pendingEdit = null;
+  if (sameSnapshot(before, cropSnapshot())) return;
+  if (before.key !== currentKey()) {
+    history.splice(0, history.length);
+    redo.splice(0, redo.length);
+  }
+  lastRecord = { key: before.key, group: '', at: performance.now() };
+  pushHistory(before);
+}
+
+function applyCropSnapshot(snapshot) {
+  state.aspect = snapshot.aspect;
+  state.output = { ...snapshot.output };
+  state.rect = { ...snapshot.rect };
+  state.atlas.enabled = snapshot.atlasEnabled;
+  state.atlas.layer = snapshot.atlasLayer;
+  state.atlasNorm = snapshot.atlasNorm ? { ...snapshot.atlasNorm } : null;
+  state.imageId = snapshot.imageId;
+}
+
+export function undoCrop() {
+  const snapshot = history[history.length - 1];
+  if (!snapshot) return false;
+  if (snapshot.key !== currentKey()) {
+    history.splice(0, history.length);
+    redo.splice(0, redo.length);
+    return false;
+  }
+  history.pop();
+  redo.push(cropSnapshot());
+  applyCropSnapshot(snapshot);
+  setStatus('已撤销裁剪操作');
+  return true;
+}
+
+export function redoCrop() {
+  const snapshot = redo[redo.length - 1];
+  if (!snapshot) return false;
+  if (snapshot.key !== currentKey()) {
+    redo.splice(0, redo.length);
+    return false;
+  }
+  redo.pop();
+  history.push(cropSnapshot());
+  applyCropSnapshot(snapshot);
+  setStatus('已重做裁剪操作');
+  return true;
+}
+
+const canUndoCrop = computed(() => history.length > 0 && history[history.length - 1].key === currentKey());
+const canRedoCrop = computed(() => redo.length > 0 && redo[redo.length - 1].key === currentKey());
+
+/** 恢复临时会话后清空：历史栈不持久化，避免撤销时套用到旧现场。 */
+export function resetCropHistory() {
+  history.splice(0, history.length);
+  redo.splice(0, redo.length);
+  pendingEdit = null;
+  lastRecord = { key: '', group: '', at: 0 };
+}
+
 function persistPresets() {
   try {
     localStorage.setItem(PRESET_KEY, JSON.stringify(state.sizePresets));
@@ -159,6 +283,8 @@ function commitRect(rect, width, height) {
 
 export function setAspect(ratio) {
   const value = Number(ratio) || 0;
+  if (value === state.aspect) return;
+  recordCropHistory();
   state.aspect = value;
   const item = syncCrop();
   if (!item) return;
@@ -187,7 +313,10 @@ export function setRect(next) {
 export function resetRect() {
   const item = syncCrop();
   if (!item) return;
+  // 裁剪框本来就在默认位置时不产生可撤销步骤
+  beginCropEdit();
   commitRect(fitAspectRect(item.width, item.height, state.aspect), item.width, item.height);
+  endCropEdit();
   setStatus('裁剪框已重置');
 }
 
@@ -201,6 +330,7 @@ export function toggleAtlas(force) {
     setError('素材列表为空，无法进入图集模式');
     return;
   }
+  recordCropHistory();
   if (next) {
     const selectedIndex = workspace.state.items.findIndex((item) => item.id === workspace.state.selectedId);
     state.atlas.layer = selectedIndex >= 0 ? selectedIndex : 0;
@@ -241,7 +371,10 @@ export function stepLayer(delta) {
 }
 
 export function setOutputMode(mode) {
-  state.output.mode = mode === 'resize' ? 'resize' : 'natural';
+  const next = mode === 'resize' ? 'resize' : 'natural';
+  if (next === state.output.mode) return;
+  recordCropHistory();
+  state.output.mode = next;
   if (state.output.mode === 'natural') {
     state.output.width = 0;
     state.output.height = 0;
@@ -255,6 +388,8 @@ export function setOutputMode(mode) {
 export function setOutputDimension(key, value) {
   if (key !== 'width' && key !== 'height') return;
   const parsed = Math.max(0, Math.round(Number(value) || 0));
+  if (state.output.mode === 'resize' && state.output[key] === parsed) return;
+  recordCropHistory(`output:${key}`);
   state.output[key] = parsed;
   state.output.mode = 'resize';
 }
@@ -292,9 +427,11 @@ export function applySizePreset(preset) {
   const item = syncCrop();
   const width = Math.max(1, Math.round(Number(preset.width) || 0));
   const height = Math.max(1, Math.round(Number(preset.height) || 0));
+  beginCropEdit();
   state.output = { mode: 'resize', width, height };
   state.aspect = width / height;
   if (item) commitRect(fitAspectRect(item.width, item.height, state.aspect), item.width, item.height);
+  endCropEdit();
   setStatus(`已应用尺寸 ${width}×${height}`);
 }
 
@@ -426,8 +563,15 @@ export function useCropTool() {
     atlasItems,
     atlasCount,
     atlasIndex,
+    canUndoCrop,
+    canRedoCrop,
     actions: {
       syncCrop,
+      beginCropEdit,
+      endCropEdit,
+      undoCrop,
+      redoCrop,
+      resetCropHistory,
       setAspect,
       setRect,
       resetRect,

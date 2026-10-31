@@ -19,6 +19,7 @@ import { useLibrary } from '../composables/useLibrary.js';
 import { useVideo } from '../composables/useVideo.js';
 import { useAudio } from '../composables/useAudio.js';
 import { useWorkSession } from '../composables/useWorkSession.js';
+import { useUndo } from '../composables/useUndo.js';
 import { openImportPicker } from '../composables/useUploadPicker.js';
 import { ENGINES } from '../lib/engine.js';
 import { formatBytes } from '../lib/imaging.js';
@@ -33,6 +34,7 @@ const { state: libraryState, stats: libraryStats } = useLibrary();
 const { state: videoState, videoName } = useVideo();
 const { state: audioState } = useAudio();
 const { state: sessionState, actions: sessionActions } = useWorkSession();
+const { canUndo, canRedo, actions: undoActions } = useUndo();
 
 const mode = computed(() => appMode.mode);
 const isImageMode = computed(() => ['crop', 'cropimage', 'bgremove', 'eraser', 'watermark', 'pixel'].includes(mode.value));
@@ -137,6 +139,30 @@ const sessionHint = computed(() => {
       </div>
 
       <div class="topbar-right">
+        <button
+          class="btn is-ghost is-icon"
+          type="button"
+          title="撤销（Ctrl+Z）"
+          :disabled="!canUndo"
+          @click="undoActions.undo()"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M6.2 3.4 2.6 6.6l3.6 3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M2.9 6.6h6.1a3.7 3.7 0 0 1 0 7.4H6.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          </svg>
+        </button>
+        <button
+          class="btn is-ghost is-icon"
+          type="button"
+          title="重做（Ctrl+Shift+Z / Ctrl+Y）"
+          :disabled="!canRedo"
+          @click="undoActions.redo()"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M9.8 3.4 13.4 6.6l-3.6 3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M13.1 6.6H7a3.7 3.7 0 0 0 0 7.4h2.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          </svg>
+        </button>
         <button class="btn is-ghost session-btn" type="button" :title="sessionHint" @click="sessionActions.openDialog()">
           <span
             class="session-dot"

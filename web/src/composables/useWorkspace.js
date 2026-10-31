@@ -125,6 +125,81 @@ export async function recomputeAll() {
   await Promise.all(state.items.map((item) => recomputeItem(item)));
 }
 
+// --------------------------------------------------------------- 历史
+
+const HISTORY_LIMIT = 20;
+const RECORD_GAP = 500;
+const history = reactive([]);
+const redo = reactive([]);
+let lastRecord = { group: '', at: 0 };
+
+/**
+ * 素材列表快照只保存引用：图片像素不动，撤销增删/清空时直接换回数组即可。
+ * 分析结果不是快照的一部分，恢复参数后会重新计算。
+ */
+function workspaceSnapshot() {
+  return {
+    items: [...state.items],
+    selectedId: state.selectedId,
+    options: { ...state.options },
+    engine: state.engine,
+  };
+}
+
+function pushHistory(snapshot) {
+  history.push(snapshot);
+  if (history.length > HISTORY_LIMIT) history.shift();
+  redo.splice(0, redo.length);
+}
+
+/** group 相同的连续操作（滑块、数字输入）在 500ms 内合并为一条。 */
+function recordHistory(group = '') {
+  const now = performance.now();
+  if (group && lastRecord.group === group && now - lastRecord.at < RECORD_GAP) {
+    lastRecord.at = now;
+    return;
+  }
+  lastRecord = { group, at: now };
+  pushHistory(workspaceSnapshot());
+}
+
+function applySnapshot(snapshot) {
+  if (recomputeTimer) {
+    clearTimeout(recomputeTimer);
+    recomputeTimer = null;
+  }
+  state.items.splice(0, state.items.length, ...snapshot.items);
+  state.selectedId = snapshot.selectedId;
+  Object.assign(state.options, snapshot.options);
+  state.engine = snapshot.engine;
+  scheduleRecompute({ immediate: true });
+}
+
+export function undoWorkspace() {
+  if (!history.length) return false;
+  redo.push(workspaceSnapshot());
+  applySnapshot(history.pop());
+  setStatus('已撤销工作区操作');
+  return true;
+}
+
+export function redoWorkspace() {
+  if (!redo.length) return false;
+  history.push(workspaceSnapshot());
+  applySnapshot(redo.pop());
+  setStatus('已重做工作区操作');
+  return true;
+}
+
+function resetHistory() {
+  history.splice(0, history.length);
+  redo.splice(0, redo.length);
+  lastRecord = { group: '', at: 0 };
+}
+
+const canUndoAssets = computed(() => history.length > 0);
+const canRedoAssets = computed(() => redo.length > 0);
+
 // --------------------------------------------------------------- 动作
 
 /** 导入单个图片文件：解码 → 建立素材项 → 自动检测 AABB。 */
@@ -171,6 +246,7 @@ export async function addFiles(fileList, options = {}) {
   const all = [...files, ...fallbackFiles];
   if (all.length === 0) return [];
 
+  recordHistory();
   state.busy = true;
   state.error = '';
   const created = [];
@@ -195,6 +271,7 @@ export async function addFiles(fileList, options = {}) {
  */
 export async function addImageBlob(blob, name) {
   if (!blob) return null;
+  recordHistory();
   state.busy = true;
   state.error = '';
   try {
@@ -239,6 +316,7 @@ export async function loadSamples() {
 export function removeItem(id) {
   const index = state.items.findIndex((item) => item.id === id);
   if (index < 0) return;
+  recordHistory();
   const [removed] = state.items.splice(index, 1);
   if (state.selectedId === id) {
     state.selectedId = state.items[Math.min(index, state.items.length - 1)]?.id ?? null;
@@ -247,6 +325,8 @@ export function removeItem(id) {
 }
 
 export function clearItems() {
+  if (!state.items.length) return;
+  recordHistory();
   state.items.splice(0, state.items.length);
   state.selectedId = null;
   setStatus('已清空素材');
@@ -257,6 +337,7 @@ export function selectItem(id) {
 }
 
 export function resetOptions() {
+  recordHistory();
   Object.assign(state.options, {
     alphaThreshold: DEFAULT_OPTIONS.alphaThreshold,
     padding: DEFAULT_OPTIONS.padding,
@@ -269,12 +350,16 @@ export function resetOptions() {
 }
 
 export async function setEngine(engine) {
+  if (state.engine === engine) return;
+  recordHistory();
   state.engine = engine;
   await recomputeAll();
   setStatus(engine === 'server' ? '已切换到 Node 引擎（服务端 sharp 计算）' : '已切换到浏览器引擎（本地即时计算）');
 }
 
 export function setOption(key, value) {
+  if (!(key in state.options) || state.options[key] === value) return;
+  recordHistory(`option:${key}`);
   state.options[key] = value;
   scheduleRecompute();
 }
@@ -453,6 +538,8 @@ export async function exportSession({ withBlobs = true } = {}) {
  * 素材 id 必须原样恢复——橡皮擦 / 像素 / 水印的 entries 都以 id 为键。
  */
 export async function importSession(snapshot, blobs = {}) {
+  // 历史栈不随会话持久化，恢复现场后从干净状态开始
+  resetHistory();
   state.items.splice(0, state.items.length);
   state.selectedId = null;
 
@@ -514,7 +601,11 @@ export function useWorkspace() {
     state: readonly(state),
     selected,
     stats,
+    canUndoAssets,
+    canRedoAssets,
     actions: {
+      undoWorkspace,
+      redoWorkspace,
       addFiles,
       addImageBlob,
       loadSamples,

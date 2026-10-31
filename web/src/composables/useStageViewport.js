@@ -11,12 +11,54 @@
  *  - 覆盖层 canvas 铺满整个舞台容器，用容器坐标绘制裁剪框、套索和笔刷光标，
  *    这样线宽与手柄大小是“屏幕像素”，不会随图片放大变成一根柱子。
  */
-import { computed, onBeforeUnmount, onMounted, reactive, shallowRef } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue';
 
 /** 舞台四周留白，避免图片贴边。 */
 const PADDING = 56;
 
+/**
+ * 空格键平移：多个舞台组件共用同一个按键状态。
+ * 同一时间只会挂载一个舞台，所以用引用计数管理全局监听即可。
+ */
+const spaceHeld = ref(false);
+let spaceUsers = 0;
+
+function isTypingTarget(target) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
+}
+
+function onSpaceDown(event) {
+  if (event.code === 'Space' && !isTypingTarget(event.target)) spaceHeld.value = true;
+}
+
+function onSpaceUp(event) {
+  if (event.code === 'Space') spaceHeld.value = false;
+}
+
+export function useSpaceHeld() {
+  onMounted(() => {
+    if (spaceUsers === 0) {
+      window.addEventListener('keydown', onSpaceDown);
+      window.addEventListener('keyup', onSpaceUp);
+    }
+    spaceUsers += 1;
+  });
+  onBeforeUnmount(() => {
+    spaceUsers = Math.max(0, spaceUsers - 1);
+    if (spaceUsers === 0) {
+      window.removeEventListener('keydown', onSpaceDown);
+      window.removeEventListener('keyup', onSpaceUp);
+      spaceHeld.value = false;
+    }
+  });
+  return spaceHeld;
+}
+
 export function useStageViewport() {
+  const spaceHeld = useSpaceHeld();
+  let panState = null;
   const container = shallowRef(null);
   const baseEl = shallowRef(null);
 
@@ -108,6 +150,58 @@ export function useStageViewport() {
     view.panY += dy;
   }
 
+  /** 中键，或按住空格 + 左键：平移画布。 */
+  function isPanGesture(event) {
+    return Boolean(event) && (event.button === 1 || (event.button === 0 && spaceHeld.value));
+  }
+
+  function beginPan(event) {
+    if (!event) return false;
+    panState = { x: event.clientX, y: event.clientY, ox: view.panX, oy: view.panY };
+    return true;
+  }
+
+  function movePan(event) {
+    if (!panState || !event) return false;
+    view.panX = panState.ox + (event.clientX - panState.x);
+    view.panY = panState.oy + (event.clientY - panState.y);
+    return true;
+  }
+
+  function endPan() {
+    panState = null;
+  }
+
+  /**
+   * 以鼠标位置为锚点缩放：先把光标换算成图片坐标，再调整平移，
+   * 保证图片上同一个点在屏幕上不会跑掉。
+   */
+  function zoomAt(event, factor) {
+    if (!event) return;
+    const nextZoom = Math.min(16, Math.max(0.05, view.zoom * (Number(factor) || 1)));
+    if (Math.abs(nextZoom - view.zoom) < 1e-6) return;
+    const host = container.value;
+    if (!host || !image.width || !image.height) {
+      view.zoom = nextZoom;
+      return;
+    }
+    const rect = host.getBoundingClientRect();
+    const cw = Math.max(1, view.containerWidth || rect.width);
+    const ch = Math.max(1, view.containerHeight || rect.height);
+    const anchorX = event.clientX - rect.left;
+    const anchorY = event.clientY - rect.top;
+    const oldScale = scale.value;
+    const oldLeft = (cw - displayWidth.value) / 2 + view.panX;
+    const oldTop = (ch - displayHeight.value) / 2 + view.panY;
+    const u = (anchorX - oldLeft) / oldScale;
+    const v = (anchorY - oldTop) / oldScale;
+
+    view.zoom = nextZoom;
+    const nextScale = view.fit * nextZoom;
+    view.panX = anchorX - u * nextScale - (cw - image.width * nextScale) / 2;
+    view.panY = anchorY - v * nextScale - (ch - image.height * nextScale) / 2;
+  }
+
   /**
    * 屏幕坐标 → 图片像素坐标。
    * 用 baseEl 的 getBoundingClientRect 换算，缩放与平移自动生效。
@@ -147,6 +241,7 @@ export function useStageViewport() {
     displayHeight,
     zoomPercent,
     frameStyle,
+    spaceHeld,
     measure,
     setImage,
     setZoom,
@@ -155,6 +250,11 @@ export function useStageViewport() {
     zoomBy,
     resetView,
     panBy,
+    zoomAt,
+    isPanGesture,
+    beginPan,
+    movePan,
+    endPan,
     toImage,
     frameOrigin,
   };

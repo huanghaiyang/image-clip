@@ -17,10 +17,30 @@ import { useStageViewport } from '../composables/useStageViewport.js';
 
 const { selected } = useWorkspace();
 const { state, activeEntry, actions } = usePixelPaint();
-const { container, baseEl, view, frameStyle, displayWidth, displayHeight, zoomPercent, setImage, zoomIn, zoomOut, resetView, toImage, frameOrigin } =
-  useStageViewport();
+const {
+  container,
+  baseEl,
+  view,
+  frameStyle,
+  displayWidth,
+  displayHeight,
+  zoomPercent,
+  spaceHeld,
+  setImage,
+  zoomIn,
+  zoomOut,
+  resetView,
+  zoomAt,
+  isPanGesture,
+  beginPan,
+  movePan,
+  endPan,
+  toImage,
+  frameOrigin,
+} = useStageViewport();
 
 const overlayEl = ref(null);
+const stagePanning = ref(false);
 const item = computed(() => selected.value ?? null);
 const entry = computed(() => activeEntry.value);
 
@@ -32,6 +52,8 @@ const cursor = ref(null);
 
 const stageClass = computed(() => ({
   'is-pan': state.brush.tool === 'pan',
+  'is-pan-ready': spaceHeld.value,
+  'is-panning': stagePanning.value,
 }));
 
 function pointFromEvent(event) {
@@ -45,11 +67,13 @@ function pointFromEvent(event) {
 }
 
 function onPointerDown(event) {
+  if (isPanGesture(event)) return; // 交给舞台容器处理平移
   if (!entry.value || event.button !== 0) return;
 
   if (state.brush.tool === 'pan') {
     panning = { clientX: event.clientX, clientY: event.clientY };
     event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.stopPropagation();
     return;
   }
 
@@ -68,6 +92,7 @@ function onPointerDown(event) {
 }
 
 function onPointerMove(event) {
+  if (stagePanning.value) return;
   updateCursor(event);
 
   if (panning) {
@@ -91,6 +116,33 @@ function onPointerUp(event) {
   if (!painting) return;
   actions.endStroke();
   painting = false;
+}
+
+// --------------------------------------------------------------- 画布平移
+
+function onStagePointerDown(event) {
+  if (!entry.value) return;
+  const wantsPan = isPanGesture(event) || (state.brush.tool === 'pan' && event.button === 0);
+  if (!wantsPan) return;
+  event.preventDefault();
+  beginPan(event);
+  stagePanning.value = true;
+  cursor.value = null;
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  scheduleOverlay();
+}
+
+function onStagePointerMove(event) {
+  if (!stagePanning.value) return;
+  event.preventDefault();
+  movePan(event);
+}
+
+function onStagePointerUp(event) {
+  if (!stagePanning.value) return;
+  stagePanning.value = false;
+  endPan();
+  event.currentTarget.releasePointerCapture?.(event.pointerId);
 }
 
 /** 指针离开画面：结束当前笔画并隐藏笔刷光标。 */
@@ -299,17 +351,21 @@ onBeforeUnmount(() => {
 
 function onWheel(event) {
   if (!entry.value) return;
-  const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
-  view.zoom = Math.min(16, Math.max(0.05, view.zoom * factor));
-  if (view.zoom <= 1.0001) {
-    view.panX = 0;
-    view.panY = 0;
-  }
+  zoomAt(event, event.deltaY < 0 ? 1.1 : 1 / 1.1);
 }
 </script>
 
 <template>
-  <section ref="container" class="stage" :class="stageClass" @wheel.prevent="onWheel">
+  <section
+    ref="container"
+    class="stage"
+    :class="stageClass"
+    @wheel.prevent="onWheel"
+    @pointerdown="onStagePointerDown"
+    @pointermove="onStagePointerMove"
+    @pointerup="onStagePointerUp"
+    @pointercancel="onStagePointerUp"
+  >
     <div v-if="!item" class="stage-empty">
       <p>还没有可绘制的素材</p>
       <p class="muted">从左侧选择图片，或把图片拖进窗口</p>
@@ -338,9 +394,9 @@ function onWheel(event) {
       </div>
 
       <div class="stage-hint muted">
-        <template v-if="state.brush.tool === 'brush'">像素画笔：拖动绘制 · [ / ] 调笔刷 · Ctrl+Z 撤销</template>
-        <template v-else-if="state.brush.tool === 'eraser'">像素橡皮：拖动擦成透明 · 可配合网格精修</template>
-        <template v-else-if="state.brush.tool === 'pick'">吸管：点击画面取色（B 回到画笔）</template>
+        <template v-if="state.brush.tool === 'brush'">像素画笔：拖动绘制 · [ / ] 调笔刷 · Ctrl+Z 撤销 · 空格 / 中键拖动平移</template>
+        <template v-else-if="state.brush.tool === 'eraser'">像素橡皮：拖动擦成透明 · 可配合网格精修 · 空格 / 中键拖动平移</template>
+        <template v-else-if="state.brush.tool === 'pick'">吸管：点击画面取色（B 回到画笔） · 空格 / 中键拖动平移</template>
         <template v-else>平移：拖动查看大图（滚轮仍可缩放）</template>
         <template v-if="entry?.dirty"> · 有未导出的修改</template>
       </div>
@@ -375,6 +431,15 @@ function onWheel(event) {
 }
 
 .stage.is-pan:active {
+  cursor: grabbing;
+}
+
+/* 空格 / 中键拖动平移：光标提示要压过工具光标 */
+.stage.is-pan-ready {
+  cursor: grab;
+}
+
+.stage.is-panning {
   cursor: grabbing;
 }
 

@@ -19,9 +19,30 @@ import { useStageViewport } from '../composables/useStageViewport.js';
 import { clampRect } from '@shared/selection.js';
 
 const { state, actions, activeItem, atlasItems, atlasCount, atlasIndex, normalizedRect } = useCropTool();
-const { container, baseEl, view, frameStyle, displayWidth, displayHeight, zoomPercent, setImage, zoomIn, zoomOut, resetView, toImage, frameOrigin } = useStageViewport();
+const {
+  container,
+  baseEl,
+  view,
+  frameStyle,
+  displayWidth,
+  displayHeight,
+  zoomPercent,
+  spaceHeld,
+  setImage,
+  zoomIn,
+  zoomOut,
+  resetView,
+  zoomAt,
+  isPanGesture,
+  beginPan,
+  movePan,
+  endPan,
+  toImage,
+  frameOrigin,
+} = useStageViewport();
 
 const overlayEl = ref(null);
+const panning = ref(false);
 // 图集模式下当前项 = 当前层，否则跟随左侧素材选中
 const item = computed(() => activeItem.value ?? null);
 const atlasEnabled = computed(() => state.atlas.enabled);
@@ -182,12 +203,14 @@ function pointFromEvent(event) {
 }
 
 function onPointerDown(event) {
+  if (isPanGesture(event)) return; // 交给舞台容器处理平移
   if (!item.value || event.button !== 0) return;
   const point = pointFromEvent(event);
   if (!point) return;
   event.currentTarget.setPointerCapture?.(event.pointerId);
 
   const handle = handleAt(point);
+  actions.beginCropEdit();
   if (handle === 'move') {
     drag = { mode: 'move', startRect: { ...state.rect }, origin: point };
   } else if (handle) {
@@ -198,6 +221,7 @@ function onPointerDown(event) {
 }
 
 function onPointerMove(event) {
+  if (panning.value) return;
   const point = pointFromEvent(event);
   if (!point) return;
 
@@ -253,6 +277,30 @@ function onPointerMove(event) {
 function onPointerUp(event) {
   if (!drag) return;
   drag = null;
+  actions.endCropEdit();
+  event.currentTarget.releasePointerCapture?.(event.pointerId);
+}
+
+// --------------------------------------------------------------- 画布平移
+
+function onStagePointerDown(event) {
+  if (!isPanGesture(event) || !item.value) return;
+  event.preventDefault();
+  beginPan(event);
+  panning.value = true;
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+}
+
+function onStagePointerMove(event) {
+  if (!panning.value) return;
+  event.preventDefault();
+  movePan(event);
+}
+
+function onStagePointerUp(event) {
+  if (!panning.value) return;
+  panning.value = false;
+  endPan();
   event.currentTarget.releasePointerCapture?.(event.pointerId);
 }
 
@@ -427,22 +475,21 @@ function onLayerKeydown(event) {
 
 function onWheel(event) {
   if (!item.value) return;
-  zoomBy(event.deltaY < 0 ? 1.1 : 1 / 1.1);
-}
-
-function zoomBy(factor) {
-  // 由 useStageViewport 暴露的 zoomIn/zoomOut 以外，还需要任意倍率
-  const next = view.zoom * factor;
-  view.zoom = Math.min(16, Math.max(0.05, next));
-  if (view.zoom <= 1.0001) {
-    view.panX = 0;
-    view.panY = 0;
-  }
+  zoomAt(event, event.deltaY < 0 ? 1.1 : 1 / 1.1);
 }
 </script>
 
 <template>
-  <section ref="container" class="stage" @wheel.prevent="onWheel">
+  <section
+    ref="container"
+    class="stage"
+    :class="{ 'is-pan-ready': spaceHeld, 'is-panning': panning }"
+    @wheel.prevent="onWheel"
+    @pointerdown="onStagePointerDown"
+    @pointermove="onStagePointerMove"
+    @pointerup="onStagePointerUp"
+    @pointercancel="onStagePointerUp"
+  >
     <div v-if="!item" class="stage-empty">
       <p>还没有可裁剪的素材</p>
       <p class="muted">从左侧选择图片，或把图片拖进窗口</p>
@@ -507,7 +554,7 @@ function zoomBy(factor) {
 
       <div class="stage-hint muted">
         <template v-if="atlasEnabled">图集模式 · ←/→ 或点击右侧层条翻看每一层 · 拖动调整统一裁剪框</template>
-        <template v-else>拖动边角调整裁剪框 · 框外拖动重新拉框 · 滚轮缩放</template>
+        <template v-else>拖动边角调整裁剪框 · 空格 / 中键拖动平移 · 滚轮缩放</template>
       </div>
     </template>
   </section>
@@ -570,6 +617,18 @@ function zoomBy(factor) {
 }
 .frame.cursor-create {
   cursor: crosshair;
+}
+
+/* 空格 / 中键拖动平移：光标提示要压过框上的手柄光标 */
+.stage.is-pan-ready {
+  cursor: grab;
+}
+.stage.is-pan-ready .frame {
+  cursor: grab;
+}
+.stage.is-panning,
+.stage.is-panning .frame {
+  cursor: grabbing;
 }
 
 .base {
