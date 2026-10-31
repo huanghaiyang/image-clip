@@ -136,12 +136,57 @@ async function send(text) {
   }
 }
 
+/** 导出对话现场：消息里只有普通对象，可以直接跟着会话文档落盘。 */
+export function exportSession() {
+  return {
+    sessionId: state.sessionId,
+    messages: state.messages.map((message) => ({
+      ...message,
+      artifacts: [...(message.artifacts ?? [])],
+      trace: [...(message.trace ?? [])],
+    })),
+  };
+}
+
+/** 恢复对话：消息 id 是运行期自增的，恢复后把 seq 推到最大值之后，避免 id 重复。 */
+export function restoreSession(doc) {
+  state.sessionId = doc?.sessionId || '';
+  state.messages = Array.isArray(doc?.messages)
+    ? doc.messages.map((message) => ({ ...message, pending: false }))
+    : [];
+  const max = state.messages.reduce((acc, message) => {
+    const value = Number(String(message.id ?? '').replace(/^m_/, ''));
+    return Number.isFinite(value) ? Math.max(acc, value) : acc;
+  }, 0);
+  seq = Math.max(seq, max);
+  state.busy = false;
+  state.error = null;
+}
+
+export function clearSession() {
+  state.sessionId = '';
+  state.messages = [];
+  state.busy = false;
+  state.error = null;
+}
+
 const activeProvider = computed(() => state.providers.find((p) => p.id === state.activeId) ?? null);
 
 export function useLlmChat() {
   return {
     state,
     activeProvider,
-    actions: { refresh, switchProvider, attachImage, send, open: () => (state.open = true), close: () => (state.open = false), toggle: () => (state.open = !state.open) },
+    actions: {
+      refresh,
+      switchProvider,
+      attachImage,
+      send,
+      exportSession,
+      restoreSession,
+      clearSession,
+      open: () => (state.open = true),
+      close: () => (state.open = false),
+      toggle: () => (state.open = !state.open),
+    },
   };
 }

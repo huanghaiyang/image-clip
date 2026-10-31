@@ -19,6 +19,7 @@ import {
 import { analyzeWith, cropWith } from '../lib/engine.js';
 import { blobToBytes, createZip } from '../lib/zip.js';
 import { onLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
+import { canvasToBlob } from '../lib/imageops.js';
 
 let uid = 0;
 
@@ -384,6 +385,130 @@ export async function checkServer() {
   return state.server;
 }
 
+// --------------------------------------------------------------- 临时会话
+
+/** 只保存可序列化的素材元信息；像素数据由 IndexedDB 的 Blob 负责。 */
+function sessionItemMeta(item) {
+  return {
+    id: item.id,
+    name: item.name,
+    type: item.type,
+    bytes: item.bytes,
+    width: item.width,
+    height: item.height,
+    bounds: item.bounds ? { ...item.bounds } : null,
+    trimmed: item.trimmed ? { ...item.trimmed } : null,
+    resultEmpty: item.resultEmpty,
+    contentPixels: item.contentPixels,
+    contentRatio: item.contentRatio,
+    engine: item.engine,
+    elapsedMs: item.elapsedMs,
+    error: item.error,
+    detectedAt: item.detectedAt,
+    libraryPath: item.libraryPath,
+  };
+}
+
+/** 导出单个素材的原始字节（优先保留上传时的编码，避免二次转码）。 */
+export async function exportItemBlob(id) {
+  const item = state.items.find((entry) => entry.id === id);
+  if (!item) return null;
+  if (item.buffer && item.buffer.byteLength > 0) {
+    return new Blob([item.buffer], { type: item.type || 'image/png' });
+  }
+  if (!item.bitmap) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = item.width;
+  canvas.height = item.height;
+  canvas.getContext('2d').drawImage(item.bitmap, 0, 0);
+  return canvasToBlob(canvas, 'image/png');
+}
+
+/**
+ * 导出工作区现场。
+ * withBlobs=false 时只给文档，供自动保存按需补图片（避免每次保存都复制大图）。
+ */
+export async function exportSession({ withBlobs = true } = {}) {
+  const doc = {
+    selectedId: state.selectedId,
+    engine: state.engine,
+    output: { ...state.output },
+    options: { ...state.options },
+    view: { ...state.view },
+    theme: state.theme,
+    items: state.items.map(sessionItemMeta),
+  };
+  const blobs = new Map();
+  if (withBlobs) {
+    for (const item of state.items) {
+      const blob = await exportItemBlob(item.id);
+      if (blob) blobs.set(`asset:${item.id}`, blob);
+    }
+  }
+  return { doc, blobs };
+}
+
+/**
+ * 恢复工作区现场：先把旧素材全部清掉，再按 Blob 重新解码。
+ * 素材 id 必须原样恢复——橡皮擦 / 像素 / 水印的 entries 都以 id 为键。
+ */
+export async function importSession(snapshot, blobs = {}) {
+  state.items.splice(0, state.items.length);
+  state.selectedId = null;
+
+  if (!snapshot || typeof snapshot !== 'object') return [];
+
+  for (const meta of snapshot.items ?? []) {
+    const blob = blobs[`asset:${meta?.id}`];
+    if (!blob) continue;
+    try {
+      const buffer = await blob.arrayBuffer();
+      const { bitmap, imageData, width, height } = await decodeToRgba(blob);
+      const item = reactive({
+        id: String(meta.id),
+        name: meta.name || `image-${meta.id}`,
+        type: meta.type || blob.type || 'image/png',
+        bytes: buffer.byteLength || meta.bytes || 0,
+        width,
+        height,
+        thumbnail: markRaw(makeThumbnail(bitmap, 160)),
+        bitmap: markRaw(bitmap),
+        imageData: markRaw(imageData),
+        buffer: markRaw(buffer),
+        bounds: meta.bounds ? { ...meta.bounds } : null,
+        trimmed: meta.trimmed ? { ...meta.trimmed } : null,
+        resultEmpty: Boolean(meta.resultEmpty),
+        contentPixels: Number(meta.contentPixels) || 0,
+        contentRatio: Number(meta.contentRatio) || 0,
+        engine: meta.engine || '',
+        elapsedMs: Number(meta.elapsedMs) || 0,
+        error: '',
+        detectedAt: Number(meta.detectedAt) || 0,
+        libraryPath: meta.libraryPath || '',
+      });
+      // id 是运行期自增的，恢复后要把计数器推到最大值，避免新素材撞 id
+      const numeric = Number(String(meta.id).replace(/^img-/, ''));
+      if (Number.isFinite(numeric)) uid = Math.max(uid, numeric);
+      state.items.push(item);
+    } catch (err) {
+      console.warn('[session] 素材恢复失败:', meta?.id, err.message);
+    }
+  }
+
+  state.engine = snapshot.engine === 'server' ? 'server' : 'client';
+  Object.assign(state.output, { format: 'png', quality: 92 }, snapshot.output ?? {});
+  Object.assign(state.options, DEFAULT_OPTIONS, snapshot.options ?? {});
+  Object.assign(state.view, { mode: 'source', showBox: true, zoom: 'fit' }, snapshot.view ?? {});
+  if (snapshot.theme === 'light' || snapshot.theme === 'dark') {
+    state.theme = snapshot.theme;
+    document.documentElement.dataset.theme = state.theme;
+  }
+
+  const exists = state.items.some((item) => item.id === snapshot.selectedId);
+  state.selectedId = exists ? snapshot.selectedId : state.items[state.items.length - 1]?.id ?? null;
+  return state.items;
+}
+
 export function useWorkspace() {
   return {
     state: readonly(state),
@@ -407,6 +532,9 @@ export function useWorkspace() {
       checkServer,
       toggleTheme,
       recomputeAll,
+      exportSession,
+      exportItemBlob,
+      importSession,
     },
     meta: { ALGORITHM },
   };

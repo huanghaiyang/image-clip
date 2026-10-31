@@ -182,6 +182,15 @@ function onLoadedMetadata() {
   if (!el) return;
   // 时长一律以 ffprobe 得到的 meta.duration 为准：浏览器解出的值可能差几十毫秒，
   // 若反过来改写 state.meta，时间轴比例和刻度会和截帧时间点错位。
+  // 临时会话恢复时 stage 往往还没挂载，seekTo 只写进状态层；这里把保存的位置补上。
+  const target = Number(state.currentTime) || 0;
+  if (target > 0.01) {
+    try {
+      el.currentTime = Math.min(target, Number.isFinite(el.duration) ? el.duration : target);
+    } catch {
+      /* 元数据刚就绪时个别浏览器会抛错，保持 0 不影响后续手动 seek */
+    }
+  }
   now.value = Number.isFinite(el.currentTime) ? el.currentTime : 0;
   el.playbackRate = state.playbackRate;
   el.volume = state.volume;

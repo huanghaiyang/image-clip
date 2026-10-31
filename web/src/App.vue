@@ -40,6 +40,7 @@ import ChatDrawer from './components/ChatDrawer.vue';
 import UploadDialog from './components/UploadDialog.vue';
 import RenameDialog from './components/RenameDialog.vue';
 import ConfirmDialog from './components/ConfirmDialog.vue';
+import SessionDialog from './components/SessionDialog.vue';
 
 import { useWorkspace } from './composables/useWorkspace.js';
 import { useWatermark } from './composables/useWatermark.js';
@@ -51,6 +52,7 @@ import { useAudio } from './composables/useAudio.js';
 import { useEraser } from './composables/useEraser.js';
 import { usePixelPaint } from './composables/usePixelPaint.js';
 import { openImportPicker, useUploadPicker } from './composables/useUploadPicker.js';
+import { useWorkSession } from './composables/useWorkSession.js';
 
 const { state, actions } = useWorkspace();
 const { state: watermarkState, actions: watermarkActions } = useWatermark();
@@ -61,6 +63,7 @@ const { state: audioState, actions: audioActions } = useAudio();
 const { state: eraserState, actions: eraserActions } = useEraser();
 const { state: pixelState, actions: pixelActions } = usePixelPaint();
 const { state: uploadState } = useUploadPicker();
+const { state: sessionState, actions: sessionActions } = useWorkSession();
 
 const mode = computed(() => appMode.mode);
 
@@ -234,6 +237,8 @@ onMounted(() => {
   window.addEventListener('drop', onWindowDrop);
   window.addEventListener('keydown', onKeydown);
   void actions.checkServer();
+  // 恢复上次临时会话；之后所有变更自动暂存
+  void sessionActions.init();
 });
 
 onBeforeUnmount(() => {
@@ -266,6 +271,13 @@ watch(
 <template>
   <div class="app">
     <TopBar />
+
+    <!-- 恢复提示：告诉用户上次的临时现场已经续上，可随时关掉 -->
+    <div v-if="sessionState.restoreHint && !sessionState.hintDismissed" class="session-banner">
+      <span class="session-banner-text" :title="sessionState.restoreHint">{{ sessionState.restoreHint }}</span>
+      <button class="btn is-mini is-ghost" type="button" @click="sessionActions.openDialog()">查看</button>
+      <button class="btn is-mini is-ghost" type="button" @click="sessionActions.dismissHint()">知道了</button>
+    </div>
 
     <main class="app-body">
       <!-- 资源库：左侧目录树 / 中间文件网格 / 右侧详情与批量操作 -->
@@ -312,6 +324,7 @@ watch(
     <UploadDialog />
     <RenameDialog />
     <ConfirmDialog />
+    <SessionDialog v-if="sessionState.open" @close="sessionActions.closeDialog()" />
   </div>
 </template>
 
@@ -327,5 +340,26 @@ watch(
   display: flex;
   flex: 1;
   min-height: 0;
+}
+
+.session-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 0 12px;
+  height: 32px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--border);
+}
+
+.session-banner-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+  font-size: 11px;
 }
 </style>

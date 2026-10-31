@@ -16,7 +16,8 @@ import { computed, markRaw, reactive, readonly } from 'vue';
 import { useWorkspace } from './useWorkspace.js';
 import { saveBlobToLibrary } from './useLibrary.js';
 import { canvasToBlob, createCanvas, stripExtension } from '../lib/imageops.js';
-import { downloadBlob } from '../lib/imaging.js';
+import { decodeBitmap, downloadBlob } from '../lib/imaging.js';
+import { markSessionDirty } from '../lib/sessionSignals.js';
 
 /** 撤销栈上限：一次涂抹算一步，20 步对图片修饰足够。 */
 const HISTORY_LIMIT = 20;
@@ -261,6 +262,7 @@ export function prepareSelected() {
 export function setBrush(key, value) {
   if (!(key in state.brush)) return;
   state.brush[key] = value;
+  markSessionDirty('eraser');
 }
 
 /**
@@ -276,6 +278,7 @@ export function beginStroke(point) {
   drawDab(entry, point.x, point.y);
   entry.version += 1;
   entry.dirty = true;
+  markSessionDirty('eraser');
   return true;
 }
 
@@ -300,6 +303,7 @@ export function endStroke() {
     entry.pending = null;
     entry.version += 1;
   }
+  markSessionDirty('eraser');
 }
 
 /** 撤销一笔：把这一笔开始前的区域像素放回去。 */
@@ -312,6 +316,7 @@ export function undo() {
   entry.ctx.putImageData(step.image, step.rect.x, step.rect.y);
   entry.dirty = entry.history.length > 0 || entry.redo.length > 0;
   entry.version += 1;
+  markSessionDirty('eraser');
   setStatus(`已撤销一步（剩余 ${entry.history.length} 步可撤销）`);
 }
 
@@ -324,6 +329,7 @@ export function redo() {
   entry.ctx.putImageData(step.image, step.rect.x, step.rect.y);
   entry.dirty = true;
   entry.version += 1;
+  markSessionDirty('eraser');
   setStatus('已重做一步');
 }
 
@@ -338,6 +344,7 @@ export function resetCanvas() {
   entry.pending = null;
   entry.dirty = false;
   entry.version += 1;
+  markSessionDirty('eraser');
   setStatus('已恢复原图');
 }
 
@@ -384,6 +391,57 @@ export async function applyEraser(options = {}) {
   }
 }
 
+// --------------------------------------------------------------- 临时会话
+
+/**
+ * 只导出“改过的画布”。未编辑的素材 entry 恢复时可以直接由原图重建，
+ * 没必要把整张原图再存一遍。撤销/重做栈不持久化（占用大、价值低）。
+ */
+export async function exportSession() {
+  const items = {};
+  const blobs = new Map();
+  for (const [id, entry] of Object.entries(entries)) {
+    if (!entry.dirty && !entry.history.length && !entry.redo.length) continue;
+    items[id] = { dirty: entry.dirty, version: entry.version };
+    try {
+      blobs.set(`eraser:${id}`, await canvasToBlob(entry.canvas, 'image/png'));
+    } catch (err) {
+      console.warn('[session] 橡皮擦画布导出失败:', id, err.message);
+    }
+  }
+  return { doc: { brush: { ...state.brush }, items }, blobs };
+}
+
+export async function importSession(doc, blobs = {}) {
+  for (const id of Object.keys(entries)) delete entries[id];
+  if (!doc || typeof doc !== 'object') return;
+  Object.assign(state.brush, DEFAULT_BRUSH, doc.brush ?? {});
+
+  for (const [id, meta] of Object.entries(doc.items ?? {})) {
+    const item = workspace.state.items.find((entry) => entry.id === id);
+    if (!item) continue;
+    const entry = ensureEntry(item);
+    const blob = blobs[`eraser:${id}`];
+    if (blob) {
+      try {
+        const bitmap = await decodeBitmap(blob);
+        entry.ctx.clearRect(0, 0, entry.width, entry.height);
+        entry.ctx.drawImage(bitmap, 0, 0);
+        bitmap.close?.();
+      } catch (err) {
+        console.warn('[session] 橡皮擦画布恢复失败:', id, err.message);
+      }
+    }
+    entry.dirty = Boolean(meta?.dirty);
+    entry.version = Number(meta?.version) || 0;
+  }
+}
+
+export function clearSession() {
+  for (const id of Object.keys(entries)) delete entries[id];
+  Object.assign(state.brush, DEFAULT_BRUSH);
+}
+
 export function useEraser() {
   return {
     state: readonly(state),
@@ -403,6 +461,9 @@ export function useEraser() {
       resetCanvas,
       applyEraser,
       historyState,
+      exportSession,
+      importSession,
+      clearSession,
     },
   };
 }

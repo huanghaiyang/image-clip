@@ -16,6 +16,7 @@ import { useVideo } from '../composables/useVideo.js';
 import { useAudio } from '../composables/useAudio.js';
 import { useRenamePrompt } from '../composables/useRenamePrompt.js';
 import { useConfirm } from '../composables/useConfirm.js';
+import { useSlideshowPrefs } from '../composables/useSlideshowPrefs.js';
 import { setMode } from '../composables/useAppMode.js';
 import { formatDuration, formatSize, libraryFileUrl, libraryThumbUrl } from '../lib/library.js';
 import { buildResourceTree, flattenResourceTree } from '../lib/resourceTree.js';
@@ -41,6 +42,7 @@ const { actions: audioActions, state: audioState } = useAudio();
 const { selected: workspaceSelected } = useWorkspace();
 const { actions: renameActions } = useRenamePrompt();
 const { confirm } = useConfirm();
+const { state: slideshowPrefs } = useSlideshowPrefs();
 
 const KIND_FILTERS = [
   { value: 'all', label: '全部' },
@@ -130,7 +132,9 @@ function openSlideshow() {
   const images = selectedImages.value;
   if (images.length < 2) return;
   slideshowImages.value = images;
-  slideshowStart.value = images[0].path;
+  // 接着上次看到的那张继续；它已不在本次选中集合时退回第一张
+  const last = slideshowPrefs.lastPath;
+  slideshowStart.value = images.some((entry) => entry.path === last) ? last : images[0].path;
   slideshowOpen.value = true;
 }
 

@@ -15,7 +15,8 @@ import { computed, markRaw, reactive, readonly } from 'vue';
 import { useWorkspace } from './useWorkspace.js';
 import { saveBlobToLibrary } from './useLibrary.js';
 import { canvasToBlob, createCanvas, stripExtension } from '../lib/imageops.js';
-import { downloadBlob } from '../lib/imaging.js';
+import { decodeBitmap, downloadBlob } from '../lib/imaging.js';
+import { markSessionDirty } from '../lib/sessionSignals.js';
 
 /** 撤销栈上限：像素画通常是很多笔细修，24 步比橡皮擦的 20 步更宽松。 */
 const HISTORY_LIMIT = 24;
@@ -258,10 +259,12 @@ export function prepareSelected() {
 export function setTool(tool) {
   if (!['brush', 'eraser', 'pick', 'pan'].includes(tool)) return;
   state.brush.tool = tool;
+  markSessionDirty('pixel');
 }
 
 /** 面板里的颜色 / 大小 / 透明度 / 网格都走这里，值统一做一次校验或钳制。 */
 export function setBrush(key, value) {
+  markSessionDirty('pixel');
   if (key === 'color') {
     const hex = normalizeColor(value);
     if (!hex) return false;
@@ -304,6 +307,7 @@ export function beginStroke(point) {
   drawDab(entry, x, y);
   entry.version += 1;
   entry.dirty = true;
+  markSessionDirty('pixel');
   return true;
 }
 
@@ -326,6 +330,7 @@ export function endStroke() {
     entry.pending = null;
     entry.version += 1;
   }
+  markSessionDirty('pixel');
 }
 
 /** 吸管：读取工作画布上的真实像素（透明像素提示不可取色）。 */
@@ -341,6 +346,7 @@ export function pickColorAt(point) {
   }
   const hex = `#${[r, g, b].map((value) => value.toString(16).padStart(2, '0')).join('')}`;
   state.brush.color = hex;
+  markSessionDirty('pixel');
   setStatus(`已从 (${x}, ${y}) 取色 ${hex.toUpperCase()}`);
   return hex;
 }
@@ -354,6 +360,7 @@ export function undo() {
   entry.ctx.putImageData(step.image, step.rect.x, step.rect.y);
   entry.dirty = entry.history.length > 0 || entry.redo.length > 0;
   entry.version += 1;
+  markSessionDirty('pixel');
   setStatus(`已撤销一步（剩余 ${entry.history.length} 步可撤销）`);
 }
 
@@ -366,6 +373,7 @@ export function redo() {
   entry.ctx.putImageData(step.image, step.rect.x, step.rect.y);
   entry.dirty = true;
   entry.version += 1;
+  markSessionDirty('pixel');
   setStatus('已重做一步');
 }
 
@@ -381,6 +389,7 @@ export function resetCanvas() {
   entry.lastPixel = null;
   entry.dirty = false;
   entry.version += 1;
+  markSessionDirty('pixel');
   setStatus('已恢复原图');
 }
 
@@ -421,6 +430,54 @@ export async function applyPaint(options = {}) {
   }
 }
 
+// --------------------------------------------------------------- 临时会话
+
+/** 与橡皮擦一致：只存改过的画布，撤销/重做栈不持久化。 */
+export async function exportSession() {
+  const items = {};
+  const blobs = new Map();
+  for (const [id, entry] of Object.entries(entries)) {
+    if (!entry.dirty && !entry.history.length && !entry.redo.length) continue;
+    items[id] = { dirty: entry.dirty, version: entry.version };
+    try {
+      blobs.set(`pixel:${id}`, await canvasToBlob(entry.canvas, 'image/png'));
+    } catch (err) {
+      console.warn('[session] 像素画布导出失败:', id, err.message);
+    }
+  }
+  return { doc: { brush: { ...state.brush }, items }, blobs };
+}
+
+export async function importSession(doc, blobs = {}) {
+  for (const id of Object.keys(entries)) delete entries[id];
+  if (!doc || typeof doc !== 'object') return;
+  Object.assign(state.brush, DEFAULT_BRUSH, doc.brush ?? {});
+
+  for (const [id, meta] of Object.entries(doc.items ?? {})) {
+    const item = workspace.state.items.find((entry) => entry.id === id);
+    if (!item) continue;
+    const entry = ensureEntry(item);
+    const blob = blobs[`pixel:${id}`];
+    if (blob) {
+      try {
+        const bitmap = await decodeBitmap(blob);
+        entry.ctx.clearRect(0, 0, entry.width, entry.height);
+        entry.ctx.drawImage(bitmap, 0, 0);
+        bitmap.close?.();
+      } catch (err) {
+        console.warn('[session] 像素画布恢复失败:', id, err.message);
+      }
+    }
+    entry.dirty = Boolean(meta?.dirty);
+    entry.version = Number(meta?.version) || 0;
+  }
+}
+
+export function clearSession() {
+  for (const id of Object.keys(entries)) delete entries[id];
+  Object.assign(state.brush, DEFAULT_BRUSH);
+}
+
 export function usePixelPaint() {
   return {
     state: readonly(state),
@@ -442,6 +499,9 @@ export function usePixelPaint() {
       redo,
       resetCanvas,
       applyPaint,
+      exportSession,
+      importSession,
+      clearSession,
     },
   };
 }

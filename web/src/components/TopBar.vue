@@ -18,6 +18,7 @@ import { useAppMode, MODES } from '../composables/useAppMode.js';
 import { useLibrary } from '../composables/useLibrary.js';
 import { useVideo } from '../composables/useVideo.js';
 import { useAudio } from '../composables/useAudio.js';
+import { useWorkSession } from '../composables/useWorkSession.js';
 import { openImportPicker } from '../composables/useUploadPicker.js';
 import { ENGINES } from '../lib/engine.js';
 import { formatBytes } from '../lib/imaging.js';
@@ -31,6 +32,7 @@ const { state: appMode, currentMode, actions: modeActions } = useAppMode();
 const { state: libraryState, stats: libraryStats } = useLibrary();
 const { state: videoState, videoName } = useVideo();
 const { state: audioState } = useAudio();
+const { state: sessionState, actions: sessionActions } = useWorkSession();
 
 const mode = computed(() => appMode.mode);
 const isImageMode = computed(() => ['crop', 'cropimage', 'bgremove', 'eraser', 'watermark', 'pixel'].includes(mode.value));
@@ -97,6 +99,17 @@ const importLabel = computed(() => {
 function pickFiles() {
   openImportPicker(mode.value);
 }
+
+const sessionHint = computed(() => {
+  if (sessionState.saving) return '正在暂存临时会话…';
+  if (sessionState.hasSession) {
+    const time = sessionState.savedAt
+      ? new Date(sessionState.savedAt).toLocaleTimeString('zh-CN', { hour12: false })
+      : '';
+    return `临时会话已暂存${time ? `（${time}）` : ''}，点击查看`;
+  }
+  return '临时会话：自动保留未提交的操作，刷新或重启后可恢复';
+});
 </script>
 
 <template>
@@ -124,6 +137,16 @@ function pickFiles() {
       </div>
 
       <div class="topbar-right">
+        <button class="btn is-ghost session-btn" type="button" :title="sessionHint" @click="sessionActions.openDialog()">
+          <span
+            class="session-dot"
+            :class="{
+              'is-saving': sessionState.saving,
+              'is-saved': !sessionState.saving && sessionState.hasSession,
+            }"
+          />
+          临时会话
+        </button>
         <button
           class="btn is-ghost"
           type="button"
@@ -352,5 +375,21 @@ function pickFiles() {
 .doc-meta {
   font-size: 11px;
   white-space: nowrap;
+}
+
+.session-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: background 0.15s ease;
+}
+
+.session-dot.is-saved {
+  background: var(--accent);
+}
+
+.session-dot.is-saving {
+  background: #e8a33d;
 }
 </style>

@@ -26,6 +26,7 @@ import {
 } from '../lib/watermark.js';
 import { blobToBytes, createZip } from '../lib/zip.js';
 import { downloadBlob, formatBytes } from '../lib/imaging.js';
+import { markSessionDirty } from '../lib/sessionSignals.js';
 import { useWorkspace } from './useWorkspace.js';
 
 const workspace = useWorkspace();
@@ -258,14 +259,17 @@ export function setMode(mode) {
 
 export function setOption(key, value) {
   state.options[key] = value;
+  markSessionDirty('watermark');
 }
 
 export function setBrush(key, value) {
   state.brush[key] = value;
+  markSessionDirty('watermark');
 }
 
 export function setView(key, value) {
   state.view[key] = value;
+  markSessionDirty('watermark');
 }
 
 /** 键盘 R 键的循环：原图 → 掩膜 → 结果 → 原图。 */
@@ -274,6 +278,7 @@ const VIEW_CYCLE = ['source', 'mask', 'result'];
 export function cycleView() {
   const index = VIEW_CYCLE.indexOf(state.view.mode);
   state.view.mode = VIEW_CYCLE[(index + 1) % VIEW_CYCLE.length];
+  markSessionDirty('watermark');
 }
 
 // --------------------------------------------------------------- 检测
@@ -326,6 +331,7 @@ export async function detectFor(item = workspace.selected.value) {
     }
 
     if (!state.health.checked) void checkHealth();
+    markSessionDirty('watermark');
     setStatus(
       `检测完成 · ${entry.detect.usedMethods.join('+') || entry.detect.method} · 置信度 ${(
         entry.detect.confidence * 100
@@ -411,6 +417,7 @@ export function paintSegment(item, from, to, { erase = false } = {}) {
   entry.maskVersion = maskState.version;
   entry.coverage = maskState.total ? Math.max(0, maskState.padded) / maskState.total : 0;
   entry.dirty = true;
+  markSessionDirty('watermark');
   return box;
 }
 
@@ -428,6 +435,11 @@ export function beginStroke(item) {
   if (entry?.maskState.mask) pushHistory(entry);
 }
 
+/** 一笔结束：触发一次会话暂存（涂抹过程中的保存会被防抖合并）。 */
+export function endStroke() {
+  markSessionDirty('watermark');
+}
+
 export function undoMask(item = workspace.selected.value) {
   const entry = entryFor(item?.id);
   if (!entry?.maskState.mask || entry.history.length === 0) {
@@ -442,6 +454,7 @@ export function undoMask(item = workspace.selected.value) {
   entry.dirty = true;
   revokeResult(entry);
   entry.result = null;
+  markSessionDirty('watermark');
   setStatus('已撤销上一笔涂抹');
   return true;
 }
@@ -457,6 +470,7 @@ export function redoMask(item = workspace.selected.value) {
   entry.dirty = true;
   revokeResult(entry);
   entry.result = null;
+  markSessionDirty('watermark');
   setStatus('已重做涂抹');
   return true;
 }
@@ -472,6 +486,7 @@ export function clearMask(item = workspace.selected.value) {
   entry.dirty = true;
   revokeResult(entry);
   entry.result = null;
+  markSessionDirty('watermark');
   setStatus('已清空掩膜');
 }
 
@@ -487,6 +502,7 @@ export function invertMask(item = workspace.selected.value) {
   entry.dirty = true;
   revokeResult(entry);
   entry.result = null;
+  markSessionDirty('watermark');
   setStatus('已反选掩膜');
 }
 
@@ -541,6 +557,7 @@ export async function removeFor(item = workspace.selected.value, { silent = fals
     entry.dirty = false;
     entry.error = '';
     state.view.compare = true;
+    markSessionDirty('watermark');
     if (!silent) {
       setStatus(
         `已去除水印 · ${result.engine ?? state.options.engine} · ${result.elapsedMs || '—'}ms · ${formatBytes(
@@ -636,6 +653,166 @@ watch(
   },
 );
 
+// --------------------------------------------------------------- 临时会话
+
+function dataUrlToBlob(dataUrl) {
+  return fetch(dataUrl).then((response) => response.blob());
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(reader.error ?? new Error('读取 Blob 失败'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** 检测摘要去掉 RLE（体积大且可由掩膜重新生成），只留界面要展示的字段。 */
+function detectMeta(detect) {
+  if (!detect) return null;
+  return {
+    method: detect.method,
+    textGate: detect.textGate ?? null,
+    usedMethods: detect.usedMethods ?? [],
+    confidence: detect.confidence ?? 0,
+    elapsedMs: detect.elapsedMs ?? 0,
+    boxes: detect.boxes ?? [],
+    diagnostics: detect.diagnostics ?? {},
+    estimatedAlpha: detect.estimatedAlpha ?? null,
+    polarity: detect.polarity ?? null,
+  };
+}
+
+/**
+ * 水印现场：掩膜按灰度 PNG 存 Blob，恢复时用 decodeMaskFromDataUrl 读回，
+ * 不依赖 canvas 对灰度图的解码行为。模板图与去除结果也各自存一份。
+ */
+export async function exportSession() {
+  const items = {};
+  const blobs = new Map();
+  for (const [id, entry] of Object.entries(state.entries)) {
+    const maskState = entry.maskState;
+    if (!maskState.mask) continue;
+    items[id] = {
+      maskReady: entry.maskReady,
+      maskVersion: entry.maskVersion,
+      coverage: entry.coverage,
+      dirty: entry.dirty,
+      detect: detectMeta(entry.detect),
+      result: entry.result
+        ? {
+            mime: entry.result.mime,
+            engine: entry.result.engine,
+            elapsedMs: entry.result.elapsedMs,
+            alpha: entry.result.alpha,
+            patches: entry.result.patches,
+            filename: entry.result.filename,
+          }
+        : null,
+    };
+    try {
+      const dataUrl = encodeMaskToDataUrl(maskState.mask, maskState.width, maskState.height, { feather: 0 });
+      blobs.set(`watermark-mask:${id}`, await dataUrlToBlob(dataUrl));
+    } catch (err) {
+      console.warn('[session] 水印掩膜导出失败:', id, err.message);
+    }
+    if (entry.result?.blob) blobs.set(`watermark-result:${id}`, entry.result.blob);
+  }
+
+  const options = { ...state.options, templateDataUrl: '' };
+  if (state.options.templateDataUrl) {
+    try {
+      blobs.set('watermark-template', await dataUrlToBlob(state.options.templateDataUrl));
+    } catch (err) {
+      console.warn('[session] 水印模板导出失败:', err.message);
+    }
+  }
+  return {
+    doc: {
+      mode: state.mode,
+      options,
+      brush: { ...state.brush },
+      view: { ...state.view },
+      items,
+    },
+    blobs,
+  };
+}
+
+export async function importSession(doc, blobs = {}) {
+  for (const id of Object.keys(state.entries)) {
+    revokeResult(state.entries[id]);
+    delete state.entries[id];
+  }
+  if (!doc || typeof doc !== 'object') return;
+
+  state.mode = doc.mode === 'watermark' ? 'watermark' : 'crop';
+  Object.assign(state.options, doc.options ?? {}, { templateDataUrl: '' });
+  Object.assign(state.brush, doc.brush ?? {});
+  Object.assign(state.view, doc.view ?? {});
+
+  const templateBlob = blobs['watermark-template'];
+  if (templateBlob) {
+    try {
+      state.options.templateDataUrl = await blobToDataUrl(templateBlob);
+    } catch (err) {
+      console.warn('[session] 水印模板恢复失败:', err.message);
+    }
+  }
+
+  for (const [id, meta] of Object.entries(doc.items ?? {})) {
+    const item = workspace.state.items.find((entry) => entry.id === id);
+    if (!item) continue;
+    const entry = entryFor(id);
+    const maskBlob = blobs[`watermark-mask:${id}`];
+    if (maskBlob) {
+      try {
+        const dataUrl = await blobToDataUrl(maskBlob);
+        const decoded = await decodeMaskFromDataUrl(dataUrl);
+        applyMask(item, entry, decoded.mask, decoded.width, decoded.height);
+      } catch (err) {
+        console.warn('[session] 水印掩膜恢复失败:', id, err.message);
+      }
+    }
+    entry.detect = meta.detect ? markRaw({ ...meta.detect }) : null;
+    entry.dirty = Boolean(meta.dirty);
+    if (Number.isFinite(meta.coverage)) entry.coverage = meta.coverage;
+    entry.maskVersion = entry.maskState.version;
+    if (meta.maskReady && entry.maskState.mask) entry.maskReady = true;
+
+    const resultBlob = blobs[`watermark-result:${id}`];
+    if (resultBlob && meta.result) {
+      entry.result = markRaw({ ...meta.result, blob: resultBlob, url: URL.createObjectURL(resultBlob) });
+    }
+  }
+}
+
+export function clearSession() {
+  for (const id of Object.keys(state.entries)) {
+    revokeResult(state.entries[id]);
+    delete state.entries[id];
+  }
+  Object.assign(state.options, {
+    method: 'auto',
+    sensitivity: 55,
+    dilate: 2,
+    minArea: 24,
+    maxCoverage: 0.6,
+    polarity: 'auto',
+    engine: 'auto',
+    watermarkColor: 'auto',
+    inpaintRadius: 6,
+    feather: 2,
+    format: 'png',
+    quality: 92,
+    templateDataUrl: '',
+    templateName: '',
+  });
+  Object.assign(state.brush, { tool: 'paint', radius: 16, strength: 255, showOverlay: true });
+  Object.assign(state.view, { mode: 'source', compare: false, split: 0.5, zoom: 'fit' });
+}
+
 export function useWatermark() {
   return {
     state: readonly(state),
@@ -652,6 +829,7 @@ export function useWatermark() {
       checkHealth,
       detectFor,
       beginStroke,
+      endStroke,
       paintSegment,
       undoMask,
       redoMask,
@@ -663,6 +841,9 @@ export function useWatermark() {
       downloadResult,
       servedFilename,
       maskDataUrl,
+      exportSession,
+      importSession,
+      clearSession,
     },
     meta: { SERVER_HINT },
   };

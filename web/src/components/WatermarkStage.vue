@@ -571,7 +571,11 @@ function invalidateMaskRegion(box) {
 }
 
 function onPointerUp(event) {
-  if (stroke) stroke = null;
+  if (stroke) {
+    stroke = null;
+    // 通知会话层：这一笔已结束，可以落盘了
+    actions.endStroke();
+  }
   splitDrag = false;
   panState = null;
   dragging.value = false;

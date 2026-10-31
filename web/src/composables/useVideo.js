@@ -98,6 +98,31 @@ export function setPlayer(element) {
   player.value = element ? markRaw(element) : null;
 }
 
+/** 丢弃临时会话时清空视频现场（包括元素上的 src，避免已移除文件继续占用）。 */
+export function resetSession() {
+  pause();
+  const element = player.value;
+  if (element) {
+    try {
+      element.removeAttribute('src');
+      element.load();
+    } catch {
+      /* 元素可能已卸载，忽略 */
+    }
+  }
+  state.activePath = null;
+  state.meta = null;
+  state.loading = false;
+  state.currentTime = 0;
+  state.playing = false;
+  state.filmstrip = [];
+  state.marks = [];
+  state.lastExtract = null;
+  state.error = '';
+  state.status = '';
+  state.progress = '';
+}
+
 export function getPlayer() {
   return player.value;
 }
@@ -400,6 +425,7 @@ export function useVideo() {
       extractAudio,
       setPlayer,
       getPlayer,
+      resetSession,
     },
   };
 }

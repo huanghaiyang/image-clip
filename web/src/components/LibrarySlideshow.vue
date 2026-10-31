@@ -13,6 +13,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 import { formatSize, libraryFileUrl, libraryThumbUrl } from '../lib/library.js';
+import { useSlideshowPrefs } from '../composables/useSlideshowPrefs.js';
 
 const props = defineProps({
   /** 要轮播的图片条目（保持资源库列表中的可见顺序）。 */
@@ -36,8 +37,11 @@ const initialIndex = props.images.findIndex((entry) => entry.path === props.star
 const index = ref(initialIndex >= 0 ? initialIndex : 0);
 const current = computed(() => props.images[index.value] ?? null);
 
-const playing = ref(true);
-const intervalMs = ref(3000);
+/** 播放间隔、自动播放与最后停留的图片跨会话保留。 */
+const { state: prefs, actions: prefsActions } = useSlideshowPrefs();
+
+const playing = ref(prefs.playing);
+const intervalMs = ref(prefs.intervalMs);
 const ready = ref(false);
 const failed = ref(false);
 const reloadToken = ref(0);
@@ -209,6 +213,17 @@ function retry() {
   failed.value = false;
   ready.value = false;
 }
+
+watch([playing, intervalMs], ([nextPlaying, nextInterval]) => {
+  prefsActions.update({ playing: nextPlaying, intervalMs: nextInterval });
+});
+
+watch(
+  () => current.value?.path ?? '',
+  (path) => {
+    if (path) prefsActions.update({ lastPath: path });
+  },
+);
 
 watch(index, async (next, prevIndex) => {
   clearPreviousTimer();

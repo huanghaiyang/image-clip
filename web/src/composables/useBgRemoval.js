@@ -23,6 +23,7 @@ import { polygonArea, rasterizePolygon, scalePolygon } from '@shared/selection.j
 
 import { useWorkspace } from './useWorkspace.js';
 import { saveBlobToLibrary } from './useLibrary.js';
+import { markSessionDirty } from '../lib/sessionSignals.js';
 
 const PREVIEW_MAX_SIDE = 1600;
 const DEFAULT_OPTIONS = {
@@ -249,6 +250,7 @@ export function prepareSelected() {
 
 export function setTool(tool) {
   state.tool = ['lasso', 'pick', 'pan'].includes(tool) ? tool : 'lasso';
+  markSessionDirty('bgremove');
 }
 
 export function setOption(key, value) {
@@ -256,6 +258,7 @@ export function setOption(key, value) {
   if (!entry || !(key in entry.options)) return;
   entry.options[key] = value;
   scheduleRecompute(entry);
+  markSessionDirty('bgremove');
 }
 
 export function resetOptions() {
@@ -263,6 +266,7 @@ export function resetOptions() {
   if (!entry) return;
   Object.assign(entry.options, DEFAULT_OPTIONS);
   scheduleRecompute(entry);
+  markSessionDirty('bgremove');
   setStatus('背景去除参数已重置');
 }
 
@@ -277,6 +281,7 @@ export function autoDetectColors() {
   entry.transparentRatio = detected.transparentRatio;
   entry.colors = defaultColorState(detected.colors);
   scheduleRecompute(entry);
+  markSessionDirty('bgremove');
   setStatus(
     detected.colors.length
       ? `已识别 ${detected.colors.length} 种背景色：${detected.colors.map((color) => color.hex.toUpperCase()).join('、')}`
@@ -289,6 +294,7 @@ export function toggleColor(index) {
   if (!entry?.colors[index]) return;
   entry.colors[index].enabled = !entry.colors[index].enabled;
   scheduleRecompute(entry);
+  markSessionDirty('bgremove');
 }
 
 /** 添加/启用一个自定义背景色。 */
@@ -304,6 +310,7 @@ export function useColor(input, { exclusive = false } = {}) {
     for (const item of entry.colors) item.enabled = item.hex.toLowerCase() === hex.toLowerCase();
   }
   scheduleRecompute(entry);
+  markSessionDirty('bgremove');
   setStatus(`背景色已设为 ${hex.toUpperCase()}${exclusive ? '（仅去除该颜色）' : ''}`);
 }
 
@@ -312,6 +319,7 @@ export function removeColor(index) {
   if (!entry?.colors[index]) return;
   entry.colors.splice(index, 1);
   scheduleRecompute(entry);
+  markSessionDirty('bgremove');
 }
 
 /**
@@ -373,6 +381,7 @@ export function endLasso({ close = true } = {}) {
     entry.polygon = points;
     entry.selectionMask = markRaw(rasterizePolygon(points, entry.width, entry.height));
     scheduleRecompute(entry);
+    markSessionDirty('bgremove');
     setStatus(`已建立套索选区（${points.length} 个顶点），可切换“仅选区内 / 保护选区”`);
   } else {
     setStatus('套索顶点太少，已取消');
@@ -387,6 +396,7 @@ export function clearSelection() {
   entry.selectionMask = null;
   entry.drawing = false;
   scheduleRecompute(entry);
+  markSessionDirty('bgremove');
   setStatus('已清除套索选区');
 }
 
@@ -456,6 +466,56 @@ export async function applyBackgroundRemoval({ saveToLibrary = false } = {}) {
   }
 }
 
+// --------------------------------------------------------------- 临时会话
+
+/** 背景去除只保存参数与选区，预览图在恢复后按原图重新计算。 */
+export function exportSession() {
+  const items = {};
+  for (const [id, entry] of Object.entries(entries)) {
+    items[id] = {
+      colors: entry.colors.map((color) => ({ ...color })),
+      options: { ...entry.options },
+      polygon: entry.polygon.map((point) => ({ x: point.x, y: point.y })),
+      detected: entry.detected.map((color) => ({ ...color })),
+      transparentRatio: entry.transparentRatio,
+    };
+  }
+  return { tool: state.tool, items };
+}
+
+export function importSession(doc) {
+  for (const id of Object.keys(entries)) {
+    if (entries[id]?.timer) clearTimeout(entries[id].timer);
+    delete entries[id];
+  }
+  if (!doc || typeof doc !== 'object') return;
+  if (['lasso', 'pick', 'pan'].includes(doc.tool)) state.tool = doc.tool;
+
+  for (const [id, saved] of Object.entries(doc.items ?? {})) {
+    const item = workspace.state.items.find((entry) => entry.id === id);
+    if (!item) continue;
+    const entry = ensureEntry(item);
+    if (!entry || !saved) continue;
+    if (Array.isArray(saved.colors)) entry.colors = saved.colors.map((color) => ({ ...color }));
+    if (saved.options) Object.assign(entry.options, saved.options);
+    if (Array.isArray(saved.detected)) entry.detected = saved.detected.map((color) => ({ ...color }));
+    if (Number.isFinite(saved.transparentRatio)) entry.transparentRatio = saved.transparentRatio;
+    entry.polygon = Array.isArray(saved.polygon) ? saved.polygon.map((point) => ({ x: point.x, y: point.y })) : [];
+    entry.selectionMask = entry.polygon.length >= 3
+      ? markRaw(rasterizePolygon(entry.polygon, entry.width, entry.height))
+      : null;
+    scheduleRecompute(entry);
+  }
+}
+
+export function clearSession() {
+  for (const id of Object.keys(entries)) {
+    if (entries[id]?.timer) clearTimeout(entries[id].timer);
+    delete entries[id];
+  }
+  state.lastPick = null;
+}
+
 export function useBgRemoval() {
   return {
     state: readonly(state),
@@ -477,6 +537,9 @@ export function useBgRemoval() {
       endLasso,
       clearSelection,
       applyBackgroundRemoval,
+      exportSession,
+      importSession,
+      clearSession,
     },
   };
 }

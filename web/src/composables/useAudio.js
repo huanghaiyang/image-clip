@@ -362,6 +362,44 @@ export function exportWav() {
   return { blob, name: `${audioBase.value}.wav` };
 }
 
+/**
+ * 恢复临时会话里的音频现场。
+ * 必须在 selectAudio 解码完成之后调用：selectAudio 会把选区、播放头、导出记录全部重置。
+ */
+export function restoreSession(doc) {
+  if (!doc) return;
+  if (Number.isFinite(Number(doc.playhead))) seek(Number(doc.playhead));
+  if (doc.selection) setSelection(doc.selection.start, doc.selection.end);
+  setLoopSelection(doc.loopSelection);
+  setVolume(doc.volume);
+  if (typeof doc.outputDir === 'string' && doc.outputDir) state.outputDir = doc.outputDir;
+  state.lastExport = doc.lastExport ?? null;
+}
+
+/** 丢弃音频现场（只清内存，不删除资源库里的文件）。 */
+export function resetSession() {
+  pause();
+  cancelTick();
+  stopSource();
+  bufferRef.value = null;
+  state.activePath = null;
+  state.name = '';
+  state.loading = false;
+  state.busy = false;
+  state.error = '';
+  state.status = '';
+  state.duration = 0;
+  state.sampleRate = 0;
+  state.channels = 0;
+  state.selection = { start: 0, end: 0 };
+  state.playhead = 0;
+  state.playing = false;
+  state.loopSelection = false;
+  state.waveform = null;
+  state.spectrum = null;
+  state.lastExport = null;
+}
+
 export function useAudio() {
   return {
     state: readonly(state),
@@ -386,6 +424,8 @@ export function useAudio() {
       applyTrim,
       exportWav,
       reloadOriginal,
+      restoreSession,
+      resetSession,
       setOutputDir: (value) => {
         state.outputDir = String(value ?? '');
       },
