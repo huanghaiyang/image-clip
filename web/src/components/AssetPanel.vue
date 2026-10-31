@@ -345,7 +345,15 @@ onMounted(() => {
             @keydown.enter.prevent="toggleSelect(row.entry)"
             @keydown.space.prevent="toggleSelect(row.entry)"
           >
-            <span class="select-mark" :class="{ 'is-on': selectedPaths.has(row.entry.path) }" aria-hidden="true">
+            <span
+              class="select-mark"
+              :class="{ 'is-on': selectedPaths.has(row.entry.path) }"
+              :title="selectedPaths.has(row.entry.path) ? '取消选中' : '选中'"
+              role="checkbox"
+              :aria-checked="selectedPaths.has(row.entry.path)"
+              @click.stop="toggleSelect(row.entry)"
+              @dblclick.stop
+            >
               <svg v-if="selectedPaths.has(row.entry.path)" width="9" height="9" viewBox="0 0 10 10" fill="none">
                 <path d="M2 5.2 4.1 7.3 8 3.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
               </svg>
@@ -684,8 +692,10 @@ onMounted(() => {
   transition: opacity 0.12s ease, background 0.12s ease, border-color 0.12s ease;
 }
 
-.library-asset:hover .select-mark {
+.library-asset:hover .select-mark,
+.select-mark:hover {
   opacity: 1;
+  border-color: var(--accent);
 }
 
 .select-mark.is-on {
