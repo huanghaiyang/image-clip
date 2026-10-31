@@ -74,6 +74,11 @@ function pointFromEvent(event) {
   };
 }
 
+/** 屏幕像素 / 预览像素：智能套索用它把“屏幕吸附半径”换算到预览坐标。 */
+function screenScale() {
+  return view.fit * Math.max(0.01, view.zoom);
+}
+
 // --------------------------------------------------------------- 指针交互
 
 function onPointerDown(event) {
@@ -97,7 +102,7 @@ function onPointerDown(event) {
   }
 
   drag = { mode: 'lasso' };
-  actions.beginLasso(point.original);
+  actions.beginLasso(point.preview, screenScale());
 }
 
 function onPointerMove(event) {
@@ -115,7 +120,7 @@ function onPointerMove(event) {
   }
 
   const point = pointFromEvent(event);
-  if (point) actions.extendLasso(point.original);
+  if (point) actions.extendLasso(point.preview, screenScale());
 }
 
 function onPointerUp(event) {

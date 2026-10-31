@@ -37,10 +37,18 @@ const DEFAULT_OPTIONS = {
   lassoMode: 'smart', // smart | free：智能套索会吸附到边缘并简化顶点
 };
 
-/** 智能套索参数（预览图坐标系）。 */
-const SNAP_RADIUS = 5;
-const SNAP_MIN_GRADIENT = 24;
-const SNAP_TOLERANCE = 2;
+/**
+ * 智能套索参数。
+ * 吸附半径按“屏幕像素”定义，再按当前缩放换算到预览像素，
+ * 这样无论图片多大、缩放多少，手感都是恒定的（原来的固定 5px 在大图上几乎等于没吸附）。
+ */
+const SNAP_SCREEN_RADIUS = 14;
+const SNAP_MIN_RADIUS = 4;
+const SNAP_MAX_RADIUS = 28;
+const SNAP_MIN_GRADIENT = 20;
+const SNAP_TOLERANCE = 2.5;
+/** 两个采样点在预览图上的最小间距，小于它就不重复记录。 */
+const SNAP_MIN_GAP = 1.2;
 const HISTORY_LIMIT = 30;
 const OPTION_RECORD_GAP = 500;
 
@@ -149,6 +157,9 @@ function ensureEntry(item = activeItem.value) {
     polygon: [],
     draftPoints: [],
     drawing: false,
+    // 智能套索的连续性状态（预览坐标）：上一次原始落点与上一次吸附点
+    lastRawPoint: null,
+    lastSnapPoint: null,
     selectionMask: null,
     snapMap: null,
     history: [],
@@ -294,6 +305,8 @@ function applyEntrySnapshot(entry, snapshot) {
   entry.polygon = snapshot.polygon.map((point) => ({ x: point.x, y: point.y }));
   entry.draftPoints = [];
   entry.drawing = false;
+  entry.lastRawPoint = null;
+  entry.lastSnapPoint = null;
   entry.selectionMask =
     entry.polygon.length >= 3 ? markRaw(rasterizePolygon(entry.polygon, entry.width, entry.height)) : null;
   scheduleRecompute(entry);
@@ -346,6 +359,9 @@ function ensureSnapMap(entry) {
   }
 
   const magnitude = new Uint16Array(width * height);
+  // 单位法向量（指向灰度变化方向），用于判断边缘是否“顺着拖动方向”。
+  const normalX = new Int8Array(width * height);
+  const normalY = new Int8Array(width * height);
   for (let y = 1; y < height - 1; y += 1) {
     for (let x = 1; x < width - 1; x += 1) {
       const i = y * width + x;
@@ -356,39 +372,104 @@ function ensureSnapMap(entry) {
         -gray[i - width - 1] - 2 * gray[i - width] - gray[i - width + 1] +
         gray[i + width - 1] + 2 * gray[i + width] + gray[i + width + 1];
       magnitude[i] = Math.min(65535, Math.abs(gx) + Math.abs(gy));
+      const length = Math.hypot(gx, gy);
+      if (length > 0.001) {
+        normalX[i] = Math.round((gx / length) * 127);
+        normalY[i] = Math.round((gy / length) * 127);
+      }
     }
   }
-  entry.snapMap = markRaw({ width, height, magnitude });
+  entry.snapMap = markRaw({ width, height, magnitude, normalX, normalY });
   return entry.snapMap;
 }
 
-/** 把落点吸附到邻域内梯度最强的像素（原图坐标进、原图坐标出）。 */
-function snapPoint(entry, point) {
+/** 吸附半径：屏幕上约 14px，随当前缩放换算成预览像素。 */
+function snapRadiusFor(entry, screenScale) {
+  const radius = SNAP_SCREEN_RADIUS / Math.max(0.05, screenScale || 1);
+  return Math.max(SNAP_MIN_RADIUS, Math.min(SNAP_MAX_RADIUS, radius));
+}
+
+/**
+ * 把预览坐标吸附到附近的边缘点。
+ *
+ * 评分同时考虑三件事，避免“只挑局部最强梯度”导致的乱跳：
+ *  1) 梯度强度与离鼠标的距离（近且强优先）；
+ *  2) 边缘方向：法向量与拖动方向垂直，说明这条边是“顺着”走的；
+ *  3) 与上一个吸附点的连续性，距离过远直接丢弃。
+ */
+function snapToEdge(entry, point, { radius = SNAP_MIN_RADIUS, prev = null, direction = null } = {}) {
   const map = ensureSnapMap(entry);
-  if (!map) return { x: point.x, y: point.y };
-  const scale = entry.preview.scale || 1;
-  const px = Math.round(point.x * scale);
-  const py = Math.round(point.y * scale);
+  const target = { x: point.x, y: point.y };
+  if (!map) return target;
+
+  const r = Math.max(2, Math.round(radius));
+  const px = Math.round(point.x);
+  const py = Math.round(point.y);
+  const x0 = Math.max(1, px - r);
+  const x1 = Math.min(map.width - 2, px + r);
+  const y0 = Math.max(1, py - r);
+  const y1 = Math.min(map.height - 2, py + r);
+  if (x1 <= x0 || y1 <= y0) return target;
+
+  // 先用窗口内最大梯度算出相对阈值：弱边缘只要比周围明显也能吸附
+  let localMax = 0;
+  for (let y = y0; y <= y1; y += 1) {
+    const row = y * map.width;
+    for (let x = x0; x <= x1; x += 1) {
+      const value = map.magnitude[row + x];
+      if (value > localMax) localMax = value;
+    }
+  }
+  const threshold = Math.max(SNAP_MIN_GRADIENT, localMax * 0.45);
+
   let best = null;
   let bestScore = 0;
-  for (let dy = -SNAP_RADIUS; dy <= SNAP_RADIUS; dy += 1) {
-    for (let dx = -SNAP_RADIUS; dx <= SNAP_RADIUS; dx += 1) {
-      const dist2 = dx * dx + dy * dy;
-      if (dist2 > SNAP_RADIUS * SNAP_RADIUS) continue;
-      const x = px + dx;
-      const y = py + dy;
-      if (x < 1 || y < 1 || x >= map.width - 1 || y >= map.height - 1) continue;
-      const gradient = map.magnitude[y * map.width + x];
-      if (gradient < SNAP_MIN_GRADIENT) continue;
-      const score = gradient / (1 + Math.sqrt(dist2));
+  for (let y = y0; y <= y1; y += 1) {
+    const row = y * map.width;
+    for (let x = x0; x <= x1; x += 1) {
+      const dist2 = (x - px) * (x - px) + (y - py) * (y - py);
+      if (dist2 > r * r) continue;
+      const index = row + x;
+      const gradient = map.magnitude[index];
+      if (gradient < threshold) continue;
+
+      const distance = Math.sqrt(dist2);
+      let score = gradient / (1 + distance * 0.7);
+
+      if (prev) {
+        const gap = Math.hypot(x - prev.x, y - prev.y);
+        // 离上一吸附点太远，多半是另一条边，直接排除
+        if (gap > r * 1.9) continue;
+        score *= 1 - 0.3 * (gap / (r * 1.9));
+      }
+
+      if (direction) {
+        const nx = map.normalX[index] / 127;
+        const ny = map.normalY[index] / 127;
+        if (nx || ny) {
+          // |法向量·拖动方向| 越小，说明边走的方向和鼠标走势越一致
+          const align = Math.abs(nx * direction.x + ny * direction.y);
+          score *= 1 - 0.55 * align;
+        }
+      }
+
       if (score > bestScore) {
         bestScore = score;
         best = { x, y };
       }
     }
   }
-  if (!best) return { x: point.x, y: point.y };
-  return { x: best.x / scale, y: best.y / scale };
+  return best ?? target;
+}
+
+function toOriginalPoint(entry, point) {
+  const scale = entry.preview.scale || 1;
+  return { x: point.x / scale, y: point.y / scale };
+}
+
+function toPreviewPoint(entry, point) {
+  const scale = entry.preview.scale || 1;
+  return { x: point.x * scale, y: point.y * scale };
 }
 
 /** Ramer–Douglas–Peucker 折线简化（用于抹掉吸附后多余的小抖动）。 */
@@ -552,30 +633,82 @@ export function isBackgroundLike(r, g, b) {
 
 // --------------------------------------------------------------- 套索
 
-export function beginLasso(point) {
+/**
+ * 开始套索。`point` 使用预览图坐标，`screenScale` 是当前“屏幕像素/预览像素”的缩放比例。
+ */
+export function beginLasso(point, screenScale = 1) {
   const entry = ensureEntry(activeItem.value);
   if (!entry || !point) return;
   // 历史只在真正生成选区时记录：单点点击（顶点不足被取消）不该产生可撤销步骤
   entry.drawing = true;
   const smart = entry.options.lassoMode === 'smart';
-  const start = smart ? snapPoint(entry, point) : { x: point.x, y: point.y };
-  entry.draftPoints = [start];
+  const raw = { x: point.x, y: point.y };
+  entry.lastRawPoint = raw;
+  const start = smart ? snapToEdge(entry, raw, { radius: snapRadiusFor(entry, screenScale) }) : raw;
+  entry.lastSnapPoint = start;
+  entry.draftPoints = [toOriginalPoint(entry, start)];
 }
 
-export function extendLasso(point) {
+/**
+ * 拖动采样。智能模式下会在两个鼠标事件之间按小步长插值，
+ * 每个插值点都重新吸附并带着“方向 + 连续性”的评分，路径因此能贴着边缘走。
+ */
+export function extendLasso(point, screenScale = 1) {
   const entry = activeEntry.value;
   if (!entry?.drawing || !point) return;
   const smart = entry.options.lassoMode === 'smart';
-  const next = smart ? snapPoint(entry, point) : point;
-  const last = entry.draftPoints[entry.draftPoints.length - 1];
-  if (last && Math.hypot(next.x - last.x, next.y - last.y) < 1.5) return;
-  entry.draftPoints.push(next);
+  const raw = { x: point.x, y: point.y };
+  const lastRaw = entry.lastRawPoint ?? raw;
+  const prev = entry.lastSnapPoint ?? lastRaw;
+
+  if (!smart) {
+    const next = toOriginalPoint(entry, raw);
+    const last = entry.draftPoints[entry.draftPoints.length - 1];
+    const scale = entry.preview.scale || 1;
+    if (last && Math.hypot(next.x - last.x, next.y - last.y) < SNAP_MIN_GAP / scale) return;
+    entry.draftPoints.push(next);
+    entry.lastRawPoint = raw;
+    entry.lastSnapPoint = raw;
+    return;
+  }
+
+  const radius = snapRadiusFor(entry, screenScale);
+  const distance = Math.hypot(raw.x - lastRaw.x, raw.y - lastRaw.y);
+  const step = Math.min(6, Math.max(2, radius * 0.25));
+  const steps = Math.min(48, Math.max(1, Math.ceil(distance / step)));
+
+  let cursor = prev;
+  const lastPoint = entry.draftPoints[entry.draftPoints.length - 1];
+  let lastPushed = lastPoint ? toPreviewPoint(entry, lastPoint) : { ...cursor };
+
+  for (let i = 1; i <= steps; i += 1) {
+    const t = {
+      x: lastRaw.x + (raw.x - lastRaw.x) * (i / steps),
+      y: lastRaw.y + (raw.y - lastRaw.y) * (i / steps),
+    };
+    const dx = t.x - cursor.x;
+    const dy = t.y - cursor.y;
+    const len = Math.hypot(dx, dy);
+    const direction = len > 0.001 ? { x: dx / len, y: dy / len } : null;
+    const snapped = snapToEdge(entry, t, { radius, prev: cursor, direction });
+    cursor = snapped;
+    const gap = Math.hypot(cursor.x - lastPushed.x, cursor.y - lastPushed.y);
+    if (gap >= SNAP_MIN_GAP) {
+      entry.draftPoints.push(toOriginalPoint(entry, cursor));
+      lastPushed = { x: cursor.x, y: cursor.y };
+    }
+  }
+
+  entry.lastRawPoint = raw;
+  entry.lastSnapPoint = cursor;
 }
 
 export function endLasso({ close = true } = {}) {
   const entry = activeEntry.value;
   if (!entry?.drawing) return;
   entry.drawing = false;
+  entry.lastRawPoint = null;
+  entry.lastSnapPoint = null;
   let points = entry.draftPoints;
   entry.draftPoints = [];
   if (entry.options.lassoMode === 'smart' && points.length >= 3) {
@@ -715,6 +848,10 @@ export function importSession(doc) {
     entry.history = [];
     entry.redo = [];
     entry.snapMap = null;
+    entry.drawing = false;
+    entry.draftPoints = [];
+    entry.lastRawPoint = null;
+    entry.lastSnapPoint = null;
     scheduleRecompute(entry);
   }
 }
