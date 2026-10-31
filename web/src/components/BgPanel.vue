@@ -160,6 +160,28 @@ function addCustomColor() {
             block
             @update:model-value="actions.setOption('lassoMode', $event)"
           />
+          <template v-if="state.tool === 'lasso' && entry.options.lassoMode === 'smart'">
+            <RangeField
+              label="吸附半径"
+              :model-value="entry.options.lassoRadius"
+              :min="6"
+              :max="28"
+              :step="1"
+              suffix="px"
+              hint="鼠标离轮廓多远仍会被吸住：小一点更贴合，大一点更省力；改动会立即重算当前选区"
+              @update:model-value="actions.setOption('lassoRadius', $event)"
+            />
+            <RangeField
+              label="路径简化"
+              :model-value="entry.options.lassoSimplify"
+              :min="0"
+              :max="6"
+              :step="0.2"
+              suffix="px"
+              hint="越小折角越圆润、顶点越多；0 保留全部吸附点，越大越利落；改动会立即重算当前选区"
+              @update:model-value="actions.setOption('lassoSimplify', $event)"
+            />
+          </template>
           <SegmentedControl
             :model-value="entry.options.selectionMode"
             :options="selectionModeOptions"
@@ -172,7 +194,7 @@ function addCustomColor() {
               选区有 {{ entry.polygon.length }} 个顶点，当前模式生效中。
             </template>
             <template v-else-if="entry.options.lassoMode === 'smart'">
-              还没有套索选区：切到「套索」后按住拖动，落点会自动吸附到图像边缘。
+              还没有套索选区：切到「套索」后按住拖动，落点会自动吸附到图像边缘；折角偏硬时可调小「路径简化」。
             </template>
             <template v-else>还没有套索选区：切到「套索」后在画面上按住拖动即可。</template>
           </p>

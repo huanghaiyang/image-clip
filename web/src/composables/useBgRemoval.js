@@ -35,18 +35,22 @@ const DEFAULT_OPTIONS = {
   selectionMode: 'inside', // inside | outside | all（仅在存在套索选区时生效）
   showMask: false,
   lassoMode: 'smart', // smart | free：智能套索会吸附到边缘并简化顶点
+  // 智能套索的可调参数（单位都是“屏幕像素”，与图片大小/缩放无关）
+  lassoRadius: 14, // 吸附半径：鼠标离边缘多远仍能吸住
+  lassoSimplify: 0.8, // 路径简化容差：越小折角越圆润、顶点越多；0=保留全部吸附点
 };
 
+/** 只影响套索交互/显示的工具偏好：不进撤销栈，撤销时也保持不变。 */
+const TOOL_PREF_KEYS = ['lassoMode', 'lassoRadius', 'lassoSimplify', 'showMask'];
+
 /**
- * 智能套索参数。
- * 吸附半径按“屏幕像素”定义，再按当前缩放换算到预览像素，
+ * 智能套索内部约束。
+ * 两个用户参数按“屏幕像素”定义，再按当前缩放换算到预览像素，
  * 这样无论图片多大、缩放多少，手感都是恒定的（原来的固定 5px 在大图上几乎等于没吸附）。
  */
-const SNAP_SCREEN_RADIUS = 14;
-const SNAP_MIN_RADIUS = 4;
-const SNAP_MAX_RADIUS = 28;
+const SNAP_MIN_RADIUS = 3;
+const SNAP_MAX_RADIUS = 32;
 const SNAP_MIN_GRADIENT = 20;
-const SNAP_TOLERANCE = 2.5;
 /** 两个采样点在预览图上的最小间距，小于它就不重复记录。 */
 const SNAP_MIN_GAP = 1.2;
 const HISTORY_LIMIT = 30;
@@ -60,6 +64,8 @@ const state = reactive({
   status: '',
   error: '',
   lastPick: null,
+  // 当前舞台的“屏幕像素/预览像素”缩放：参数面板改动吸附半径时按同一手感重算选区
+  viewScale: 1,
 });
 
 /** 以素材 id 为键的编辑状态；大对象全部 markRaw。 */
@@ -156,6 +162,10 @@ function ensureEntry(item = activeItem.value) {
     options: { ...DEFAULT_OPTIONS },
     polygon: [],
     draftPoints: [],
+    // 本次拖动的原始轨迹（原图坐标）：参数改动时用它重新吸附/简化
+    draftRaw: [],
+    // 最近一次成功选区的原始轨迹（原图坐标）
+    lassoRaw: [],
     drawing: false,
     // 智能套索的连续性状态（预览坐标）：上一次原始落点与上一次吸附点
     lastRawPoint: null,
@@ -298,12 +308,21 @@ function recordEntryHistory(entry, group = '') {
 
 function applyEntrySnapshot(entry, snapshot) {
   if (!entry || !snapshot) return;
+  // 工具偏好不属于“可撤销的文档状态”：撤销时保留用户当前的套索模式/半径/简化与掩膜显示
+  const toolPrefs = {};
+  for (const key of TOOL_PREF_KEYS) toolPrefs[key] = entry.options[key];
   entry.colors = snapshot.colors.map((color) => ({ ...color }));
-  entry.options = { ...DEFAULT_OPTIONS, ...snapshot.options };
+  entry.options = { ...DEFAULT_OPTIONS, ...snapshot.options, ...toolPrefs };
   entry.detected = snapshot.detected.map((color) => ({ ...color }));
   entry.transparentRatio = snapshot.transparentRatio;
+  const samePolygon =
+    snapshot.polygon.length === entry.polygon.length &&
+    snapshot.polygon.every((point, index) => point.x === entry.polygon[index].x && point.y === entry.polygon[index].y);
   entry.polygon = snapshot.polygon.map((point) => ({ x: point.x, y: point.y }));
   entry.draftPoints = [];
+  entry.draftRaw = [];
+  // 撤销到别的选区后，原轨迹不再对应，避免调参数时又把新轨迹贴回来
+  if (!samePolygon) entry.lassoRaw = [];
   entry.drawing = false;
   entry.lastRawPoint = null;
   entry.lastSnapPoint = null;
@@ -383,9 +402,10 @@ function ensureSnapMap(entry) {
   return entry.snapMap;
 }
 
-/** 吸附半径：屏幕上约 14px，随当前缩放换算成预览像素。 */
+/** 吸附半径：用户设置的是屏幕像素，这里随当前缩放换算成预览像素。 */
 function snapRadiusFor(entry, screenScale) {
-  const radius = SNAP_SCREEN_RADIUS / Math.max(0.05, screenScale || 1);
+  const screenRadius = Number(entry.options.lassoRadius);
+  const radius = (Number.isFinite(screenRadius) ? screenRadius : 14) / Math.max(0.05, screenScale || 1);
   return Math.max(SNAP_MIN_RADIUS, Math.min(SNAP_MAX_RADIUS, radius));
 }
 
@@ -497,12 +517,100 @@ function simplifyPath(points, tolerance) {
 }
 
 /** 智能模式收尾：先在预览坐标简化，再换回原图坐标。 */
-function refineSmartPath(entry, points) {
+function refineSmartPath(entry, points, screenScale = 1) {
   const scale = entry.preview.scale || 1;
   const previewPoints = points.map((point) => ({ x: point.x * scale, y: point.y * scale }));
-  const simplified = simplifyPath(previewPoints, SNAP_TOLERANCE);
+  const screenTolerance = Number(entry.options.lassoSimplify);
+  const tolerance = (Number.isFinite(screenTolerance) ? Math.max(0, screenTolerance) : 0.8) /
+    Math.max(0.05, screenScale || 1);
+  // 0 表示不做简化：保留全部吸附点，路径最贴合、折角最少
+  const simplified = tolerance > 0.01 ? simplifyPath(previewPoints, tolerance) : previewPoints;
   if (simplified.length < 3) return points;
   return simplified.map((point) => ({ x: point.x / scale, y: point.y / scale }));
+}
+
+/**
+ * 沿 from→to 插值采样并吸附（预览坐标）。
+ * 绘制过程与“参数改动后重算”共用这一条路径，保证两种场景的手感一致。
+ */
+function traceSmartSegment(entry, from, to, radius, cursor, lastPushed) {
+  const points = [];
+  let current = { x: cursor.x, y: cursor.y };
+  let pushed = { x: lastPushed.x, y: lastPushed.y };
+  const distance = Math.hypot(to.x - from.x, to.y - from.y);
+  const step = Math.min(6, Math.max(2, radius * 0.25));
+  const steps = Math.min(48, Math.max(1, Math.ceil(distance / step)));
+
+  for (let i = 1; i <= steps; i += 1) {
+    const t = {
+      x: from.x + (to.x - from.x) * (i / steps),
+      y: from.y + (to.y - from.y) * (i / steps),
+    };
+    const dx = t.x - current.x;
+    const dy = t.y - current.y;
+    const len = Math.hypot(dx, dy);
+    const direction = len > 0.001 ? { x: dx / len, y: dy / len } : null;
+    const snapped = snapToEdge(entry, t, { radius, prev: current, direction });
+    current = snapped;
+    const gap = Math.hypot(current.x - pushed.x, current.y - pushed.y);
+    if (gap >= SNAP_MIN_GAP) {
+      points.push({ x: current.x, y: current.y });
+      pushed = { x: current.x, y: current.y };
+    }
+  }
+  return { cursor: current, points };
+}
+
+/** 对整条原始轨迹重新吸附（预览坐标），用于绘制结束后的参数重算。 */
+function traceSmartPath(entry, rawPoints, screenScale = 1) {
+  const radius = snapRadiusFor(entry, screenScale);
+  let cursor = snapToEdge(entry, rawPoints[0], { radius });
+  const snapped = [{ x: cursor.x, y: cursor.y }];
+  let lastPushed = cursor;
+  for (let i = 1; i < rawPoints.length; i += 1) {
+    const traced = traceSmartSegment(entry, rawPoints[i - 1], rawPoints[i], radius, cursor, lastPushed);
+    cursor = traced.cursor;
+    for (const point of traced.points) snapped.push(point);
+    if (traced.points.length) lastPushed = traced.points[traced.points.length - 1];
+  }
+  return snapped;
+}
+
+/** 用当前参数从原始轨迹生成选区（原图坐标）。 */
+function deriveLassoPolygon(entry, screenScale = 1) {
+  const raw = entry.lassoRaw.map((point) => toPreviewPoint(entry, point));
+  if (raw.length < 3) return null;
+
+  if (entry.options.lassoMode === 'free') {
+    // 手绘：直接还原拖动轨迹，只做最小间距去重
+    const points = [];
+    let previous = null;
+    for (const point of raw) {
+      if (previous && Math.hypot(point.x - previous.x, point.y - previous.y) < SNAP_MIN_GAP) continue;
+      previous = point;
+      points.push(toOriginalPoint(entry, point));
+    }
+    return points;
+  }
+
+  const snapped = traceSmartPath(entry, raw, screenScale);
+  const originals = snapped.map((point) => toOriginalPoint(entry, point));
+  return refineSmartPath(entry, originals, screenScale);
+}
+
+/**
+ * 参数变更后重算已绘制的选区（吸附半径 → 贴哪条边，路径简化 → 保留多少顶点）。
+ * 这属于“工具偏好”变更，不占撤销步骤。
+ */
+function refreshLasso(entry, screenScale = state.viewScale) {
+  if (!entry || entry.drawing || !entry.lassoRaw.length) return false;
+  const points = deriveLassoPolygon(entry, screenScale);
+  if (!points || points.length < 3 || polygonArea(points) < 4) return false;
+  entry.polygon = points;
+  entry.selectionMask = markRaw(rasterizePolygon(points, entry.width, entry.height));
+  scheduleRecompute(entry);
+  markSessionDirty('bgremove');
+  return true;
 }
 
 // --------------------------------------------------------------- 参数
@@ -516,12 +624,23 @@ export function setTool(tool) {
   markSessionDirty('bgremove');
 }
 
+/** 舞台缩放变化时记录当前比例，供参数面板换算“屏幕像素”吸附半径。 */
+export function setViewScale(scale) {
+  const value = Number(scale);
+  if (Number.isFinite(value) && value > 0) state.viewScale = value;
+}
+
+/** 会影响已绘制套索形态的工具偏好：改完要用原始轨迹重新生成选区。 */
+const LASSO_REBUILD_KEYS = ['lassoMode', 'lassoRadius', 'lassoSimplify'];
+
 export function setOption(key, value) {
   const entry = ensureEntry(activeItem.value);
   if (!entry || !(key in entry.options) || entry.options[key] === value) return;
-  // 这两项只影响工具行为/显示，不改变抠图结果，不进撤销栈
-  if (key === 'lassoMode' || key === 'showMask') {
+  // 这几项只影响套索交互/显示，不改变抠图参数，不进撤销栈
+  if (TOOL_PREF_KEYS.includes(key)) {
     entry.options[key] = value;
+    // 套索参数必须立刻作用于已经画好的选区，而不是只影响下一次绘制
+    if (LASSO_REBUILD_KEYS.includes(key)) refreshLasso(entry);
     markSessionDirty('bgremove');
     return;
   }
@@ -534,10 +653,17 @@ export function setOption(key, value) {
 export function resetOptions() {
   const entry = ensureEntry(activeItem.value);
   if (!entry) return;
-  const unchanged = Object.keys(DEFAULT_OPTIONS).every((key) => entry.options[key] === DEFAULT_OPTIONS[key]);
-  if (unchanged) return;
-  recordEntryHistory(entry);
+  const keys = Object.keys(DEFAULT_OPTIONS);
+  const docChanged = keys.some(
+    (key) => !TOOL_PREF_KEYS.includes(key) && entry.options[key] !== DEFAULT_OPTIONS[key],
+  );
+  const prefChanged = TOOL_PREF_KEYS.some((key) => entry.options[key] !== DEFAULT_OPTIONS[key]);
+  const lassoChanged = LASSO_REBUILD_KEYS.some((key) => entry.options[key] !== DEFAULT_OPTIONS[key]);
+  if (!docChanged && !prefChanged) return;
+  // 只重置工具偏好时不必占用一步撤销
+  if (docChanged) recordEntryHistory(entry);
   Object.assign(entry.options, DEFAULT_OPTIONS);
+  if (lassoChanged) refreshLasso(entry);
   scheduleRecompute(entry);
   markSessionDirty('bgremove');
   setStatus('背景去除参数已重置');
@@ -643,6 +769,7 @@ export function beginLasso(point, screenScale = 1) {
   entry.drawing = true;
   const smart = entry.options.lassoMode === 'smart';
   const raw = { x: point.x, y: point.y };
+  entry.draftRaw = [toOriginalPoint(entry, raw)];
   entry.lastRawPoint = raw;
   const start = smart ? snapToEdge(entry, raw, { radius: snapRadiusFor(entry, screenScale) }) : raw;
   entry.lastSnapPoint = start;
@@ -658,6 +785,8 @@ export function extendLasso(point, screenScale = 1) {
   if (!entry?.drawing || !point) return;
   const smart = entry.options.lassoMode === 'smart';
   const raw = { x: point.x, y: point.y };
+  // 原始轨迹一并留存：之后调整吸附半径/路径简化时，用它重算当前选区
+  entry.draftRaw.push(toOriginalPoint(entry, raw));
   const lastRaw = entry.lastRawPoint ?? raw;
   const prev = entry.lastSnapPoint ?? lastRaw;
 
@@ -673,49 +802,32 @@ export function extendLasso(point, screenScale = 1) {
   }
 
   const radius = snapRadiusFor(entry, screenScale);
-  const distance = Math.hypot(raw.x - lastRaw.x, raw.y - lastRaw.y);
-  const step = Math.min(6, Math.max(2, radius * 0.25));
-  const steps = Math.min(48, Math.max(1, Math.ceil(distance / step)));
-
-  let cursor = prev;
   const lastPoint = entry.draftPoints[entry.draftPoints.length - 1];
-  let lastPushed = lastPoint ? toPreviewPoint(entry, lastPoint) : { ...cursor };
-
-  for (let i = 1; i <= steps; i += 1) {
-    const t = {
-      x: lastRaw.x + (raw.x - lastRaw.x) * (i / steps),
-      y: lastRaw.y + (raw.y - lastRaw.y) * (i / steps),
-    };
-    const dx = t.x - cursor.x;
-    const dy = t.y - cursor.y;
-    const len = Math.hypot(dx, dy);
-    const direction = len > 0.001 ? { x: dx / len, y: dy / len } : null;
-    const snapped = snapToEdge(entry, t, { radius, prev: cursor, direction });
-    cursor = snapped;
-    const gap = Math.hypot(cursor.x - lastPushed.x, cursor.y - lastPushed.y);
-    if (gap >= SNAP_MIN_GAP) {
-      entry.draftPoints.push(toOriginalPoint(entry, cursor));
-      lastPushed = { x: cursor.x, y: cursor.y };
-    }
-  }
+  const lastPushed = lastPoint ? toPreviewPoint(entry, lastPoint) : { ...prev };
+  const traced = traceSmartSegment(entry, lastRaw, raw, radius, prev, lastPushed);
+  for (const point of traced.points) entry.draftPoints.push(toOriginalPoint(entry, point));
 
   entry.lastRawPoint = raw;
-  entry.lastSnapPoint = cursor;
+  entry.lastSnapPoint = traced.cursor;
 }
 
-export function endLasso({ close = true } = {}) {
+export function endLasso({ close = true } = {}, screenScale = 1) {
   const entry = activeEntry.value;
   if (!entry?.drawing) return;
   entry.drawing = false;
   entry.lastRawPoint = null;
   entry.lastSnapPoint = null;
+  const raw = entry.draftRaw;
+  entry.draftRaw = [];
   let points = entry.draftPoints;
   entry.draftPoints = [];
   if (entry.options.lassoMode === 'smart' && points.length >= 3) {
-    points = refineSmartPath(entry, points);
+    points = refineSmartPath(entry, points, screenScale);
   }
   if (close && points.length >= 3 && polygonArea(points) >= 4) {
     recordEntryHistory(entry);
+    // 保存原始轨迹：之后拖动“吸附半径 / 路径简化”会据此重新生成选区
+    entry.lassoRaw = raw;
     entry.polygon = points;
     entry.selectionMask = markRaw(rasterizePolygon(points, entry.width, entry.height));
     scheduleRecompute(entry);
@@ -733,6 +845,8 @@ export function clearSelection() {
   recordEntryHistory(entry);
   entry.polygon = [];
   entry.draftPoints = [];
+  entry.draftRaw = [];
+  entry.lassoRaw = [];
   entry.selectionMask = null;
   entry.drawing = false;
   scheduleRecompute(entry);
@@ -816,6 +930,8 @@ export function exportSession() {
       colors: entry.colors.map((color) => ({ ...color })),
       options: { ...entry.options },
       polygon: entry.polygon.map((point) => ({ x: point.x, y: point.y })),
+      // 原始轨迹，恢复后仍可调吸附半径/简化重算选区
+      rawPath: entry.lassoRaw.map((point) => ({ x: point.x, y: point.y })),
       detected: entry.detected.map((color) => ({ ...color })),
       transparentRatio: entry.transparentRatio,
     };
@@ -841,6 +957,9 @@ export function importSession(doc) {
     if (Array.isArray(saved.detected)) entry.detected = saved.detected.map((color) => ({ ...color }));
     if (Number.isFinite(saved.transparentRatio)) entry.transparentRatio = saved.transparentRatio;
     entry.polygon = Array.isArray(saved.polygon) ? saved.polygon.map((point) => ({ x: point.x, y: point.y })) : [];
+    entry.lassoRaw = Array.isArray(saved.rawPath)
+      ? saved.rawPath.map((point) => ({ x: point.x, y: point.y }))
+      : [];
     entry.selectionMask = entry.polygon.length >= 3
       ? markRaw(rasterizePolygon(entry.polygon, entry.width, entry.height))
       : null;
@@ -850,6 +969,7 @@ export function importSession(doc) {
     entry.snapMap = null;
     entry.drawing = false;
     entry.draftPoints = [];
+    entry.draftRaw = [];
     entry.lastRawPoint = null;
     entry.lastSnapPoint = null;
     scheduleRecompute(entry);
@@ -874,6 +994,7 @@ export function useBgRemoval() {
     actions: {
       prepareSelected,
       setTool,
+      setViewScale,
       setOption,
       resetOptions,
       autoDetectColors,

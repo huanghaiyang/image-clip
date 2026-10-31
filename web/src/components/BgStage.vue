@@ -79,6 +79,11 @@ function screenScale() {
   return view.fit * Math.max(0.01, view.zoom);
 }
 
+// 参数面板改动吸附半径时，useBgRemoval 需要当前缩放来重算已绘制的选区
+watchEffect(() => {
+  actions.setViewScale(screenScale());
+});
+
 // --------------------------------------------------------------- 指针交互
 
 function onPointerDown(event) {
@@ -126,7 +131,7 @@ function onPointerMove(event) {
 function onPointerUp(event) {
   if (!drag) return;
   event.currentTarget.releasePointerCapture?.(event.pointerId);
-  if (drag.mode === 'lasso') actions.endLasso({ close: true });
+  if (drag.mode === 'lasso') actions.endLasso({ close: true }, screenScale());
   drag = null;
 }
 
