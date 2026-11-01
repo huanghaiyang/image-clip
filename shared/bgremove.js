@@ -215,6 +215,13 @@ export function buildBackgroundMask(rgba, width, height, options = {}) {
   const selectionMode = options.selectionMode ?? 'all';
   const selection = options.selection ?? null;
 
+  // 没有可去除的背景色 → 什么都不改。
+  // 否则会把“本来就是透明”的像素当成背景再羽化一圈，
+  // 打开一张已抠好的结果图时，预览边缘会比导出的 PNG 更薄。
+  if (!colors.length) {
+    return { mask: new Uint8Array(n), width: w, height: h, coverage: 0, backgroundPixels: 0 };
+  }
+
   // 1) 候选像素：透明像素 + 与任一背景色距离 <= 容差的不透明像素
   const candidate = new Uint8Array(n);
   for (let i = 0, p = 0; i < n; i += 1, p += 4) {
@@ -222,7 +229,6 @@ export function buildBackgroundMask(rgba, width, height, options = {}) {
       candidate[i] = 1;
       continue;
     }
-    if (!colors.length) continue;
     const r = rgba[p];
     const g = rgba[p + 1];
     const b = rgba[p + 2];

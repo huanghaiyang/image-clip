@@ -877,19 +877,29 @@ export async function applyBackgroundRemoval({ saveToLibrary = false } = {}) {
   state.busy = true;
   const started = performance.now();
   try {
+    // 整个应用过程只认这一份面板参数快照，避免中途被别的事件改掉
+    const options = { ...entry.options };
     const colors = entry.colors.filter((color) => color.enabled).map((color) => parseColor(color));
-    const selection = entry.polygon.length >= 3 ? rasterizePolygon(entry.polygon, item.width, item.height) : null;
+    const polygon = entry.polygon.map((point) => ({ x: point.x, y: point.y }));
+    // 预览有 140ms 防抖：先把还没算完的预览补上，保证“导出结果 = 当前预览”
+    if (entry.timer) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+      await recompute(entry);
+    }
+
+    const selection = polygon.length >= 3 ? rasterizePolygon(polygon, item.width, item.height) : null;
     const built = buildBackgroundMask(item.imageData.data, item.width, item.height, {
       colors,
-      tolerance: entry.options.tolerance,
-      connected: entry.options.connected,
-      feather: entry.options.feather,
-      erode: entry.options.erode,
+      tolerance: options.tolerance,
+      connected: options.connected,
+      feather: options.feather,
+      erode: options.erode,
       selection,
-      selectionMode: selection ? entry.options.selectionMode : 'all',
+      selectionMode: selection ? options.selectionMode : 'all',
     });
     const applied = applyMaskToRgba(item.imageData.data, item.width, item.height, built.mask, {
-      decontaminate: entry.options.decontaminate,
+      decontaminate: options.decontaminate,
       colors,
     });
 
@@ -904,12 +914,15 @@ export async function applyBackgroundRemoval({ saveToLibrary = false } = {}) {
     const filename = `${stripExtension(item.name)}-去背景.png`;
     const newItem = await workspace.actions.addImageBlob(blob, filename);
     if (saveToLibrary) await saveBlobToLibrary(blob, filename, '抠图结果');
+    // 结果只是产物：应用后回到原素材继续编辑，
+    // 否则面板会切到结果图（默认参数、且已经没有背景色），再调参就像“应用没反应”
+    if (newItem) workspace.actions.selectItem(item.id);
 
     const coverage = (built.coverage * 100).toFixed(1);
     setStatus(
       `已应用背景去除：透明 ${coverage}% · ${Math.round(performance.now() - started)}ms${
         saveToLibrary ? ' · 已保存到资源库/抠图结果' : ''
-      }`,
+      } · 结果已加入左侧素材列表（仍在编辑原图）`,
     );
     return { blob, newItem, coverage: built.coverage };
   } catch (err) {

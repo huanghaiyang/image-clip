@@ -12,6 +12,7 @@ import { useAppMode } from '../composables/useAppMode.js';
 import { useLibrary } from '../composables/useLibrary.js';
 import { useWorkspace } from '../composables/useWorkspace.js';
 import { pickLibraryImages } from '../composables/useLibraryImport.js';
+import { confirm } from '../composables/useConfirm.js';
 import { useResourceViewMode } from '../composables/useResourceViewMode.js';
 import { libraryThumbUrl } from '../lib/library.js';
 import { buildResourceTree, collectFolderPaths, flattenResourceTree } from '../lib/resourceTree.js';
@@ -168,6 +169,38 @@ async function addSelected() {
   const loaded = await libraryActions.openInEditor(selectedEntries.value, { mode: appMode.mode });
   if (loaded) selectedPaths.value = new Set();
 }
+
+/**
+ * 从资源库删除图片（移入回收站，可在资源库的回收站里恢复）。
+ * 背景去除勾选「保存到资源库/抠图结果」后产生的文件都在这里删除。
+ */
+async function deleteEntries(list) {
+  const targets = [...(list ?? [])].filter(Boolean);
+  if (!targets.length) return;
+  const ok = await confirm({
+    title: '删除资源库文件',
+    message: targets.length === 1 ? `确定删除「${targets[0].name}」？` : `确定删除选中的 ${targets.length} 张图片？`,
+    detail: '文件会移入回收站，可在资源库的回收站里恢复。',
+    confirmText: '删除',
+    danger: true,
+  });
+  if (!ok) return;
+  const done = await libraryActions.deletePaths(targets.map((entry) => entry.path));
+  if (!done) return;
+  const removed = new Set(targets.map((entry) => entry.path));
+  selectedPaths.value = new Set([...selectedPaths.value].filter((path) => !removed.has(path)));
+}
+
+function deleteSelectedEntries() {
+  return deleteEntries(selectedEntries.value);
+}
+
+// 资源库刷新后（删除 / 外部改动），把已经不存在于列表的选中项清掉
+watch(libraryImages, (list) => {
+  const alive = new Set(list.map((entry) => entry.path));
+  const next = [...selectedPaths.value].filter((path) => alive.has(path));
+  if (next.length !== selectedPaths.value.size) selectedPaths.value = new Set(next);
+});
 
 function savedRatio(item) {
   if (!item.bounds || item.resultEmpty) return null;
@@ -379,6 +412,23 @@ onMounted(() => {
               </span>
             </span>
             <button
+              class="asset-del"
+              type="button"
+              title="删除（移入回收站）"
+              :disabled="libraryState.busy"
+              @click.stop="deleteEntries([row.entry])"
+            >
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                <path
+                  d="M2.6 3.4h6.8M4.6 3.4V2.3h2.8v1.1M3.7 3.4l.4 6.1h3.8l.4-6.1"
+                  stroke="currentColor"
+                  stroke-width="1.1"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+            <button
               class="asset-add"
               type="button"
               title="加入当前素材"
@@ -418,6 +468,15 @@ onMounted(() => {
           @click="addSelected"
         >
           加入选中 {{ selectedEntries.length }} 张
+        </button>
+        <button
+          v-if="selectedEntries.length"
+          class="btn is-block is-ghost is-danger"
+          type="button"
+          :disabled="libraryState.busy"
+          @click="deleteSelectedEntries"
+        >
+          删除选中 {{ selectedEntries.length }} 张
         </button>
         <button class="btn is-block" type="button" :disabled="libraryState.busy" @click="pickFiles">
           上传到素材库
@@ -728,6 +787,39 @@ onMounted(() => {
 
 .asset-add:disabled {
   opacity: 0.5;
+  cursor: default;
+}
+
+/* 行末删除：悬停/聚焦时才出现，避免行内太吵 */
+.asset-del {
+  flex: none;
+  align-self: center;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--panel-2);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.library-asset:hover .asset-del,
+.asset-del:focus-visible {
+  opacity: 1;
+}
+
+.asset-del:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: transparent;
+  color: var(--danger);
+}
+
+.asset-del:disabled {
+  opacity: 0.35;
   cursor: default;
 }
 

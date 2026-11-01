@@ -233,7 +233,9 @@ function addCustomColor() {
             <input v-model="saveToLibrary" type="checkbox" />
             <span>同时保存到资源库/抠图结果</span>
           </label>
-          <p class="hint">结果会作为新素材加入左侧列表（PNG，保留透明通道），原图不变。</p>
+          <p class="hint">
+            结果会作为新素材加入左侧列表（PNG，保留透明通道），原图不变；应用后仍停留在原图，可继续调参再应用。
+          </p>
         </section>
 
         <p v-if="entry.error" class="panel-error">{{ entry.error }}</p>

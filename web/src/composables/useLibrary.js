@@ -526,19 +526,25 @@ export async function moveSelected(targetDir) {
   }
 }
 
-export async function deleteSelected() {
-  if (!state.selected.length) {
+/**
+ * 按路径删除文件 / 文件夹（移入回收站，可从回收站恢复）。
+ * 供素材面板等不依赖 `state.selected` 的地方复用。
+ */
+export async function deletePaths(paths) {
+  const list = [...new Set((paths ?? []).filter(Boolean))];
+  if (!list.length) {
     setError('请先选择要删除的文件或文件夹');
     return false;
   }
   state.busy = true;
   try {
-    const result = await deleteLibraryItems([...state.selected]);
+    const result = await deleteLibraryItems(list);
+    const doomed = new Set(list);
+    state.selected = state.selected.filter((path) => !doomed.has(path));
     await refreshLibrary({ quiet: true });
-    state.selected = [];
     const failed = failedCount(result);
     if (failed) setError(`删除部分失败：${failed} 项`);
-    else setStatus(`已将 ${result.succeeded} 项移入回收站`);
+    else setStatus(`已将 ${result.succeeded ?? list.length} 项移入回收站`);
     return result.ok;
   } catch (err) {
     setError(`删除失败：${err.message}`);
@@ -546,6 +552,10 @@ export async function deleteSelected() {
   } finally {
     state.busy = false;
   }
+}
+
+export async function deleteSelected() {
+  return deletePaths(state.selected);
 }
 
 /**
@@ -764,6 +774,7 @@ export function useLibrary() {
       previewBatchRename,
       batchRename,
       moveSelected,
+      deletePaths,
       deleteSelected,
       deleteFolder,
       openPreview,
