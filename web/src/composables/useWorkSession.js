@@ -242,7 +242,7 @@ async function flush() {
         version: 1,
         updatedAt: Date.now(),
         mode: appMode.state.mode,
-        lastImageMode: appMode.state.lastImageMode,
+        imageTool: appMode.state.imageTool,
         ...docs,
         blobKeys,
       };
@@ -394,8 +394,11 @@ async function restoreFromDoc(doc) {
   }
 
   // 模式放最后：各 Stage 挂载时直接读到已恢复的现场
-  if (doc.lastImageMode) appMode.actions.setMode(doc.lastImageMode);
-  appMode.actions.setMode(doc.mode || 'crop');
+  // imageTool 兼容旧会话里记录的 lastImageMode（旧版每个图片工具是独立工作区）
+  if (doc.imageTool || doc.lastImageMode) {
+    appMode.actions.setImageTool(doc.imageTool || doc.lastImageMode);
+  }
+  appMode.actions.setMode(doc.mode || 'image');
 }
 
 function describeSession(doc) {
@@ -498,7 +501,7 @@ function registerWatchers() {
   watch(() => chat.state.messages, () => schedule('chat'), { deep: true });
 
   watch(
-    () => [appMode.state.mode, appMode.state.lastImageMode],
+    () => [appMode.state.mode, appMode.state.imageTool],
     () => schedule('app'),
   );
 }

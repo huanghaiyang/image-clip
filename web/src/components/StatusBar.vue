@@ -6,7 +6,7 @@
  *  - 图片类：Node 服务端 / 引擎 / 素材数量；
  *  - 资源库：文件与目录统计、上传状态；
  *  - 视频：FFmpeg 是否就绪、当前视频的帧率与时长。
- * 这里按模式挑一条最相关的提示显示，避免把 9 个状态都堆在 26px 里。
+ * 这里按当前工作区/图片工具挑一条最相关的提示显示，避免把所有状态都堆在 26px 里。
  */
 import { computed } from 'vue';
 
@@ -24,7 +24,7 @@ import { formatBytes } from '../lib/imaging.js';
 import { formatDuration, formatSize } from '../lib/library.js';
 
 const { state, stats, meta } = useWorkspace();
-const { state: appMode } = useAppMode();
+const { state: appMode, activeTool } = useAppMode();
 const { state: libraryState, stats: libraryStats } = useLibrary();
 const { state: videoState, duration, fps } = useVideo();
 const { state: audioState } = useAudio();
@@ -35,6 +35,8 @@ const { state: pixelState } = usePixelPaint();
 const { state: watermarkState } = useWatermark();
 
 const mode = computed(() => appMode.mode);
+/** 图片处理工作区按右侧当前工具显示状态，其他工作区按工作区本身。 */
+const context = computed(() => (mode.value === 'image' ? activeTool.value : mode.value));
 
 const serverText = computed(() => {
   if (!state.server.checked) return '正在检查 Node 服务端…';
@@ -44,7 +46,7 @@ const serverText = computed(() => {
 });
 
 const message = computed(() => {
-  switch (mode.value) {
+  switch (context.value) {
     case 'library':
       return libraryState.error || libraryState.status || '资源库就绪 · 支持拖拽上传、子目录、批量改名';
     case 'video':
@@ -67,7 +69,7 @@ const message = computed(() => {
 });
 
 const isError = computed(() => {
-  switch (mode.value) {
+  switch (context.value) {
     case 'library':
       return Boolean(libraryState.error);
     case 'video':
@@ -90,13 +92,14 @@ const isError = computed(() => {
 });
 
 const busy = computed(() => {
-  if (mode.value === 'library') return libraryState.busy || libraryState.refreshing;
-  if (mode.value === 'video') return videoState.busy || videoState.loading || videoState.filmstripLoading;
-  if (mode.value === 'audio') return audioState.busy || audioState.loading;
-  if (mode.value === 'cropimage') return cropState.busy;
-  if (mode.value === 'bgremove') return bgState.busy;
-  if (mode.value === 'eraser') return eraserState.busy;
-  if (mode.value === 'pixel') return pixelState.busy;
+  const ctx = context.value;
+  if (ctx === 'library') return libraryState.busy || libraryState.refreshing;
+  if (ctx === 'video') return videoState.busy || videoState.loading || videoState.filmstripLoading;
+  if (ctx === 'audio') return audioState.busy || audioState.loading;
+  if (ctx === 'cropimage') return cropState.busy;
+  if (ctx === 'bgremove') return bgState.busy;
+  if (ctx === 'eraser') return eraserState.busy;
+  if (ctx === 'pixel') return pixelState.busy;
   return state.busy;
 });
 
@@ -126,13 +129,13 @@ const rightStats = computed(() => {
 });
 
 const engineChip = computed(() => {
-  if (mode.value === 'video') return 'ffmpeg';
-  if (mode.value === 'audio') return 'web-audio';
-  if (mode.value === 'library') return 'library';
-  if (mode.value === 'bgremove') return 'bg-remove';
-  if (mode.value === 'eraser') return 'eraser';
-  if (mode.value === 'pixel') return 'pixel-paint';
-  if (mode.value === 'cropimage') return 'crop-tool';
+  if (context.value === 'video') return 'ffmpeg';
+  if (context.value === 'audio') return 'web-audio';
+  if (context.value === 'library') return 'library';
+  if (context.value === 'bgremove') return 'bg-remove';
+  if (context.value === 'eraser') return 'eraser';
+  if (context.value === 'pixel') return 'pixel-paint';
+  if (context.value === 'cropimage') return 'crop-tool';
   return state.engine === 'server' ? 'node-sharp' : 'browser-canvas';
 });
 </script>

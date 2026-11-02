@@ -4,7 +4,7 @@
  * 每个工作区各自维护自己的历史栈（工具落笔、掩膜涂抹、裁剪框、素材增删…），
  * 这里只做“按当前工作区选栈”的薄分发，不复制任何状态：
  *
- *  - 图片工具优先撤销**工具内**的编辑，工具栈空了再回退到素材列表；
+ *  - 图片处理优先撤销**当前工具内**的编辑，工具栈空了再回退到素材列表；
  *  - 视频工作区撤销标记点，其余模式撤销素材操作；
  *  - 重做优先回到上一次撤销所用的那条栈，避免两条栈交叉时顺序错乱。
  *
@@ -86,15 +86,19 @@ const videoStack = {
   redo: () => video.actions.redoMarks(),
 };
 
-/** 每个工作区的撤销优先级：越靠前越贴近当前操作。 */
-const STACKS_BY_MODE = {
+/** 图片处理工作区：按右侧当前工具选栈。 */
+const STACKS_BY_TOOL = {
+  crop: [workspaceStack],
   cropimage: [cropStack, workspaceStack],
   bgremove: [bgStack, workspaceStack],
   eraser: [eraserStack, workspaceStack],
   pixel: [pixelStack, workspaceStack],
   watermark: [watermarkStack, workspaceStack],
+};
+
+/** 其他工作区的撤销优先级：越靠前越贴近当前操作。 */
+const STACKS_BY_MODE = {
   video: [videoStack, workspaceStack],
-  crop: [workspaceStack],
   library: [workspaceStack],
   audio: [workspaceStack],
 };
@@ -103,6 +107,7 @@ const STACKS_BY_MODE = {
 let lastUndoStack = null;
 
 function currentStacks() {
+  if (appMode.mode === 'image') return STACKS_BY_TOOL[appMode.imageTool] ?? [workspaceStack];
   return STACKS_BY_MODE[appMode.mode] ?? [workspaceStack];
 }
 

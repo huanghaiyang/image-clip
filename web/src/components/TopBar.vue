@@ -3,10 +3,11 @@
  * 顶部工具栏（两行）
  * ------------------
  * 第一行：品牌、当前文档、AI 对话、主题、导入。
- * 第二行：9 个工作区切换 + 当前工作区相关的能力/引擎控件。
+ * 第二行：4 个工作区切换 + 当前工作区相关的能力/引擎控件。
  *
- * 为什么分成两行：工作区从 2 个涨到 9 个以后，和引擎控件挤在 48px 里一定会
- * 把文字压扁；拆成「内容行 + 模式行」既保留了原有视觉，也让每个模式都有稳定宽度。
+ * 为什么分成两行：工作区和引擎控件挤在 48px 里一定会把文字压扁；
+ * 拆成「内容行 + 模式行」既保留了原有视觉，也让每个模式都有稳定宽度。
+ * 图片处理工作区的工具切换在右侧属性面板的 tab 里，这里只显示当前工具的引擎控件。
  */
 import { computed } from 'vue';
 
@@ -29,7 +30,7 @@ import { SERVER_HINT } from '../lib/watermark.js';
 const { state, selected, stats, actions, meta } = useWorkspace();
 const { state: watermarkState, actions: watermarkActions } = useWatermark();
 const { state: llmState, actions: llmActions } = useLlmChat();
-const { state: appMode, currentMode, actions: modeActions } = useAppMode();
+const { state: appMode, currentMode, currentTool, activeTool, actions: modeActions } = useAppMode();
 const { state: libraryState, stats: libraryStats } = useLibrary();
 const { state: videoState, videoName } = useVideo();
 const { state: audioState } = useAudio();
@@ -37,7 +38,7 @@ const { state: sessionState, actions: sessionActions } = useWorkSession();
 const { canUndo, canRedo, actions: undoActions } = useUndo();
 
 const mode = computed(() => appMode.mode);
-const isImageMode = computed(() => ['crop', 'cropimage', 'bgremove', 'eraser', 'watermark', 'pixel'].includes(mode.value));
+const isImageMode = computed(() => mode.value === 'image');
 
 const engineOptions = computed(() => ENGINES.map((engine) => ({ value: engine.value, label: engine.label, hint: engine.hint })));
 
@@ -217,7 +218,7 @@ const sessionHint = computed(() => {
       </nav>
 
       <div class="mode-controls">
-        <template v-if="mode === 'crop'">
+        <template v-if="activeTool === 'crop'">
           <SegmentedControl
             :model-value="state.engine"
             :options="engineOptions"
@@ -225,7 +226,7 @@ const sessionHint = computed(() => {
             @update:model-value="actions.setEngine($event)"
           />
         </template>
-        <template v-else-if="mode === 'watermark'">
+        <template v-else-if="activeTool === 'watermark'">
           <SegmentedControl
             :model-value="watermarkState.options.engine"
             :options="watermarkEngineOptions"
@@ -245,7 +246,7 @@ const sessionHint = computed(() => {
           </span>
         </template>
         <template v-else>
-          <span class="mode-hint muted">{{ currentMode.hint }}</span>
+          <span class="mode-hint muted">{{ mode === 'image' ? currentTool.hint : currentMode.hint }}</span>
         </template>
       </div>
     </div>

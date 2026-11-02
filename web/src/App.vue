@@ -2,8 +2,9 @@
 /**
  * 应用外壳
  * --------
- * 9 个工作区共用同一个三栏布局（左：资源/素材，中：舞台，右：参数面板）：
- *   1 资源库 · 2 视频 · 3 透明裁剪 · 4 图片裁剪 · 5 背景去除 · 6 橡皮擦 · 7 水印去除 · 8 音频 · 9 像素笔绘
+ * 4 个工作区共用同一个三栏布局（左：资源/素材，中：舞台，右：参数面板）：
+ *   1 资源库 · 2 视频 · 3 图片处理 · 4 音频
+ * 图片处理内部再用右侧 tab 切换具体工具（透明裁剪 / 图片裁剪 / …）。
  *
  * 全局只做三件事：
  *  - 工作区切换（useAppMode 是唯一状态源）；
@@ -15,15 +16,11 @@ import { computed, onBeforeUnmount, onMounted, watch } from 'vue';
 import TopBar from './components/TopBar.vue';
 import AssetPanel from './components/AssetPanel.vue';
 import StageCanvas from './components/StageCanvas.vue';
-import InspectorPanel from './components/InspectorPanel.vue';
+import ImageToolPanel from './components/ImageToolPanel.vue';
 import WatermarkStage from './components/WatermarkStage.vue';
-import WatermarkPanel from './components/WatermarkPanel.vue';
 import CropStage from './components/CropStage.vue';
-import CropPanel from './components/CropPanel.vue';
 import BgStage from './components/BgStage.vue';
-import BgPanel from './components/BgPanel.vue';
 import EraserStage from './components/EraserStage.vue';
-import EraserPanel from './components/EraserPanel.vue';
 import LibrarySidebar from './components/LibrarySidebar.vue';
 import LibraryStage from './components/LibraryStage.vue';
 import LibraryInspector from './components/LibraryInspector.vue';
@@ -34,7 +31,6 @@ import AudioSidebar from './components/AudioSidebar.vue';
 import AudioStage from './components/AudioStage.vue';
 import AudioPanel from './components/AudioPanel.vue';
 import PixelPaintStage from './components/PixelPaintStage.vue';
-import PixelPaintPanel from './components/PixelPaintPanel.vue';
 import StatusBar from './components/StatusBar.vue';
 import ChatDrawer from './components/ChatDrawer.vue';
 import UploadDialog from './components/UploadDialog.vue';
@@ -44,7 +40,7 @@ import SessionDialog from './components/SessionDialog.vue';
 
 import { useWorkspace } from './composables/useWorkspace.js';
 import { useWatermark } from './composables/useWatermark.js';
-import { useAppMode, MODES, IMAGE_MODES } from './composables/useAppMode.js';
+import { useAppMode, MODES } from './composables/useAppMode.js';
 import { useLibrary } from './composables/useLibrary.js';
 import { importFilesToLibrary } from './composables/useLibraryImport.js';
 import { useVideo } from './composables/useVideo.js';
@@ -57,7 +53,7 @@ import { useUndo } from './composables/useUndo.js';
 
 const { state, actions } = useWorkspace();
 const { state: watermarkState, actions: watermarkActions } = useWatermark();
-const { state: appMode, actions: modeActions } = useAppMode();
+const { state: appMode, activeTool, actions: modeActions } = useAppMode();
 const { actions: libraryActions } = useLibrary();
 const { state: videoState, actions: videoActions } = useVideo();
 const { state: audioState, actions: audioActions } = useAudio();
@@ -69,16 +65,16 @@ const { actions: undoActions } = useUndo();
 
 const mode = computed(() => appMode.mode);
 
-/** 这些图片工作区的舞台没有内置拖放，交给窗口级处理。 */
-const WINDOW_DROP_MODES = new Set(['cropimage', 'bgremove', 'eraser', 'pixel']);
+/** 这些图片工具的舞台没有内置拖放，交给窗口级处理。 */
+const WINDOW_DROP_TOOLS = new Set(['cropimage', 'bgremove', 'eraser', 'pixel']);
 
-/** 资源库 / 视频 / 音频直接入库；图片工作区入库后自动载入素材列表。 */
+/** 资源库 / 视频 / 音频直接入库；图片处理入库后自动载入素材列表。 */
 async function importFiles(files, { toLibrary = false } = {}) {
   const list = [...(files ?? [])].filter(Boolean);
   if (!list.length) return;
   if (toLibrary) {
-    if (IMAGE_MODES.has(mode.value)) {
-      await importFilesToLibrary(list, { mode: mode.value });
+    if (mode.value === 'image') {
+      await importFilesToLibrary(list, { mode: activeTool.value });
     } else {
       await libraryActions.uploadFiles(list, { dir: mode.value === 'audio' ? '音频' : '' });
     }
@@ -99,7 +95,7 @@ function onPaste(event) {
   if (!files.length) return;
   event.preventDefault();
   // 资源库/视频/音频模式：粘贴等于入库；图片工作区：入库后自动载入素材列表
-  const toLibrary = mode.value === 'library' || mode.value === 'video' || mode.value === 'audio' || IMAGE_MODES.has(mode.value);
+  const toLibrary = mode.value === 'library' || mode.value === 'video' || mode.value === 'audio' || mode.value === 'image';
   void importFiles(files, { toLibrary });
 }
 
@@ -108,11 +104,11 @@ function preventWindowDrop(event) {
   event.preventDefault();
 }
 
-/** 在图片工作区把文件拖到窗口任意位置都能导入（舞台自己处理拖放的模式除外）。 */
+/** 图片处理工作区里，舞台自己处理拖放的工具除外，其余交给窗口级导入。 */
 function onWindowDrop(event) {
   event.preventDefault();
   if (uploadState.open) return;
-  if (!WINDOW_DROP_MODES.has(mode.value)) return;
+  if (!WINDOW_DROP_TOOLS.has(activeTool.value)) return;
   // 图片工作区拖放同样先入库，保证所有模块共用素材库
   void importFiles(event.dataTransfer?.files, { toLibrary: true });
 }
@@ -147,7 +143,7 @@ function onKeydown(event) {
     return;
   }
 
-  // 数字键切换工作区
+  // 数字键切换工作区（1 资源库 / 2 视频 / 3 图片处理 / 4 音频）
   if (!meta && /^[1-9]$/.test(event.key)) {
     const next = MODES[Number(event.key) - 1];
     if (next) {
@@ -172,7 +168,11 @@ function onKeydown(event) {
     return;
   }
 
-  if (mode.value === 'watermark') {
+  // 图片处理：快捷键按右侧当前选中的工具分派
+  if (mode.value !== 'image') return;
+  const tool = activeTool.value;
+
+  if (tool === 'watermark') {
     // 水印模式：R 轮换视图，0 适合窗口，[ ] 调笔刷
     if (event.key.toLowerCase() === 'r' && !meta) watermarkActions.cycleView();
     if (event.key === '0') watermarkActions.setView('zoom', 'fit');
@@ -184,7 +184,7 @@ function onKeydown(event) {
     return;
   }
 
-  if (mode.value === 'eraser') {
+  if (tool === 'eraser') {
     // 橡皮擦：撤销/重做走全局 Ctrl+Z，这里只处理笔刷大小
     if (event.key === '[' || event.key === ']') {
       const step = event.key === ']' ? 2 : -2;
@@ -194,7 +194,7 @@ function onKeydown(event) {
     return;
   }
 
-  if (mode.value === 'pixel') {
+  if (tool === 'pixel') {
     // 像素笔绘：撤销/重做走全局 Ctrl+Z；[ ] 调笔刷；B/E/I 切换画笔/橡皮/吸管；G 网格
     if (event.key === '[' || event.key === ']') {
       const step = event.key === ']' ? 1 : -1;
@@ -212,7 +212,7 @@ function onKeydown(event) {
     return;
   }
 
-  if (mode.value === 'crop') {
+  if (tool === 'crop') {
     if (event.key === '0') actions.setView('zoom', 'fit');
     if (event.key.toLowerCase() === 'r' && !meta) {
       actions.setView('mode', state.view.mode === 'source' ? 'result' : 'source');
@@ -223,7 +223,7 @@ function onKeydown(event) {
     return;
   }
 
-  if (mode.value === 'cropimage' && (event.key === 'Delete' || event.key === 'Backspace') && state.selectedId) {
+  if (tool === 'cropimage' && (event.key === 'Delete' || event.key === 'Backspace') && state.selectedId) {
     actions.removeItem(state.selectedId);
   }
 }
@@ -299,21 +299,16 @@ watch(
         <AudioPanel />
       </template>
 
-      <!-- 图片工作区：共用左侧素材列表，右侧按工具切换 -->
+      <!-- 图片处理：共用左侧素材列表，中间舞台与右侧 tab 面板随当前工具切换 -->
       <template v-else>
         <AssetPanel />
-        <CropStage v-if="mode === 'cropimage'" />
-        <BgStage v-else-if="mode === 'bgremove'" />
-        <EraserStage v-else-if="mode === 'eraser'" />
-        <PixelPaintStage v-else-if="mode === 'pixel'" />
-        <WatermarkStage v-else-if="mode === 'watermark'" />
+        <CropStage v-if="activeTool === 'cropimage'" />
+        <BgStage v-else-if="activeTool === 'bgremove'" />
+        <EraserStage v-else-if="activeTool === 'eraser'" />
+        <PixelPaintStage v-else-if="activeTool === 'pixel'" />
+        <WatermarkStage v-else-if="activeTool === 'watermark'" />
         <StageCanvas v-else />
-        <CropPanel v-if="mode === 'cropimage'" />
-        <BgPanel v-else-if="mode === 'bgremove'" />
-        <EraserPanel v-else-if="mode === 'eraser'" />
-        <PixelPaintPanel v-else-if="mode === 'pixel'" />
-        <WatermarkPanel v-else-if="mode === 'watermark'" />
-        <InspectorPanel v-else />
+        <ImageToolPanel />
       </template>
     </main>
 
