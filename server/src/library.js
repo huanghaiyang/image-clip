@@ -436,42 +436,86 @@ export function createLibrary(options = {}) {
       }
     }
 
-    // 阶段 1：源 → 临时
+    // 阶段 1/2：按目录深度「从深到浅」分批处理。
+    // 同一深度内仍然先全部改成临时名、再改成目标名，保证互换名字不会互相覆盖；
+    // 子项必须先于父文件夹完成，否则父目录改名后子文件的临时路径会失效，
+    // 回滚失败时文件停在 `.rename-` 隐藏名下，在资源库里看起来就像丢失了。
     const token = crypto.randomBytes(4).toString('hex');
-    for (const [index, item] of valid.entries()) {
-      item.tempName = `.rename-${token}-${index}`;
-      try {
-        await fs.rename(item.abs, path.join(item.parent, item.tempName));
+    const results = [];
+    const depths = [...new Set(valid.map((item) => relDepth(item.fromRel)))].sort((a, b) => b - a);
+    let tempIndex = 0;
+    for (const depth of depths) {
+      const batch = valid.filter((item) => relDepth(item.fromRel) === depth);
+
+      // 阶段 1：源 → 临时
+      for (const item of batch) {
+        item.tempName = `.rename-${token}-${tempIndex++}`;
         item.tempPath = path.join(item.parent, item.tempName);
-      } catch (err) {
-        item.ok = false;
-        item.error = `无法重命名：${err.message}`;
+        try {
+          await fs.rename(item.abs, item.tempPath);
+        } catch (err) {
+          item.ok = false;
+          item.error = `无法重命名：${err.message}`;
+          item.tempPath = null;
+        }
+      }
+
+      // 阶段 2：临时 → 目标
+      for (const item of batch) {
+        if (!item.ok || !item.tempPath) {
+          results.push({ from: item.fromRel, ok: false, error: item.error ?? '重命名失败' });
+          continue;
+        }
+        let target = path.join(item.parent, item.finalName);
+        try {
+          // 目标名被意外占用（例如同名项阶段 1 失败）时改用唯一名。
+          // Windows 上 rename 会直接覆盖已存在的文件，这里必须先避让，避免丢文件。
+          if (await exists(target)) {
+            const unique = await uniqueTarget(item.parent, item.finalName);
+            target = unique.abs;
+          }
+          await fs.rename(item.tempPath, target);
+          item.result = { from: item.fromRel, to: toRel(target), ok: true, name: path.basename(target) };
+          results.push(item.result);
+        } catch (err) {
+          // 尽力回滚到原名，避免文件停在临时名上。
+          // 原路径可能已被本批其他项占用（互换名字），此时回滚到唯一名，绝不能覆盖。
+          try {
+            let restore = item.abs;
+            if (await exists(restore)) {
+              const unique = await uniqueTarget(item.parent, path.basename(item.abs));
+              restore = unique.abs;
+            }
+            await fs.rename(item.tempPath, restore);
+            item.result = { from: item.fromRel, ok: false, error: err.message, temporary: toRel(restore), name: path.basename(restore) };
+          } catch {
+            /* 回滚失败时把临时路径返回给前端，方便用户手动处理 */
+            item.result = { from: item.fromRel, ok: false, error: err.message, temporary: toRel(item.tempPath) };
+          }
+          results.push(item.result);
+        }
       }
     }
 
-    // 阶段 2：临时 → 目标
-    const results = [];
+    // 父文件夹也在本批改名时，子项结果里的 to 仍带旧父路径。
+    // 按深度从浅到深重算文件夹的最终路径，再校正所有成功项，供前端同步选中状态
+    // 以及迁移历史版本索引 / 元数据缓存使用。
+    const folderFinal = new Map();
+    for (const item of valid.filter((entry) => entry.ok && entry.result && entry.isDir).sort((a, b) => relDepth(a.fromRel) - relDepth(b.fromRel))) {
+      const parentRel = posixDir(item.fromRel);
+      const parentFinal = folderFinal.get(parentRel) ?? parentRel;
+      folderFinal.set(item.fromRel, parentFinal ? `${parentFinal}/${item.result.name}` : item.result.name);
+    }
+
     const moved = [];
     for (const item of valid) {
-      if (!item.ok || !item.tempPath) {
-        results.push({ from: item.fromRel, ok: false, error: item.error ?? '重命名失败' });
-        continue;
-      }
-      const target = path.join(item.parent, item.finalName);
-      try {
-        await fs.rename(item.tempPath, target);
-        const toRelPath = toRel(target);
-        results.push({ from: item.fromRel, to: toRelPath, ok: true, name: path.basename(target) });
-        moved.push({ from: item.fromRel, to: toRelPath });
-      } catch (err) {
-        // 尽力回滚到原名，避免文件停在临时名上
-        try {
-          await fs.rename(item.tempPath, item.abs);
-        } catch {
-          /* 回滚失败时把临时路径返回给前端，方便用户手动处理 */
-        }
-        results.push({ from: item.fromRel, ok: false, error: err.message, temporary: toRel(item.tempPath) });
-      }
+      const result = item.result;
+      if (!item.ok || !result) continue;
+      const parentRel = posixDir(item.fromRel);
+      const parentFinal = folderFinal.get(parentRel) ?? parentRel;
+      const to = item.isDir ? folderFinal.get(item.fromRel) ?? result.to : parentFinal ? `${parentFinal}/${result.name}` : result.name;
+      result.to = to;
+      if (item.fromRel !== to) moved.push({ from: item.fromRel, to });
     }
 
     // 整批改名完成后再迁移关联索引（文件夹会连子文件一起迁移）
@@ -1297,6 +1341,11 @@ async function exists(file) {
   } catch {
     return false;
   }
+}
+
+/** 相对路径的层级深度：根目录下的文件/文件夹为 1，子目录内再加 1。 */
+function relDepth(rel) {
+  return String(rel ?? '').split('/').filter(Boolean).length;
 }
 
 /** 取 POSIX 风格的父目录；返回空串表示资源库根目录。 */
