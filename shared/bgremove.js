@@ -308,6 +308,59 @@ export function buildBackgroundMask(rgba, width, height, options = {}) {
 }
 
 /**
+ * 由 AI 主体 alpha 生成背景去除掩膜。
+ *
+ * AI 模型给出的是「主体 alpha」（0 = 背景、255 = 主体），与颜色抠图的
+ * 「去除掩膜」相反，所以先取反，再沿用与颜色路径一致的选区限制 / 收边 / 羽化，
+ * 保证两种抠图方式在工具栏里的行为完全一致。
+ *
+ * @param {Uint8Array} alpha 主体 alpha，长度 width*height
+ * @param {number} width
+ * @param {number} height
+ * @param {object} [options] 与 {@link buildBackgroundMask} 相同：selection / selectionMode / erode / feather
+ * @returns {{mask: Uint8Array, width: number, height: number, coverage: number, backgroundPixels: number}}
+ */
+export function buildSubjectMask(alpha, width, height, options = {}) {
+  const w = Math.max(1, Math.floor(Number(width) || 1));
+  const h = Math.max(1, Math.floor(Number(height) || 1));
+  const n = w * h;
+  if (!alpha || alpha.length < n) throw new TypeError('buildSubjectMask: alpha 长度必须 >= width*height');
+
+  let output = new Uint8Array(n);
+  let backgroundPixels = 0;
+  for (let i = 0; i < n; i += 1) {
+    const removal = 255 - alpha[i];
+    output[i] = removal;
+    if (removal) backgroundPixels += 1;
+  }
+
+  // 套索选区限制（仅选区内 / 仅选区外），与颜色路径一致
+  if (options.selection && options.selectionMode !== 'all') {
+    const inside = options.selectionMode === 'inside';
+    const restricted = new Uint8Array(n);
+    let hits = 0;
+    for (let i = 0; i < n; i += 1) {
+      const selected = options.selection[i] > 127;
+      if ((inside ? selected : !selected) && output[i]) {
+        restricted[i] = output[i];
+        hits += 1;
+      }
+    }
+    output = restricted;
+    backgroundPixels = hits;
+  }
+
+  // 收边 + 羽化（与颜色路径保持同样的顺序）
+  const erode = clamp(Math.round(Number(options.erode) || 0), 0, 64);
+  const feather = clamp(Math.round(Number(options.feather) || 0), 0, 64);
+  if (erode > 0) output = erodeMask(output, w, h, erode);
+  if (feather > 0) output = blurMask(output, w, h, feather);
+
+  const coverage = countMask(output) / n;
+  return { mask: output, width: w, height: h, coverage, backgroundPixels };
+}
+
+/**
  * 把掩膜应用到直通 RGBA，返回新的 `Uint8ClampedArray`（不修改入参）。
  *
  * `decontaminate` 打开时会顺手去掉边缘的底色污染：

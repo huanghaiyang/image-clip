@@ -5,7 +5,9 @@
  * 参数修改后由 useBgRemoval 做 140ms 防抖重算（预览分辨率），
  * 因此拖动滑块的反馈是实时的；这里只负责把控件和状态接起来。
  */
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
+
+import { CUTOUT_MODELS } from '@shared/cutout.js';
 
 import { useWorkspace } from '../composables/useWorkspace.js';
 import { useBgRemoval } from '../composables/useBgRemoval.js';
@@ -14,7 +16,7 @@ import SegmentedControl from './ui/SegmentedControl.vue';
 import SwitchField from './ui/SwitchField.vue';
 
 const { selected } = useWorkspace();
-const { state, activeEntry, actions } = useBgRemoval();
+const { state, activeEntry, cutoutModels, actions } = useBgRemoval();
 
 const entry = computed(() => activeEntry.value);
 const item = computed(() => selected.value ?? null);
@@ -43,6 +45,28 @@ const coverageText = computed(() => {
   if (!e) return '—';
   return `${(e.coverage * 100).toFixed(2)}%`;
 });
+
+// ------------------------------------------------------------ AI 精准抠像
+const aiModelOptions = CUTOUT_MODELS.map((model) => ({ value: model.id, label: model.label, hint: model.hint }));
+const aiModel = computed(() => CUTOUT_MODELS.find((model) => model.id === entry.value?.ai.model) ?? null);
+const aiModelState = computed(() => cutoutModels.models.find((model) => model.id === entry.value?.ai.model) ?? null);
+const aiBusy = computed(() => entry.value?.ai.status === 'running' || state.busy);
+const aiProgressText = computed(() => {
+  const progress = entry.value?.ai.progress;
+  if (!progress) return '';
+  if (progress.phase === 'download') {
+    const percent = progress.total ? `${Math.round((progress.loaded / progress.total) * 100)}%` : '';
+    return `首次使用，下载模型 ${percent}`;
+  }
+  return progress.message ?? '';
+});
+
+onMounted(() => actions.loadCutoutStatus());
+
+function runAi() {
+  if (!entry.value || aiBusy.value) return;
+  actions.runAiCutout(entry.value.ai.model);
+}
 
 function addCustomColor() {
   actions.useColor(customColor.value);
@@ -99,6 +123,39 @@ function addCustomColor() {
           </div>
           <p class="hint">
             默认从画面四边取样识别主色。勾选的颜色都会按容差去除；取色器会切换为「仅去除该颜色」。
+          </p>
+        </section>
+
+        <section class="section">
+          <div class="section-head">
+            <h3 class="section-title">AI 精准抠像</h3>
+            <span v-if="entry.ai.alpha" class="chip">已接管掩膜</span>
+          </div>
+          <SegmentedControl
+            :model-value="entry.ai.model"
+            :options="aiModelOptions"
+            size="sm"
+            block
+            @update:model-value="actions.setAiModel($event)"
+          />
+          <div class="ai-actions">
+            <button class="btn is-primary is-mini" type="button" :disabled="aiBusy" @click="runAi">
+              {{ entry.ai.status === 'running' ? '计算中…' : entry.ai.alpha ? '重新运行' : '运行 AI 抠像' }}
+            </button>
+            <button v-if="entry.ai.alpha" class="btn is-ghost is-mini" type="button" @click="actions.clearAiCutout()">
+              清除结果
+            </button>
+          </div>
+          <p v-if="aiProgressText" class="hint mono">{{ aiProgressText }}</p>
+          <p v-if="entry.ai.error" class="hint is-warn">{{ entry.ai.error }}</p>
+          <p v-if="aiModelState && !aiModelState.available" class="hint is-warn">
+            该模型尚未下载：在项目根目录执行
+            <code class="mono">npm run model:cutout -- --model {{ entry.ai.model }}</code>
+            后刷新页面。
+          </p>
+          <p v-if="aiModel" class="hint">{{ aiModel.hint }}</p>
+          <p class="hint">
+            在浏览器内用 WASM 推理，模型只在本机下载一次；结果直接接管抠图掩膜，颜色容差 / 连通区域不再参与计算，羽化、向内收缩和套索选区仍然生效。
           </p>
         </section>
 
@@ -271,6 +328,16 @@ function addCustomColor() {
 
 .section-head .section-title {
   margin: 0;
+}
+
+.ai-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.hint.is-warn {
+  color: var(--warn);
 }
 
 .is-mini {

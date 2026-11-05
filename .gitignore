@@ -7,10 +7,13 @@ _probe*/
 probe-out/
 .tmp/
 
-# LaMa 权重（198MB，用 npm run model:lama 自行下载，不入库）
+# LaMa / AI 抠图权重（用 npm run model:* 自行下载，不入库）
 models/
 *.onnx
 *.onnx.part
+
+# onnxruntime-web 的 WASM 运行时（predev/prebuild 自动复制，不入库）
+web/public/ort/
 
 # 运行时数据：大模型设置（含 API key）、对话 artifact、导出文件
 data/

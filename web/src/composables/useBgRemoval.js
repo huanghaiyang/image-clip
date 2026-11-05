@@ -14,12 +14,16 @@ import { computed, markRaw, reactive, readonly } from 'vue';
 import {
   applyMaskToRgba,
   buildBackgroundMask,
+  buildSubjectMask,
   colorDistance,
   colorToHex,
   detectBackgroundColors,
   parseColor,
 } from '@shared/bgremove.js';
+import { resizeMaskBilinear } from '@shared/cutout.js';
 import { polygonArea, rasterizePolygon, scalePolygon } from '@shared/selection.js';
+
+import { fetchCutoutStatus, segmentImage } from '../lib/cutout/index.js';
 
 import { useWorkspace } from './useWorkspace.js';
 import { saveBlobToLibrary } from './useLibrary.js';
@@ -42,6 +46,27 @@ const DEFAULT_OPTIONS = {
 
 /** 只影响套索交互/显示的工具偏好：不进撤销栈，撤销时也保持不变。 */
 const TOOL_PREF_KEYS = ['lassoMode', 'lassoRadius', 'lassoSimplify', 'showMask'];
+
+/** AI 抠图的默认状态（每个素材独立保存）。 */
+function defaultAiState() {
+  return {
+    model: 'person',
+    // idle | running | ready | error
+    status: 'idle',
+    progress: null,
+    error: '',
+    /** 原图分辨率的「主体 alpha」（0 背景 / 255 主体）。 */
+    alpha: null,
+    /** 预览分辨率的同一份 alpha，供实时预览与参数重算使用。 */
+    previewAlpha: null,
+    elapsedMs: 0,
+    coverage: 0,
+  };
+}
+
+function resetAiState(entry) {
+  entry.ai = defaultAiState();
+}
 
 /**
  * 智能套索内部约束。
@@ -172,6 +197,7 @@ function ensureEntry(item = activeItem.value) {
     lastSnapPoint: null,
     selectionMask: null,
     snapMap: null,
+    ai: defaultAiState(),
     history: [],
     redo: [],
     coverage: 0,
@@ -217,15 +243,22 @@ async function recompute(entry) {
         ? rasterizePolygon(scalePolygon(entry.polygon, preview.scale), preview.width, preview.height)
         : null;
 
-    const built = buildBackgroundMask(preview.data, preview.width, preview.height, {
-      colors,
-      tolerance: entry.options.tolerance,
-      connected: entry.options.connected,
-      feather: scaledRadius(entry.options.feather, preview.scale),
-      erode: scaledRadius(entry.options.erode, preview.scale),
-      selection,
-      selectionMode: selection ? entry.options.selectionMode : 'all',
-    });
+    const built = entry.ai.alpha
+      ? buildSubjectMask(entry.ai.previewAlpha, preview.width, preview.height, {
+          feather: scaledRadius(entry.options.feather, preview.scale),
+          erode: scaledRadius(entry.options.erode, preview.scale),
+          selection,
+          selectionMode: selection ? entry.options.selectionMode : 'all',
+        })
+      : buildBackgroundMask(preview.data, preview.width, preview.height, {
+          colors,
+          tolerance: entry.options.tolerance,
+          connected: entry.options.connected,
+          feather: scaledRadius(entry.options.feather, preview.scale),
+          erode: scaledRadius(entry.options.erode, preview.scale),
+          selection,
+          selectionMode: selection ? entry.options.selectionMode : 'all',
+        });
 
     const applied = applyMaskToRgba(preview.data, preview.width, preview.height, built.mask, {
       decontaminate: entry.options.decontaminate,
@@ -285,6 +318,14 @@ function entrySnapshot(entry) {
     polygon: entry.polygon.map((point) => ({ x: point.x, y: point.y })),
     detected: entry.detected.map((color) => ({ ...color })),
     transparentRatio: entry.transparentRatio,
+    // 只保存 alpha 的引用：重复改参数时不会把几十 MB 的掩膜复制进历史
+    ai: {
+      model: entry.ai.model,
+      alpha: entry.ai.alpha,
+      previewAlpha: entry.ai.previewAlpha,
+      elapsedMs: entry.ai.elapsedMs,
+      coverage: entry.ai.coverage,
+    },
   };
 }
 
@@ -315,6 +356,16 @@ function applyEntrySnapshot(entry, snapshot) {
   entry.options = { ...DEFAULT_OPTIONS, ...snapshot.options, ...toolPrefs };
   entry.detected = snapshot.detected.map((color) => ({ ...color }));
   entry.transparentRatio = snapshot.transparentRatio;
+  const ai = snapshot.ai ?? { model: entry.ai.model, alpha: null };
+  entry.ai = {
+    ...defaultAiState(),
+    model: ai.model ?? 'person',
+    alpha: ai.alpha ? markRaw(ai.alpha) : null,
+    previewAlpha: ai.previewAlpha ? markRaw(ai.previewAlpha) : null,
+    status: ai.alpha ? 'ready' : 'idle',
+    elapsedMs: ai.elapsedMs ?? 0,
+    coverage: ai.coverage ?? 0,
+  };
   const samePolygon =
     snapshot.polygon.length === entry.polygon.length &&
     snapshot.polygon.every((point, index) => point.x === entry.polygon[index].x && point.y === entry.polygon[index].y);
@@ -854,6 +905,102 @@ export function clearSelection() {
   setStatus('已清除套索选区');
 }
 
+// --------------------------------------------------------------- AI 精准抠像
+
+/** 服务端的模型就绪状态（用于面板提示；未下载时给出下载命令）。 */
+const cutoutModels = reactive({ loading: false, loaded: false, error: '', models: [], install: '' });
+
+export async function loadCutoutStatus(force = false) {
+  if (cutoutModels.loading || (cutoutModels.loaded && !force)) return;
+  cutoutModels.loading = true;
+  cutoutModels.error = '';
+  try {
+    const status = await fetchCutoutStatus();
+    cutoutModels.models = status.models ?? [];
+    cutoutModels.install = status.install ?? '';
+    cutoutModels.loaded = true;
+  } catch (err) {
+    cutoutModels.error = err.message;
+  } finally {
+    cutoutModels.loading = false;
+  }
+}
+
+/**
+ * 运行 AI 精准抠图（浏览器 WASM 推理）。
+ *
+ * 只换取一次原图 alpha：预览用降采样版本实时重算，应用时直接用原图 alpha，
+ * 避免每次调羽化/选区都重新跑一遍神经网络。
+ */
+export async function runAiCutout(modelId) {
+  const item = activeItem.value;
+  const entry = ensureEntry(item);
+  if (!item || !entry) {
+    setError('请先选择一张图片');
+    return null;
+  }
+  if (entry.ai.status === 'running') return null;
+
+  const model = modelId || entry.ai.model;
+  entry.ai.model = model;
+  entry.ai.status = 'running';
+  entry.ai.error = '';
+  entry.ai.progress = { phase: 'start', message: '准备模型…' };
+  setStatus('AI 抠像中…');
+
+  try {
+    // Worker 会转移这块内存的所有权；必须复制，不能把素材本身的数据传出去
+    const rgba = new Uint8ClampedArray(entry.sourceData);
+    const result = await segmentImage({
+      modelId: model,
+      rgba,
+      width: item.width,
+      height: item.height,
+      onProgress: (progress) => {
+        entry.ai.progress = { ...progress };
+      },
+    });
+
+    entry.ai.alpha = markRaw(result.alpha);
+    entry.ai.previewAlpha = markRaw(
+      resizeMaskBilinear(result.alpha, item.width, item.height, entry.preview.width, entry.preview.height),
+    );
+    entry.ai.status = 'ready';
+    entry.ai.progress = null;
+    entry.ai.elapsedMs = result.elapsedMs;
+    recordEntryHistory(entry, 'ai-cutout');
+    scheduleRecompute(entry);
+    markSessionDirty('bgremove');
+    const label = cutoutModels.models.find((m) => m.id === model)?.label ?? model;
+    setStatus(`AI 抠像完成（${label} · ${result.elapsedMs}ms），可继续用羽化/套索微调`);
+    return result;
+  } catch (err) {
+    entry.ai.status = 'error';
+    entry.ai.progress = null;
+    entry.ai.error = err.message;
+    setError(`AI 抠像失败：${err.message}`);
+    return null;
+  }
+}
+
+/** 切换后续运行使用的模型（不清除当前 AI 结果）。 */
+export function setAiModel(modelId) {
+  const entry = ensureEntry(activeItem.value);
+  if (entry && modelId) entry.ai.model = modelId;
+}
+
+/** 清除 AI 结果，回到颜色抠图。 */
+export function clearAiCutout() {
+  const entry = ensureEntry(activeItem.value);
+  if (!entry || !entry.ai.alpha) return;
+  recordEntryHistory(entry);
+  resetAiState(entry);
+  entry.ai.status = 'idle';
+  scheduleRecompute(entry);
+  markSessionDirty('bgremove');
+  setStatus('已清除 AI 抠像结果，回到颜色抠图');
+}
+
 // --------------------------------------------------------------- 应用
 
 function stripExtension(name) {
@@ -889,15 +1036,22 @@ export async function applyBackgroundRemoval({ saveToLibrary = false } = {}) {
     }
 
     const selection = polygon.length >= 3 ? rasterizePolygon(polygon, item.width, item.height) : null;
-    const built = buildBackgroundMask(item.imageData.data, item.width, item.height, {
-      colors,
-      tolerance: options.tolerance,
-      connected: options.connected,
-      feather: options.feather,
-      erode: options.erode,
-      selection,
-      selectionMode: selection ? options.selectionMode : 'all',
-    });
+    const built = entry.ai.alpha
+      ? buildSubjectMask(entry.ai.alpha, item.width, item.height, {
+          feather: options.feather,
+          erode: options.erode,
+          selection,
+          selectionMode: selection ? options.selectionMode : 'all',
+        })
+      : buildBackgroundMask(item.imageData.data, item.width, item.height, {
+          colors,
+          tolerance: options.tolerance,
+          connected: options.connected,
+          feather: options.feather,
+          erode: options.erode,
+          selection,
+          selectionMode: selection ? options.selectionMode : 'all',
+        });
     const applied = applyMaskToRgba(item.imageData.data, item.width, item.height, built.mask, {
       decontaminate: options.decontaminate,
       colors,
@@ -1002,6 +1156,7 @@ export function useBgRemoval() {
     state: readonly(state),
     activeItem,
     activeEntry,
+    cutoutModels: readonly(cutoutModels),
     canUndoBg,
     canRedoBg,
     actions: {
@@ -1020,6 +1175,10 @@ export function useBgRemoval() {
       extendLasso,
       endLasso,
       clearSelection,
+      runAiCutout,
+      setAiModel,
+      clearAiCutout,
+      loadCutoutStatus,
       applyBackgroundRemoval,
       undoBg,
       redoBg,

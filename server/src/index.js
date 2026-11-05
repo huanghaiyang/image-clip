@@ -49,6 +49,8 @@ import { DETECT_METHODS, DEFAULT_DETECT_OPTIONS } from '../../shared/watermark/d
 import { ffmpegStatus } from './ffmpeg.js';
 import { createLibrary, createLibraryRouter } from './library.js';
 import { createVideoRouter } from './video.js';
+import { cutoutModelPath, cutoutStatus } from './cutout.js';
+import { findCutoutModel } from '../../shared/cutout.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '../..');
@@ -87,6 +89,7 @@ export function createApp() {
       sharp: sharpVersion,
       sharpAvailable: Boolean(sharpVersion),
       ffmpeg,
+      cutout: cutoutStatus(),
       library: { root: library.root, thumbnails: library.thumbnailRoot },
       outputFormats: OUTPUT_FORMATS,
       limits: LIMITS,
@@ -319,6 +322,40 @@ export function createApp() {
         .set('X-Watermark-Alpha', String(result.alpha ?? ''))
         .set('Content-Disposition', `inline; filename="${encodeURIComponent(watermarkFilename(body.name, result.format))}"`)
         .send(result.buffer);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // AI 精准抠图：模型状态 + 模型文件托管（推理在浏览器 WASM 中完成）。
+  app.get('/api/cutout/health', (_req, res) => {
+    res.json(cutoutStatus());
+  });
+
+  app.get('/api/cutout/model/:id', async (req, res, next) => {
+    try {
+      const model = findCutoutModel(req.params.id);
+      if (!model) {
+        res.status(404).json({ error: { code: 'MODEL_NOT_FOUND', message: `未知的抠图模型：${req.params.id}` } });
+        return;
+      }
+      const file = cutoutModelPath(model.id);
+      try {
+        await fs.access(file);
+      } catch {
+        res.status(404).json({
+          error: {
+            code: 'MODEL_NOT_DOWNLOADED',
+            message: `模型 ${model.file} 尚未下载，请先在项目根目录执行：node scripts/download-cutout-models.mjs --model ${model.id}`,
+          },
+        });
+        return;
+      }
+      // 模型内容不会变：让浏览器长期缓存，避免每次进入抠图都重新下载。
+      res.set('Cache-Control', 'public, max-age=31536000, immutable');
+      res.type('application/octet-stream');
+      res.set('Content-Disposition', `inline; filename="${model.file}"`);
+      res.sendFile(file);
     } catch (err) {
       next(err);
     }
