@@ -10,6 +10,7 @@ import { computed, onMounted } from 'vue';
 
 import RangeField from './ui/RangeField.vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
+import SwitchField from './ui/SwitchField.vue';
 import { setMode } from '../composables/useAppMode.js';
 import { useLibrary } from '../composables/useLibrary.js';
 import { useVideo } from '../composables/useVideo.js';
@@ -23,6 +24,10 @@ const {
   targetDir,
   hasVideo,
   ffmpegReady,
+  displaySize,
+  trimRange,
+  cropRect,
+  canEdit,
   manualTimes,
   canExtract,
   actions,
@@ -85,6 +90,42 @@ const frameResult = computed(() => (state.lastExtract?.type === 'frames' ? state
 const audioResult = computed(() => (state.lastExtract?.type === 'audio' ? state.lastExtract : null));
 
 const audioNamePlaceholder = computed(() => `${videoBase.value || '视频名'}.${state.audio.format}`);
+
+const WATERMARK_ENGINES = [
+  { value: 'auto', label: '自动', hint: '按检测结果自动选择反混合或空间修补' },
+  { value: 'unblend', label: '反混合（半透明）', hint: '逐帧反算水印叠加，适合半透明角标或字幕' },
+  { value: 'removelogo', label: '空间修补', hint: '用 FFmpeg 空间插值覆盖不透明水印' },
+];
+
+const wm = computed(() => state.edit.watermark);
+const cutNamePlaceholder = computed(() => `${videoBase.value || '视频名'}-裁剪.mp4`);
+const trimHint = computed(
+  () => `保留 ${trimRange.value.duration.toFixed(2)}s / 共 ${duration.value.toFixed(2)}s`,
+);
+
+const watermarkParamText = computed(() => {
+  const params = wm.value.params;
+  if (!params) return '';
+  const color = (params.color || []).map((item) => Math.round(Number(item) || 0));
+  return `α≈${(Number(params.alpha) || 0).toFixed(2)} · 水印色 rgb(${color.join(', ')})`;
+});
+
+const watermarkResultText = computed(() => {
+  const result = wm.value.result;
+  if (!result) return '';
+  const engine = result.engine === 'unblend' ? '反混合' : result.engine === 'removelogo' ? '空间修补' : result.engine;
+  const seconds = (Number(result.elapsedMs) || 0) / 1000;
+  return `${engine} · ${seconds.toFixed(1)}s · ${result.entry?.path ?? '—'}`;
+});
+
+/** 裁剪参数按 0..1 存储，界面上按百分比显示与调整。 */
+function cropPercent(key) {
+  return Math.round((Number(state.edit.crop[key]) || 0) * 100);
+}
+
+function setCropPercent(key, value) {
+  actions.setCropField(key, Number(value) / 100);
+}
 
 /** 无视频、FFmpeg 不可用、正在忙、无音轨时都不能提取音频。 */
 const audioDisabled = computed(
@@ -329,7 +370,7 @@ onMounted(() => {
       </section>
 
       <!-- 音频提取 -->
-      <section class="section is-last">
+      <section class="section">
         <h3 class="section-title">音频提取</h3>
 
         <p v-if="meta && meta.hasAudio === false" class="audio-empty">该视频没有音轨，无法提取音频。</p>
@@ -383,6 +424,171 @@ onMounted(() => {
           <p class="result-path mono" :title="audioResult.entry?.path || ''">{{ audioResult.entry?.path || '—' }}</p>
           <button class="btn is-block" type="button" @click="openAudioFolder">在资源库查看</button>
         </div>
+      </section>
+
+      <!-- 裁剪 / 切断 -->
+      <section class="section">
+        <h3 class="section-title">裁剪 / 切断</h3>
+
+        <SwitchField
+          label="启用裁剪"
+          :model-value="state.edit.cropEnabled"
+          hint="按占比裁掉画面四边，导出时与切断合并成一次重编码"
+          @update:model-value="actions.setEditOption('cropEnabled', $event)"
+        />
+
+        <template v-if="state.edit.cropEnabled">
+          <RangeField
+            label="左边距 x"
+            :model-value="cropPercent('x')"
+            :min="0"
+            :max="70"
+            :step="1"
+            suffix="%"
+            @update:model-value="setCropPercent('x', $event)"
+          />
+          <RangeField
+            label="上边距 y"
+            :model-value="cropPercent('y')"
+            :min="0"
+            :max="70"
+            :step="1"
+            suffix="%"
+            @update:model-value="setCropPercent('y', $event)"
+          />
+          <RangeField
+            label="宽度 width"
+            :model-value="cropPercent('width')"
+            :min="5"
+            :max="100"
+            :step="1"
+            suffix="%"
+            @update:model-value="setCropPercent('width', $event)"
+          />
+          <RangeField
+            label="高度 height"
+            :model-value="cropPercent('height')"
+            :min="5"
+            :max="100"
+            :step="1"
+            suffix="%"
+            @update:model-value="setCropPercent('height', $event)"
+          />
+          <p v-if="cropRect" class="hint">裁剪后实际尺寸 {{ cropRect.width }} × {{ cropRect.height }} px。</p>
+          <p v-else class="hint">选择视频后即可看到裁剪后的实际像素尺寸。</p>
+        </template>
+        <p v-else class="hint">未启用裁剪：开启后可分别调整 x / y 与宽高占比。</p>
+
+        <p class="field-label edit-subhead">切断</p>
+        <RangeField
+          label="起点"
+          :model-value="state.edit.trimStart"
+          :min="0"
+          :max="duration"
+          :step="0.05"
+          suffix="s"
+          hint="从这一秒开始保留。"
+          :disabled="!hasVideo"
+          @update:model-value="actions.setEditOption('trimStart', $event)"
+        />
+        <RangeField
+          label="终点"
+          :model-value="trimRange.end"
+          :min="0"
+          :max="duration"
+          :step="0.05"
+          suffix="s"
+          :hint="trimHint"
+          :disabled="!hasVideo"
+          @update:model-value="actions.setTrimEnd($event)"
+        />
+
+        <div class="field-row">
+          <div class="field-head">
+            <label class="field-label">保存目录</label>
+          </div>
+          <input
+            class="text-input"
+            type="text"
+            :value="state.edit.output.dir"
+            placeholder="视频处理"
+            @input="actions.setOutputOption('dir', $event.target.value)"
+          />
+        </div>
+
+        <div class="field-row">
+          <div class="field-head">
+            <label class="field-label">文件名</label>
+          </div>
+          <input
+            class="text-input"
+            type="text"
+            :value="state.edit.output.cutName"
+            :placeholder="cutNamePlaceholder"
+            @input="actions.setOutputOption('cutName', $event.target.value)"
+          />
+        </div>
+
+        <button class="btn is-primary is-block" type="button" :disabled="!canEdit" @click="actions.cutVideo()">
+          {{ state.busy ? '导出中…' : '导出裁剪 / 切断视频' }}
+        </button>
+        <p class="hint">一次 FFmpeg 重编码，切断与裁剪同时生效，保留原音轨。</p>
+      </section>
+
+      <!-- 视频水印去除 -->
+      <section class="section is-last">
+        <div class="section-head">
+          <h3 class="section-title">视频水印去除</h3>
+          <span v-if="wm.preview && wm.coverage > 0" class="chip mono">
+            {{ (wm.coverage * 100).toFixed(2) }}%
+          </span>
+        </div>
+
+        <div class="watermark-actions">
+          <button class="btn is-primary" type="button" :disabled="!canEdit" @click="actions.detectWatermark()">
+            {{ wm.status === 'detecting' ? '检测中…' : '检测水印' }}
+          </button>
+          <button v-if="wm.preview || wm.result" class="btn is-ghost" type="button" @click="actions.clearWatermark()">
+            清除结果
+          </button>
+        </div>
+
+        <p v-if="wm.preview" class="hint mono">
+          检测帧 {{ wm.time.toFixed(2) }}s · {{ displaySize.width }}×{{ displaySize.height }}
+        </p>
+        <img v-if="wm.preview" class="watermark-preview" :src="wm.preview.dataUrl" alt="水印检测预览" />
+
+        <div class="field-row">
+          <div class="field-head">
+            <label class="field-label">去除引擎</label>
+          </div>
+          <SegmentedControl
+            block
+            :model-value="wm.engine"
+            :options="WATERMARK_ENGINES"
+            @update:model-value="actions.setWatermarkEngine($event)"
+          />
+        </div>
+
+        <p v-if="wm.params" class="hint mono">{{ watermarkParamText }}</p>
+        <p v-else-if="wm.preview" class="hint">该水印不适合反混合，将用空间修补。</p>
+
+        <button
+          class="btn is-primary is-block"
+          type="button"
+          :disabled="!canEdit || !wm.mask"
+          @click="actions.removeWatermark()"
+        >
+          {{ wm.status === 'removing' ? '正在逐帧处理…' : '去除水印并导出' }}
+        </button>
+
+        <p v-if="wm.result" class="hint mono">已完成 · {{ watermarkResultText }}</p>
+        <p v-if="wm.error" class="hint is-warn">{{ wm.error }}</p>
+
+        <p class="hint">
+          静态水印只在样本帧检测一次，掩膜复用到整段视频（Concat 的遮罩网格思路）；半透明水印走逐帧反混合，不透明水印走
+          FFmpeg 空间插值。
+        </p>
       </section>
     </div>
   </aside>
@@ -494,6 +700,49 @@ onMounted(() => {
 
 .segmented-wrap {
   margin-bottom: 10px;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.section-head .section-title {
+  margin: 0;
+}
+
+.hint {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.hint.is-warn {
+  color: var(--warn);
+}
+
+.edit-subhead {
+  margin: 4px 0 8px;
+}
+
+.watermark-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.watermark-preview {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #000;
 }
 
 .field-row {

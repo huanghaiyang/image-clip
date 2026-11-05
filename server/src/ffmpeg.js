@@ -311,6 +311,93 @@ export async function extractAudio({ input, output, format = 'mp3' }) {
   return { output, format: String(format).toLowerCase() };
 }
 
+/**
+ * 旋转后用户真正看到的画面尺寸。
+ * ffmpeg 转码时会自动应用旋转矩阵，所以 `-vf crop` 的坐标系是旋转后的尺寸。
+ */
+export function displaySizeOf(meta) {
+  const rotation = Math.abs(Number(meta?.rotation) || 0) % 360;
+  const swap = rotation === 90 || rotation === 270;
+  const width = Math.round(Number(swap ? meta?.height : meta?.width) || 0);
+  const height = Math.round(Number(swap ? meta?.width : meta?.height) || 0);
+  return { width, height };
+}
+
+/** 把任意裁剪参数夹到画面内，并把宽高取偶数（H.264 yuv420p 要求）。 */
+export function normalizeCrop(crop, size) {
+  const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+  const x = clamp(Math.round(Number(crop?.x) || 0), 0, Math.max(0, size.width - 2));
+  const y = clamp(Math.round(Number(crop?.y) || 0), 0, Math.max(0, size.height - 2));
+  const maxW = Math.max(2, size.width - x);
+  const maxH = Math.max(2, size.height - y);
+  const width = even(clamp(Math.round(Number(crop?.width) || maxW), 2, maxW));
+  const height = even(clamp(Math.round(Number(crop?.height) || maxH), 2, maxH));
+  return { x, y, width: Math.min(width, maxW - (maxW % 2)), height: Math.min(height, maxH - (maxH % 2)) };
+}
+
+/**
+ * 视频导出：切断（start/duration）、裁剪（crop）与额外滤镜（如 removelogo）一次完成。
+ * 统一重编码 H.264/AAC，避免关键帧对齐导致的切断不准，也保证裁剪后的尺寸能被播放器接受。
+ *
+ * @param {{
+ *  input:string, output:string,
+ *  start?:number, duration?:number,
+ *  crop?:{x:number,y:number,width:number,height:number},
+ *  filters?:string[], cwd?:string,
+ *  crf?:number, preset?:string, meta?:object,
+ * }} options
+ * @returns {Promise<{output:string,width:number,height:number,start:number,duration:number}>}
+ */
+export async function exportVideo(options) {
+  const binaries = await requireBinaries();
+  const meta = options.meta ?? (await probeVideo(options.input));
+  const size = displaySizeOf(meta);
+  if (!size.width || !size.height) {
+    throw new VideoError('无法读取视频尺寸，不能裁剪/导出', 'NO_DIMENSIONS', 422);
+  }
+
+  const duration = Math.max(0, Number(meta.duration) || 0);
+  const start = clamp(Number(options.start) || 0, 0, Math.max(0, duration - 0.01));
+  const wanted = Number(options.duration) > 0 ? Number(options.duration) : duration - start;
+  const span = clamp(wanted, 0.01, Math.max(0.01, duration - start));
+
+  const crop = options.crop ? normalizeCrop(options.crop, size) : null;
+  const chain = (options.filters ?? []).filter(Boolean).map(String);
+  if (crop && (crop.width !== size.width || crop.height !== size.height || crop.x || crop.y)) {
+    chain.push(`crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`);
+  }
+
+  await fs.mkdir(path.dirname(options.output), { recursive: true });
+
+  const args = ['-hide_banner', '-loglevel', 'error', '-y'];
+  if (start > 0) args.push('-ss', start.toFixed(3));
+  args.push('-i', options.input);
+  if (span > 0) args.push('-t', span.toFixed(3));
+  if (chain.length) args.push('-vf', chain.join(','));
+  args.push('-map', '0:v:0', '-map', '0:a?');
+  args.push('-c:v', 'libx264', '-preset', options.preset || 'veryfast', '-crf', String(options.crf ?? 20));
+  args.push('-pix_fmt', 'yuv420p');
+  args.push('-c:a', 'aac', '-b:a', '160k');
+  args.push('-movflags', '+faststart');
+  args.push(options.output);
+
+  try {
+    await exec(binaries.ffmpeg, args, { timeout: EXEC_TIMEOUT_MS, cwd: options.cwd });
+  } catch (err) {
+    await fs.rm(options.output, { force: true }).catch(() => {});
+    throw new VideoError(`视频导出失败：${tail(err.stderr || err.message)}`, 'EXPORT_FAILED', 422);
+  }
+
+  const outMeta = await probeVideo(options.output).catch(() => null);
+  return {
+    output: options.output,
+    width: outMeta?.width ?? crop?.width ?? size.width,
+    height: outMeta?.height ?? crop?.height ?? size.height,
+    start,
+    duration: outMeta?.duration ?? span,
+  };
+}
+
 const filmstripCache = new Map();
 
 /**
@@ -465,6 +552,10 @@ function firstFinite(values, fallback = 0) {
   return fallback;
 }
 
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
 function tail(text, limit = 500) {
   const value = String(text ?? '').trim();
   if (!value) return '未知错误';
@@ -507,6 +598,7 @@ function exec(file, args, options = {}) {
       args,
       {
         windowsHide: true,
+        cwd: options.cwd,
         timeout: options.timeout ?? 30000,
         maxBuffer: options.maxBuffer ?? 16 * 1024 * 1024,
         encoding: 'utf8',

@@ -13,12 +13,15 @@
 import { computed, markRaw, reactive, readonly, shallowRef } from 'vue';
 
 import {
+  cutVideo as cutVideoFile,
+  detectVideoWatermark,
   extractVideoAudio,
   extractVideoFrames,
   fetchFilmstrip,
   fetchVideoHealth,
   formatDuration,
   probeLibraryVideo,
+  removeVideoWatermark,
 } from '../lib/library.js';
 import { refreshLibrary, setDir as setLibraryDir } from './useLibrary.js';
 import { onLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
@@ -52,6 +55,31 @@ const state = reactive({
     dir: '', // 空 = 关键帧/<视频名>
   },
   audio: { format: 'mp3', name: '', dir: '音频' },
+  /**
+   * 视频裁剪 / 切断 / 水印去除。
+   * 裁剪框用 0..1 的归一化坐标（与 Concat 的 Crop 参数一致），
+   * 真正发给服务端时才换算成像素，这样窗口尺寸变化不会改变裁剪范围。
+   */
+  edit: {
+    trimStart: 0,
+    // 0 = 到结尾；UI 改结束时间时换算成 duration
+    trimDuration: 0,
+    cropEnabled: false,
+    crop: { x: 0.08, y: 0.08, width: 0.84, height: 0.84 },
+    watermark: {
+      status: 'idle', // idle | detecting | ready | removing
+      time: 0,
+      preview: null,
+      mask: null,
+      coverage: 0,
+      engineHint: 'unblend',
+      params: null,
+      engine: 'auto',
+      error: '',
+      result: null,
+    },
+    output: { dir: '视频处理', cutName: '', watermarkName: '' },
+  },
 });
 
 /** <video> 元素用 shallowRef 保存，避免 Vue 深度代理 DOM。 */
@@ -83,6 +111,69 @@ const ffmpegReady = computed(() => Boolean(state.health.ffmpeg?.available));
 const manualTimes = computed(() => [...state.marks].sort((a, b) => a - b));
 const frameStep = computed(() => (fps.value > 0 ? 1 / fps.value : 1 / 25));
 const canExtract = computed(() => ffmpegReady.value && hasVideo.value && !state.busy && Number(state.meta?.duration) > 0);
+
+/** 旋转后用户看到的画面尺寸：裁剪框、水印掩膜都以它为准。 */
+const displaySize = computed(() => {
+  const meta = state.meta;
+  if (!meta) return { width: 0, height: 0 };
+  const rotation = Math.abs(Number(meta.rotation) || 0) % 360;
+  const swap = rotation === 90 || rotation === 270;
+  return { width: Number(swap ? meta.height : meta.width) || 0, height: Number(swap ? meta.width : meta.height) || 0 };
+});
+
+/** 切断区间：起止都在 [0, duration] 内，duration=0 表示保留到结尾。 */
+const trimRange = computed(() => {
+  const total = Number(state.meta?.duration) || 0;
+  if (!total) return { start: 0, end: 0, duration: 0 };
+  const start = Math.min(Math.max(0, Number(state.edit.trimStart) || 0), Math.max(0, total - 0.05));
+  const wanted = Number(state.edit.trimDuration) || 0;
+  const end = wanted > 0 ? Math.min(total, start + wanted) : total;
+  return { start, end: Math.max(start, end), duration: Math.max(0, end - start) };
+});
+
+/** 归一化裁剪框 → 像素；未启用时返回 null。 */
+const cropRect = computed(() => {
+  if (!state.edit.cropEnabled) return null;
+  const size = displaySize.value;
+  if (!size.width || !size.height) return null;
+  const crop = state.edit.crop;
+  return {
+    x: Math.round(crop.x * size.width),
+    y: Math.round(crop.y * size.height),
+    width: Math.round(crop.width * size.width),
+    height: Math.round(crop.height * size.height),
+  };
+});
+
+const editBusy = computed(
+  () => state.busy || ['detecting', 'removing'].includes(state.edit.watermark.status),
+);
+const canEdit = computed(() => ffmpegReady.value && hasVideo.value && !editBusy.value);
+
+function defaultWatermarkState() {
+  return {
+    status: 'idle',
+    time: 0,
+    preview: null,
+    mask: null,
+    coverage: 0,
+    engineHint: 'unblend',
+    params: null,
+    engine: 'auto',
+    error: '',
+    result: null,
+  };
+}
+
+/** 切换视频时清空裁剪/水印现场，避免把上一个视频的掩膜用到新视频上。 */
+function resetEditState() {
+  state.edit.trimStart = 0;
+  state.edit.trimDuration = 0;
+  state.edit.cropEnabled = false;
+  state.edit.crop = { x: 0.08, y: 0.08, width: 0.84, height: 0.84 };
+  state.edit.watermark = defaultWatermarkState();
+  state.edit.output = { dir: '视频处理', cutName: '', watermarkName: '' };
+}
 
 function setStatus(message) {
   state.status = message;
@@ -121,6 +212,7 @@ export function resetSession() {
   state.error = '';
   state.status = '';
   state.progress = '';
+  resetEditState();
   resetMarkHistory();
 }
 
@@ -165,6 +257,7 @@ export async function selectVideo(pathOrEntry) {
   state.filmstrip = [];
   state.marks = [];
   state.lastExtract = null;
+  resetEditState();
   resetMarkHistory();
 
   void checkVideoHealth();
@@ -431,6 +524,205 @@ export async function extractAudio() {
   }
 }
 
+// --------------------------------------------------------------- 裁剪 / 切断 / 水印
+
+export function setEditOption(key, value) {
+  if (key === 'trimStart' || key === 'trimDuration') {
+    state.edit[key] = Math.max(0, Number(value) || 0);
+    return;
+  }
+  if (key === 'cropEnabled') {
+    state.edit.cropEnabled = Boolean(value);
+    return;
+  }
+  if (key in state.edit) state.edit[key] = value;
+}
+
+/** 裁剪框按比例设置；保证框在画面内且不小于 5%。 */
+export function setCropField(key, value) {
+  if (!['x', 'y', 'width', 'height'].includes(key)) return;
+  const next = { ...state.edit.crop, [key]: Math.min(1, Math.max(0, Number(value) || 0)) };
+  const x = next.x;
+  const y = next.y;
+  state.edit.crop = {
+    x,
+    y,
+    width: Math.min(1 - x, Math.max(0.05, next.width)),
+    height: Math.min(1 - y, Math.max(0.05, next.height)),
+  };
+}
+
+/** 时间轴上直接指定结束点，内部换算成 duration（0 表示到结尾）。 */
+export function setTrimEnd(seconds) {
+  const end = Math.max(0, Number(seconds) || 0);
+  const total = Number(state.meta?.duration) || 0;
+  const start = trimRange.value.start;
+  if (!total || end >= total - 0.001) {
+    state.edit.trimDuration = 0;
+    return;
+  }
+  state.edit.trimDuration = Math.max(0.05, end - start);
+}
+
+export function setOutputOption(key, value) {
+  if (!(key in state.edit.output)) return;
+  state.edit.output[key] = value;
+}
+
+export function setWatermarkEngine(engine) {
+  if (!['auto', 'unblend', 'removelogo'].includes(engine)) return;
+  state.edit.watermark.engine = engine;
+}
+
+export function clearWatermark() {
+  state.edit.watermark = defaultWatermarkState();
+  if (!state.busy) setStatus('已清除水印检测结果');
+}
+
+/** 在当前播放位置（或指定秒数）检测水印。 */
+export async function detectWatermark({ time } = {}) {
+  if (!state.activePath) {
+    setError('请先在左侧选择视频');
+    return null;
+  }
+  if (!ffmpegReady.value) {
+    setError(state.health.error || 'FFmpeg 不可用，无法抽帧检测');
+    return null;
+  }
+
+  const raw = Number.isFinite(Number(time)) ? Number(time) : state.currentTime;
+  const at = Math.max(0, Math.min(duration.value || 0, raw));
+  const wm = state.edit.watermark;
+  wm.status = 'detecting';
+  wm.error = '';
+  wm.result = null;
+  wm.preview = null;
+  wm.mask = null;
+  pause();
+  setStatus(`正在第 ${at.toFixed(2)}s 检测水印…`);
+  try {
+    const result = await detectVideoWatermark({ path: state.activePath, time: at, analyze: {} });
+    wm.time = result.time;
+    wm.preview = markRaw(result.preview);
+    wm.mask = markRaw(result.mask);
+    wm.coverage = result.coverage;
+    wm.engineHint = result.engineHint;
+    wm.params = markRaw(result.params);
+    wm.engine = result.engineHint;
+    wm.status = 'ready';
+    seekTo(result.time);
+    setStatus(
+      result.coverage > 0
+        ? `检测到水印：覆盖 ${(result.coverage * 100).toFixed(2)}%，建议 ${result.engineHint}`
+        : '没有检测到水印：可以换一个时间点重试，或手动调整掩膜',
+    );
+    return result;
+  } catch (err) {
+    wm.status = 'idle';
+    wm.error = err.message;
+    setError(`水印检测失败：${err.message}`);
+    return null;
+  }
+}
+
+/** 按当前掩膜去除整段视频的水印，结果写入资源库。 */
+export async function removeWatermark() {
+  const wm = state.edit.watermark;
+  if (!state.activePath) {
+    setError('请先在左侧选择视频');
+    return null;
+  }
+  if (!wm.mask) {
+    setError('请先检测水印区域');
+    return null;
+  }
+  if (!ffmpegReady.value) {
+    setError(state.health.error || 'FFmpeg 不可用，无法导出视频');
+    return null;
+  }
+  if (editBusy.value) return null;
+
+  state.busy = true;
+  wm.status = 'removing';
+  wm.error = '';
+  setStatus(`正在去除水印（${wm.engine === 'auto' ? '自动选择引擎' : wm.engine}）…`);
+  try {
+    const result = await removeVideoWatermark({
+      path: state.activePath,
+      mask: wm.mask,
+      engine: wm.engine,
+      params: wm.params,
+      time: wm.time,
+      start: 0,
+      duration: 0,
+      crop: cropRect.value,
+      dir: state.edit.output.dir || '视频处理',
+      name: state.edit.output.watermarkName || undefined,
+    });
+    wm.status = 'ready';
+    wm.result = result;
+    state.lastExtract = { type: 'watermark', ...result, at: Date.now() };
+    await refreshLibrary({ quiet: true });
+    setLibraryDir(result.entry?.dir || state.edit.output.dir || '视频处理');
+    setStatus(
+      `已输出去水印视频（${result.engine}）→ 资源库/${result.entry?.path ?? ''}`,
+    );
+    return result;
+  } catch (err) {
+    wm.status = 'ready';
+    wm.error = err.message;
+    setError(`去除水印失败：${err.message}`);
+    return null;
+  } finally {
+    state.busy = false;
+    state.progress = '';
+  }
+}
+
+/** 按切断区间 + 裁剪框导出新视频。 */
+export async function cutVideo() {
+  if (!state.activePath) {
+    setError('请先在左侧选择视频');
+    return null;
+  }
+  if (!ffmpegReady.value) {
+    setError(state.health.error || 'FFmpeg 不可用，无法导出视频');
+    return null;
+  }
+  if (editBusy.value) return null;
+
+  const range = trimRange.value;
+  const hasTrim = range.start > 0.01 || range.duration < (duration.value || 0) - 0.01;
+  if (!hasTrim && !cropRect.value) {
+    setError('请先设置切断区间或启用裁剪');
+    return null;
+  }
+
+  state.busy = true;
+  setStatus(`正在导出${hasTrim ? `切断 ${range.start.toFixed(2)}s → ${range.end.toFixed(2)}s` : '裁剪'}…`);
+  try {
+    const result = await cutVideoFile({
+      path: state.activePath,
+      start: range.start,
+      duration: range.duration,
+      crop: cropRect.value,
+      dir: state.edit.output.dir || '视频处理',
+      name: state.edit.output.cutName || undefined,
+    });
+    state.lastExtract = { type: 'cut', ...result, at: Date.now() };
+    await refreshLibrary({ quiet: true });
+    setLibraryDir(result.entry?.dir || state.edit.output.dir || '视频处理');
+    setStatus(`已导出裁剪视频 → 资源库/${result.entry?.path ?? ''}`);
+    return result;
+  } catch (err) {
+    setError(`导出视频失败：${err.message}`);
+    return null;
+  } finally {
+    state.busy = false;
+    state.progress = '';
+  }
+}
+
 export function useVideo() {
   return {
     state: readonly(state),
@@ -446,6 +738,11 @@ export function useVideo() {
     manualTimes,
     frameStep,
     canExtract,
+    displaySize,
+    trimRange,
+    cropRect,
+    editBusy,
+    canEdit,
     canUndoMarks,
     canRedoMarks,
     actions: {
@@ -474,6 +771,15 @@ export function useVideo() {
       setPlayer,
       getPlayer,
       resetSession,
+      setEditOption,
+      setCropField,
+      setTrimEnd,
+      setOutputOption,
+      setWatermarkEngine,
+      clearWatermark,
+      detectWatermark,
+      removeWatermark,
+      cutVideo,
     },
   };
 }

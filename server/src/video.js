@@ -17,6 +17,7 @@ import path from 'node:path';
 
 import {
   VideoError,
+  exportVideo,
   extractAudio,
   extractFrames,
   ffmpegStatus,
@@ -25,6 +26,7 @@ import {
   sanitizePrefix,
 } from './ffmpeg.js';
 import { LibraryError } from './library.js';
+import { detectVideoWatermark, removeVideoWatermark } from './video-watermark.js';
 
 const MAX_FRAMES = 120;
 
@@ -171,6 +173,120 @@ export function createVideoRouter(library) {
         format,
         entry,
       });
+    }),
+  );
+
+  /**
+   * 在某一帧上检测水印，返回预览图 + RLE 掩膜 + 建议的去除引擎。
+   * 视频是静态水印，检测一次即可复用到所有帧（Concat 的遮罩网格思路）。
+   */
+  router.post(
+    '/watermark/detect',
+    express.json({ limit: '16mb' }),
+    wrap(async (req, res) => {
+      const body = req.body ?? {};
+      const { abs, rel } = library.resolve(body.path, { allowRoot: false });
+      const stat = await fs.stat(abs).catch(() => null);
+      if (!stat?.isFile()) throw new LibraryError('视频不存在', 'NOT_FOUND', 404);
+
+      const meta = await probeVideo(abs);
+      const detection = await detectVideoWatermark({
+        input: abs,
+        time: body.time,
+        cacheDir: path.join(library.cacheRoot, 'video-watermark'),
+        analyze: body.analyze ?? {},
+      });
+
+      res.json({
+        ok: true,
+        sourcePath: rel,
+        sourceName: path.basename(abs),
+        duration: meta.duration,
+        fps: meta.fps,
+        ...detection,
+      });
+    }),
+  );
+
+  /**
+   * 去除视频水印：unblend 走逐帧反混合流，removelogo 走 FFmpeg 空间插值。
+   * 结果写入资源库（默认「视频处理」目录），返回新的视频条目。
+   */
+  router.post(
+    '/watermark/remove',
+    express.json({ limit: '16mb' }),
+    wrap(async (req, res) => {
+      const body = req.body ?? {};
+      const { abs, rel } = library.resolve(body.path, { allowRoot: false });
+      const stat = await fs.stat(abs).catch(() => null);
+      if (!stat?.isFile()) throw new LibraryError('视频不存在', 'NOT_FOUND', 404);
+
+      const meta = await probeVideo(abs);
+      const base = path.basename(abs, path.extname(abs));
+      const folderRel = normalizeFolder(body.dir || '视频处理');
+      const requested = String(body.name ?? '').trim() || `${base}-去水印.mp4`;
+      const target = await library.prepareUpload(folderRel, ensureExtension(requested, 'mp4'));
+
+      const started = Date.now();
+      const result = await removeVideoWatermark({
+        input: abs,
+        output: target.abs,
+        mask: body.mask,
+        engine: body.engine,
+        params: body.params,
+        start: body.start,
+        duration: body.duration,
+        crop: body.crop,
+        sampleTime: body.time,
+        cacheDir: path.join(library.cacheRoot, 'video-watermark'),
+        meta,
+      });
+      const entry = await library.entryByRel(target.rel);
+
+      res.status(201).json({
+        ok: true,
+        sourcePath: rel,
+        entry,
+        ...result,
+        elapsedMs: Date.now() - started,
+      });
+    }),
+  );
+
+  /** 视频切断（trim）与裁剪（crop），一次重编码导出，保留音轨。 */
+  router.post(
+    '/cut',
+    jsonBody,
+    wrap(async (req, res) => {
+      const body = req.body ?? {};
+      const { abs, rel } = library.resolve(body.path, { allowRoot: false });
+      const stat = await fs.stat(abs).catch(() => null);
+      if (!stat?.isFile()) throw new LibraryError('视频不存在', 'NOT_FOUND', 404);
+
+      const meta = await probeVideo(abs);
+      const start = Math.max(0, Number(body.start) || 0);
+      const duration = Math.max(0, Number(body.duration) || 0);
+      const crop = body.crop ?? null;
+      if (!start && !duration && !crop) {
+        throw new VideoError('请先设置切断区间或裁剪范围', 'NOTHING_TO_CUT', 422);
+      }
+
+      const base = path.basename(abs, path.extname(abs));
+      const folderRel = normalizeFolder(body.dir || '视频处理');
+      const requested = String(body.name ?? '').trim() || `${base}-裁剪.mp4`;
+      const target = await library.prepareUpload(folderRel, ensureExtension(requested, 'mp4'));
+
+      const result = await exportVideo({
+        input: abs,
+        output: target.abs,
+        start,
+        duration,
+        crop,
+        meta,
+      });
+      const entry = await library.entryByRel(target.rel);
+
+      res.status(201).json({ ok: true, sourcePath: rel, entry, ...result });
     }),
   );
 

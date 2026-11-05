@@ -13,10 +13,11 @@ import { useLibrary } from '../composables/useLibrary.js';
 import { useVideo } from '../composables/useVideo.js';
 import { formatDuration, formatTimecode, libraryFileUrl } from '../lib/library.js';
 
-const { state, duration, fps, frameStep, hasVideo, actions } = useVideo();
+const { state, duration, fps, frameStep, hasVideo, displaySize, cropRect, actions } = useVideo();
 const { entries } = useLibrary();
 
 const videoEl = ref(null);
+const canvasEl = ref(null);
 const trackEl = ref(null);
 
 /** 真实播放位置（秒），由 timeupdate 驱动。 */
@@ -114,6 +115,48 @@ const videoSrc = computed(() => {
   return `/api/library/file?path=${encodeURIComponent(state.activePath)}`;
 });
 
+/**
+ * 裁剪框叠层对齐：
+ * `<video>` 用 object-fit: contain 居中显示，元素盒和真实画面可能留有黑边；
+ * 这里按自然尺寸算出画面在舞台中的实际矩形，叠层用像素定位，窗口缩放时重新测量。
+ */
+const contentRect = ref({ left: 0, top: 0, width: 0, height: 0 });
+let resizeObserver = null;
+
+function measureVideo() {
+  const canvas = canvasEl.value;
+  const video = videoEl.value;
+  if (!canvas || !video) return;
+  const canvasBox = canvas.getBoundingClientRect();
+  const videoBox = video.getBoundingClientRect();
+  // 优先用播放器解出的自然尺寸，保证和 object-fit 真正渲染的区域一致
+  const naturalWidth = Number(video.videoWidth) || displaySize.value.width;
+  const naturalHeight = Number(video.videoHeight) || displaySize.value.height;
+  if (!naturalWidth || !naturalHeight || !videoBox.width || !videoBox.height) return;
+  const scale = Math.min(videoBox.width / naturalWidth, videoBox.height / naturalHeight);
+  const width = naturalWidth * scale;
+  const height = naturalHeight * scale;
+  contentRect.value = {
+    left: videoBox.left - canvasBox.left + (videoBox.width - width) / 2,
+    top: videoBox.top - canvasBox.top + (videoBox.height - height) / 2,
+    width,
+    height,
+  };
+}
+
+const cropOverlayStyle = computed(() => {
+  if (!state.edit.cropEnabled || !cropRect.value) return null;
+  const rect = contentRect.value;
+  if (!rect.width || !rect.height) return null;
+  const crop = state.edit.crop;
+  return {
+    left: `${rect.left + crop.x * rect.width}px`,
+    top: `${rect.top + crop.y * rect.height}px`,
+    width: `${crop.width * rect.width}px`,
+    height: `${crop.height * rect.height}px`,
+  };
+});
+
 const progressPercent = computed(() => {
   const total = duration.value;
   if (!(total > 0)) return 0;
@@ -196,6 +239,7 @@ function onLoadedMetadata() {
   el.volume = state.volume;
   el.muted = state.muted;
   videoError.value = '';
+  measureVideo();
 }
 
 function onTimeUpdate() {
@@ -304,18 +348,29 @@ onMounted(() => {
     el.volume = state.volume;
     el.muted = state.muted;
   }
+  if (typeof ResizeObserver !== 'undefined' && canvasEl.value) {
+    resizeObserver = new ResizeObserver(measureVideo);
+    resizeObserver.observe(canvasEl.value);
+  }
+  window.addEventListener('resize', measureVideo);
+  measureVideo();
 });
 
 onBeforeUnmount(() => {
   // 必须注销，否则卸载后全局还持有已销毁的 DOM
   actions.setPlayer(null);
   stopGifPreview();
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+  }
+  window.removeEventListener('resize', measureVideo);
 });
 </script>
 
 <template>
   <section class="stage">
-    <div class="canvas">
+    <div ref="canvasEl" class="canvas">
       <!-- 元素常驻：没有视频时也保持挂载，onMounted 才能把 player 注册进状态层 -->
       <video
         ref="videoEl"
@@ -331,6 +386,11 @@ onBeforeUnmount(() => {
         @ended="onEnded"
         @error="onVideoError"
       />
+
+      <!-- 裁剪框：对齐 object-fit: contain 后的真实画面区域，框外压暗 -->
+      <div v-if="cropOverlayStyle" class="crop-overlay" :style="cropOverlayStyle" aria-hidden="true">
+        <span class="crop-label">裁剪</span>
+      </div>
 
       <div v-if="!state.activePath" class="stage-empty">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -581,6 +641,27 @@ onBeforeUnmount(() => {
 
 .video.is-hidden {
   visibility: hidden;
+}
+
+/* 裁剪框：透明框内 + 大范围投影压暗框外，边框与主色一致 */
+.crop-overlay {
+  position: absolute;
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.crop-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 1px 5px;
+  border-radius: 0 0 var(--radius-sm) 0;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 
 .stage-empty {

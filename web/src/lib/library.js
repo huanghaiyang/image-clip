@@ -202,6 +202,33 @@ export function fetchVideoHealth() {
   return requestJson('/api/video/health', { cache: 'no-store' });
 }
 
+/** 在视频的某个时间点检测水印，返回预览图 + RLE 掩膜 + 建议引擎。 */
+export function detectVideoWatermark(payload) {
+  return requestJson('/api/video/watermark/detect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+/** 按掩膜去除视频水印，结果写入资源库。 */
+export function removeVideoWatermark(payload) {
+  return requestJson('/api/video/watermark/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+/** 视频切断 + 裁剪导出，结果写入资源库。 */
+export function cutVideo(payload) {
+  return requestJson('/api/video/cut', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
 /** 通过资源库 URL 下载成 Blob（供“转入编辑”使用）。 */
 export async function fetchLibraryBlob(entryOrUrl) {
   const url = typeof entryOrUrl === 'string' ? entryOrUrl : entryOrUrl?.url;
