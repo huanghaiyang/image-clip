@@ -128,6 +128,14 @@ export function moveLibraryItems(paths, target) {
   });
 }
 
+export function copyLibraryItems(paths, target) {
+  return requestJson('/api/library/copy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths, target }),
+  });
+}
+
 export function deleteLibraryItems(paths) {
   return requestJson('/api/library/delete', {
     method: 'POST',

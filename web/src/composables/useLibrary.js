@@ -16,6 +16,7 @@ import {
   fetchLibraryBlob,
   fetchLibraryTree,
   moveLibraryItems,
+  copyLibraryItems,
   renameLibraryItems,
   restoreLibraryVersion,
   uploadLibraryFile,
@@ -540,6 +541,31 @@ export async function moveSelected(targetDir) {
 }
 
 /**
+ * 复制选中的文件 / 文件夹到目标目录（保留原件），支持批量。
+ */
+export async function copySelected(targetDir) {
+  if (!state.selected.length) {
+    setError('请先选择要复制的文件或文件夹');
+    return false;
+  }
+  state.busy = true;
+  try {
+    const result = await copyLibraryItems([...state.selected], targetDir ?? '');
+    await refreshLibrary({ quiet: true });
+    state.selected = [];
+    const failed = failedCount(result);
+    if (failed) setError(`复制部分失败：${failed} 项`);
+    else setStatus(`已复制 ${result.succeeded} 项到 ${targetDir || '根目录'}`);
+    return result.ok;
+  } catch (err) {
+    setError(`复制失败：${err.message}`);
+    return false;
+  } finally {
+    state.busy = false;
+  }
+}
+
+/**
  * 按路径删除文件 / 文件夹（移入回收站，可从回收站恢复）。
  * 供素材面板等不依赖 `state.selected` 的地方复用。
  */
@@ -819,6 +845,7 @@ export function useLibrary() {
       previewBatchRename,
       batchRename,
       moveSelected,
+      copySelected,
       deletePaths,
       deleteSelected,
       deleteFolder,

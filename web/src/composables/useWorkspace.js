@@ -19,7 +19,7 @@ import {
 import { analyzeWith, cropWith } from '../lib/engine.js';
 import { blobToBytes, createZip } from '../lib/zip.js';
 import { onLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
-import { canvasToBlob } from '../lib/imageops.js';
+import { canvasToBlob, cropToBlob, stripExtension } from '../lib/imageops.js';
 
 let uid = 0;
 
@@ -48,6 +48,33 @@ const state = reactive({
 const selected = computed(() => state.items.find((item) => item.id === state.selectedId) ?? null);
 /** 已勾选的素材，按素材列表顺序返回。 */
 const checkedItems = computed(() => state.items.filter((item) => state.checkedIds.includes(item.id)));
+
+/**
+ * 图集（透明裁剪）：把勾选素材各自的内容框换算成归一化坐标后取并集，
+ * 得到「最大 AABB」；再用同一个相对框裁切每张图，序列帧构图才能对齐。
+ */
+const trimAtlas = computed(() => {
+  const list = checkedItems.value.filter((item) => item.bounds && !item.resultEmpty && item.width && item.height);
+  if (!list.length) return null;
+  let left = 1;
+  let top = 1;
+  let right = 0;
+  let bottom = 0;
+  for (const item of list) {
+    const { bounds } = item;
+    left = Math.min(left, bounds.x / item.width);
+    top = Math.min(top, bounds.y / item.height);
+    right = Math.max(right, (bounds.x + bounds.width) / item.width);
+    bottom = Math.max(bottom, (bounds.y + bounds.height) / item.height);
+  }
+  const norm = {
+    x: Math.max(0, left),
+    y: Math.max(0, top),
+    width: Math.min(1, right) - Math.max(0, left),
+    height: Math.min(1, bottom) - Math.max(0, top),
+  };
+  return { count: list.length, items: list, norm };
+});
 const stats = computed(() => {
   const total = state.items.length;
   const ready = state.items.filter((item) => item.bounds && !item.empty).length;
@@ -478,6 +505,75 @@ export async function copyBounds(item) {
   }
 }
 
+/** 把单张素材的透明裁剪结果写入资源库/裁剪结果。 */
+export async function saveTrimmedItem(item) {
+  if (!item?.bounds || item.resultEmpty) {
+    setError('这张图片没有可裁剪的内容');
+    return;
+  }
+  state.busy = true;
+  try {
+    const { saveBlobToLibrary } = await import('./useLibrary.js');
+    const filename = croppedFilename(item.name, 'png');
+    const { blob } = await cropWith(state.engine, item, optionsSnapshot(), {
+      format: 'png',
+      quality: 100,
+      filename,
+    });
+    const entry = await saveBlobToLibrary(blob, filename, '裁剪结果');
+    setStatus(`已保存到资源库：${entry?.path ?? `裁剪结果/${filename}`}`);
+  } catch (err) {
+    setError(`保存到资源库失败：${err.message}`);
+  } finally {
+    state.busy = false;
+  }
+}
+
+/** 按归一化框裁切一张素材（保留 PNG alpha）。 */
+async function cropByNorm(item, norm) {
+  const x = Math.max(0, Math.min(item.width - 1, Math.round(norm.x * item.width)));
+  const y = Math.max(0, Math.min(item.height - 1, Math.round(norm.y * item.height)));
+  const width = Math.max(1, Math.min(item.width - x, Math.round(norm.width * item.width)));
+  const height = Math.max(1, Math.min(item.height - y, Math.round(norm.height * item.height)));
+  const rect = { x, y, width, height };
+  return cropToBlob(item.bitmap, rect, rect, { type: 'image/png' });
+}
+
+/** 图集透明裁剪：所有勾选素材共用最大 AABB，结果写回素材列表，可选存入资源库。 */
+export async function trimAtlasBatch({ saveToLibrary = true } = {}) {
+  const atlas = trimAtlas.value;
+  if (!atlas) {
+    setError('请先在左侧「当前素材」勾选要图集透明裁剪的图片');
+    return;
+  }
+  state.busy = true;
+  let done = 0;
+  let failed = 0;
+  try {
+    const { saveBlobToLibrary } = await import('./useLibrary.js');
+    for (const item of atlas.items) {
+      try {
+        const blob = await cropByNorm(item, atlas.norm);
+        const filename = `${stripExtension(item.name)}-透明裁剪.png`;
+        await addImageBlob(blob, filename);
+        if (saveToLibrary) await saveBlobToLibrary(blob, filename, '裁剪结果');
+        done += 1;
+      } catch (err) {
+        failed += 1;
+        console.warn('[workspace] 图集透明裁剪失败:', item.name, err.message);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    setStatus(
+      `图集透明裁剪完成：${done}/${atlas.count} 张${saveToLibrary ? '，已存入资源库/裁剪结果' : ''}${
+        failed ? `，失败 ${failed} 张` : ''
+      }`,
+    );
+  } finally {
+    state.busy = false;
+  }
+}
+
 /** 挂载时检查 Node 服务端能力（状态栏展示）。 */
 export async function checkServer() {
   try {
@@ -635,6 +731,7 @@ export function useWorkspace() {
     state: readonly(state),
     selected,
     checkedItems,
+    trimAtlas,
     stats,
     canUndoAssets,
     canRedoAssets,
@@ -660,6 +757,8 @@ export function useWorkspace() {
       exportItem,
       exportAll,
       copyBounds,
+      saveTrimmedItem,
+      trimAtlasBatch,
       checkServer,
       toggleTheme,
       recomputeAll,

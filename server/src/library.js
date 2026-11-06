@@ -574,6 +574,33 @@ export function createLibrary(options = {}) {
     return results;
   }
 
+  /**
+   * 复制文件/文件夹到目标目录（保留原件）。
+   * 文件夹递归复制；重名自动加序号，复制到自身子目录会被拒绝。
+   */
+  async function copyPaths(paths, targetDirRel) {
+    if (!Array.isArray(paths) || !paths.length) throw new LibraryError('没有需要复制的项目', 'BAD_INPUT', 400);
+    const { abs: targetDir } = resolve(targetDirRel || '');
+    await fs.mkdir(targetDir, { recursive: true });
+    const results = [];
+
+    for (const rel of paths) {
+      try {
+        const { abs } = resolve(rel, { allowRoot: false });
+        if (!(await exists(abs))) throw new Error('项目不存在');
+        if (path.resolve(targetDir).startsWith(path.resolve(abs) + path.sep)) {
+          throw new Error('不能把文件夹复制到它自己的子目录');
+        }
+        const { abs: dest, name: finalName } = await uniqueTarget(targetDir, path.basename(abs));
+        await fs.cp(abs, dest, { recursive: true });
+        results.push({ from: rel, ok: true, to: toRel(dest), name: finalName });
+      } catch (err) {
+        results.push({ from: rel, ok: false, error: err.message });
+      }
+    }
+    return results;
+  }
+
   // ------------------------------------------------------------- 回收站
 
   /** 删除前统计目录的真实占用（回收站列表里文件夹不再是 0 B）。 */
@@ -1091,6 +1118,7 @@ export function createLibrary(options = {}) {
     thumbnail,
     renameItems,
     movePaths,
+    copyPaths,
     trashPaths,
     listTrash,
     trashContents,
@@ -1281,6 +1309,20 @@ export function createLibraryRouter(library) {
     jsonBody,
     wrap(async (req, res) => {
       const results = await library.renameItems(req.body?.items);
+      res.json({
+        ok: results.every((r) => r.ok !== false),
+        total: results.length,
+        succeeded: results.filter((r) => r.ok !== false).length,
+        results,
+      });
+    }),
+  );
+
+  router.post(
+    '/copy',
+    jsonBody,
+    wrap(async (req, res) => {
+      const results = await library.copyPaths(req.body?.paths, req.body?.target ?? '');
       res.json({
         ok: results.every((r) => r.ok !== false),
         total: results.length,

@@ -1,13 +1,15 @@
 <script setup>
 /** 右侧检查器：检测参数 / 当前结果 / 导出（对应 Figma 的右侧属性面板）。 */
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import RangeField from './ui/RangeField.vue';
 import SwitchField from './ui/SwitchField.vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import { useWorkspace } from '../composables/useWorkspace.js';
 import { formatBytes, formatRatio } from '../lib/imaging.js';
 
-const { state, selected, actions, meta } = useWorkspace();
+const { state, selected, checkedItems, trimAtlas, actions, meta } = useWorkspace();
+
+const atlasSaveToLibrary = ref(true);
 
 const items = computed(() => state.items);
 const exportable = computed(() => items.value.filter((item) => item.bounds && !item.resultEmpty));
@@ -31,6 +33,15 @@ const shrunkBytesHint = computed(() => {
 });
 
 const qualityVisible = computed(() => state.output.format !== 'png');
+
+const atlasSummary = computed(() => {
+  const atlas = trimAtlas.value;
+  if (!atlas) return '';
+  const { norm } = atlas;
+  return `${(norm.x * 100).toFixed(1)}% , ${(norm.y * 100).toFixed(1)}% · ${(norm.width * 100).toFixed(1)}% × ${(
+    norm.height * 100
+  ).toFixed(1)}%`;
+});
 </script>
 
 <template>
@@ -169,7 +180,51 @@ const qualityVisible = computed(() => state.output.format !== 'png');
             <button class="btn" type="button" @click="actions.copyBounds(selected)">复制坐标</button>
             <button class="btn" type="button" @click="actions.recomputeAll()">重新检测</button>
           </div>
+          <button
+            class="btn is-block is-ghost mt-6"
+            type="button"
+            :disabled="state.busy || !selected.bounds || selected.resultEmpty"
+            @click="actions.saveTrimmedItem(selected)"
+          >
+            存入资源库
+          </button>
         </template>
+      </section>
+
+      <!-- 图集透明裁剪 -->
+      <section class="section">
+        <h3 class="section-title">图集透明裁剪（最大 AABB）</h3>
+        <p class="muted note">
+          先在左侧「当前素材」勾选图片：各图的内容框换算成相对坐标后取并集，用同一个最大 AABB 裁切，序列帧的取景保持一致。
+        </p>
+
+        <template v-if="trimAtlas">
+          <dl class="kv">
+            <div class="kv-row">
+              <dt>已勾选</dt>
+              <dd class="mono">{{ trimAtlas.count }} 张</dd>
+            </div>
+            <div class="kv-row">
+              <dt>相对取景</dt>
+              <dd class="mono accent">{{ atlasSummary }}</dd>
+            </div>
+          </dl>
+        </template>
+        <p v-else class="muted empty">还没有勾选可裁剪的素材（勾选 {{ checkedItems.length }} 张）。</p>
+
+        <label class="check-row">
+          <input v-model="atlasSaveToLibrary" type="checkbox" />
+          <span>保存到资源库/裁剪结果</span>
+        </label>
+        <button
+          class="btn is-primary is-block"
+          type="button"
+          :disabled="state.busy || !trimAtlas"
+          @click="actions.trimAtlasBatch({ saveToLibrary: atlasSaveToLibrary })"
+        >
+          图集透明裁剪{{ trimAtlas ? ` ${trimAtlas.count} 张` : '' }}
+        </button>
+        <p class="muted note">结果会作为新素材加入左侧列表，原图保持不变。</p>
       </section>
 
       <!-- 导出 -->
@@ -297,6 +352,26 @@ const qualityVisible = computed(() => state.output.format !== 'png');
 
 .row-actions .btn {
   flex: 1;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0;
+  color: var(--text-2);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.check-row input {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--accent);
+}
+
+.mt-6 {
+  margin-top: 6px;
 }
 
 .color-row {

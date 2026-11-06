@@ -236,6 +236,13 @@ async function moveAll() {
   await actions.moveSelected(moveTarget.value);
 }
 
+/** 复制到所选目录（保留原件，支持批量）。 */
+async function copyAll() {
+  if (!state.selected.length) return;
+  moveOpen.value = false;
+  await actions.copySelected(moveTarget.value);
+}
+
 async function openVideo(entry) {
   setMode('video');
   await videoActions.selectVideo(entry);
@@ -455,7 +462,7 @@ function fileInfo(entry) {
 
       <!-- 移动 / 删除 -->
       <section v-if="state.selected.length" class="block">
-        <div class="block-title">移动到</div>
+        <div class="block-title">移动 / 复制</div>
         <div class="move-row">
           <div class="tree-select">
             <button
@@ -497,6 +504,15 @@ function fileInfo(entry) {
             </template>
           </div>
           <button class="btn is-mini" type="button" :disabled="state.busy" @click="moveAll">移动</button>
+          <button
+            class="btn is-mini is-ghost"
+            type="button"
+            title="复制选中的文件/文件夹到该目录，原文件保留"
+            :disabled="state.busy"
+            @click="copyAll"
+          >
+            复制
+          </button>
         </div>
         <button class="btn is-block is-ghost is-danger" type="button" :disabled="state.busy" @click="removeAll">
           删除选中项
