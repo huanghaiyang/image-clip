@@ -207,6 +207,8 @@ const importNote = ref('');
 
 /** 已经在素材库里的素材不需要重复导入，只统计还没落盘的 */
 const importableItems = computed(() => checkedItems.value.filter((item) => !item.libraryPath));
+/** 当前素材里所有还没录入素材库的内容（含裁剪 / 抠图等编辑结果）。 */
+const pendingImportItems = computed(() => items.value.filter((item) => !item.libraryPath));
 const allChecked = computed(() => items.value.length > 0 && checkedItems.value.length === items.value.length);
 const someChecked = computed(() => checkedItems.value.length > 0 && !allChecked.value);
 
@@ -248,9 +250,8 @@ function toggleCheckAll() {
   importNote.value = '';
 }
 
-/** 把勾选的当前素材逐个写回素材库（根目录），已入库的自动跳过。 */
-async function importCheckedToLibrary() {
-  const targets = importableItems.value;
+/** 把当前素材逐个写回素材库（根目录），已入库的自动跳过。 */
+async function importItemsToLibrary(targets) {
   if (!targets.length || importing.value) return;
   importing.value = true;
   importNote.value = '';
@@ -274,6 +275,16 @@ async function importCheckedToLibrary() {
   } finally {
     importing.value = false;
   }
+}
+
+/** 只录入勾选的素材。 */
+function importCheckedToLibrary() {
+  return importItemsToLibrary(importableItems.value);
+}
+
+/** 一次性把「当前素材」里所有未入库的内容（含编辑结果）录入素材库。 */
+function importAllToLibrary() {
+  return importItemsToLibrary(pendingImportItems.value);
 }
 
 // 资源库刷新后（删除 / 外部改动），把已经不存在于列表的选中项清掉
@@ -362,14 +373,26 @@ onMounted(() => {
             />
             <span>全选{{ checkedItems.length ? `（已选 ${checkedItems.length}）` : '' }}</span>
           </label>
-          <button
-            class="btn is-mini"
-            type="button"
-            :disabled="importing || !importableItems.length"
-            @click="importCheckedToLibrary"
-          >
-            {{ importing ? '导入中…' : `保存选中到素材库（${importableItems.length}）` }}
-          </button>
+          <div class="workspace-actions">
+            <button
+              class="btn is-mini"
+              type="button"
+              :disabled="importing || !importableItems.length"
+              :title="`把勾选且未入库的 ${importableItems.length} 张写入素材库`"
+              @click="importCheckedToLibrary"
+            >
+              {{ importing ? '导入中…' : `选中入库（${importableItems.length}）` }}
+            </button>
+            <button
+              class="btn is-mini is-ghost"
+              type="button"
+              :disabled="importing || !pendingImportItems.length"
+              title="把当前素材中所有未入库的内容（含裁剪、抠图等编辑结果）一次性录入素材库"
+              @click="importAllToLibrary"
+            >
+              {{ importing ? '导入中…' : `全部入库（${pendingImportItems.length}）` }}
+            </button>
+          </div>
         </div>
         <p v-if="importNote" class="workspace-note">{{ importNote }}</p>
 
@@ -1006,6 +1029,13 @@ onMounted(() => {
   justify-content: space-between;
   gap: 8px;
   padding: 2px 2px 8px;
+  flex-wrap: wrap;
+}
+
+.workspace-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
 }
 
 .workspace-check-all {
