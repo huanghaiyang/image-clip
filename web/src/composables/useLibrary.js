@@ -149,8 +149,6 @@ const breadcrumbs = computed(() => {
 
 const canGoUp = computed(() => Boolean(state.currentDir));
 
-const moveTargets = computed(() => [{ path: '', name: '资源库根目录' }, ...folders.value]);
-
 /** 查重结果只在扫描时所在的目录里生效；切换目录后自动隐藏标记。 */
 const duplicateGroups = computed(() => (state.duplicates.dir === state.currentDir ? state.duplicates.groups : []));
 const duplicatePaths = computed(() => new Set(duplicateGroups.value.flatMap((group) => group.paths)));
@@ -792,7 +790,6 @@ export function useLibrary() {
     previewList,
     breadcrumbs,
     canGoUp,
-    moveTargets,
     duplicateGroups,
     duplicatePaths,
     duplicateGroupOf,

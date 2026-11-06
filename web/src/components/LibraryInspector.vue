@@ -16,7 +16,7 @@ import { useAudio } from '../composables/useAudio.js';
 import { setMode } from '../composables/useAppMode.js';
 import { formatDuration, formatSize, fetchLibraryVersions } from '../lib/library.js';
 
-const { state, selectedEntries, selectedFolders, selectedSummary, moveTargets, actions } = useLibrary();
+const { state, folders, selectedEntries, selectedFolders, selectedSummary, actions } = useLibrary();
 const { confirm } = useConfirm();
 const { actions: videoActions } = useVideo();
 const { actions: audioActions } = useAudio();
@@ -56,6 +56,63 @@ const config = ref({
 });
 
 const moveTarget = ref('');
+const moveOpen = ref(false);
+const expandedFolders = ref(new Set());
+
+/** 移动目标：根目录 + 所有子目录，按树形顺序（DFS）展开成可见行。 */
+const moveRows = computed(() => {
+  const children = new Map();
+  for (const folder of folders.value) {
+    const parent = folder.parent || '';
+    const list = children.get(parent);
+    if (list) list.push(folder);
+    else children.set(parent, [folder]);
+  }
+  for (const list of children.values()) list.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+
+  const rows = [];
+  const walk = (parent, depth) => {
+    for (const folder of children.get(parent) ?? []) {
+      const hasChildren = children.has(folder.path);
+      const expanded = expandedFolders.value.has(folder.path);
+      rows.push({ path: folder.path, name: folder.name, depth, hasChildren, expanded });
+      if (expanded) walk(folder.path, depth + 1);
+    }
+  };
+
+  const rootExpanded = expandedFolders.value.has('');
+  rows.push({ path: '', name: '资源库根目录', depth: 0, hasChildren: children.has(''), expanded: rootExpanded });
+  if (rootExpanded) walk('', 1);
+  return rows;
+});
+
+const moveTargetName = computed(() => {
+  if (!moveTarget.value) return '资源库根目录';
+  return folders.value.find((folder) => folder.path === moveTarget.value)?.name ?? moveTarget.value;
+});
+
+function toggleMovePicker() {
+  if (!moveOpen.value) {
+    // 首次打开展开全部层级，之后保留用户折叠状态
+    if (!expandedFolders.value.size) expandedFolders.value = new Set(['', ...folders.value.map((folder) => folder.path)]);
+    moveOpen.value = true;
+    return;
+  }
+  moveOpen.value = false;
+}
+
+function toggleMoveFolder(event, path) {
+  event.stopPropagation();
+  const next = new Set(expandedFolders.value);
+  if (next.has(path)) next.delete(path);
+  else next.add(path);
+  expandedFolders.value = next;
+}
+
+function pickMoveTarget(row) {
+  moveTarget.value = row.path;
+  moveOpen.value = false;
+}
 
 const preview = computed(() => {
   const list = batchList.value;
@@ -175,6 +232,7 @@ async function removeFolder() {
 
 async function moveAll() {
   if (!state.selected.length) return;
+  moveOpen.value = false;
   await actions.moveSelected(moveTarget.value);
 }
 
@@ -399,11 +457,45 @@ function fileInfo(entry) {
       <section v-if="state.selected.length" class="block">
         <div class="block-title">移动到</div>
         <div class="move-row">
-          <select v-model="moveTarget" class="select">
-            <option v-for="target in moveTargets" :key="target.path || '__root__'" :value="target.path">
-              {{ target.name }}
-            </option>
-          </select>
+          <div class="tree-select">
+            <button
+              class="select tree-trigger"
+              type="button"
+              :title="moveTargetName"
+              :aria-expanded="moveOpen"
+              @click="toggleMovePicker"
+            >
+              <span class="tree-current">{{ moveTargetName }}</span>
+            </button>
+            <template v-if="moveOpen">
+              <div class="tree-overlay" @click="moveOpen = false" />
+              <div class="tree-pop" role="tree">
+                <div
+                  v-for="row in moveRows"
+                  :key="row.path || '__root__'"
+                  class="tree-option"
+                  :class="{ 'is-active': row.path === moveTarget }"
+                  :style="{ paddingLeft: `${8 + row.depth * 14}px` }"
+                  role="treeitem"
+                  :aria-selected="row.path === moveTarget"
+                  :aria-expanded="row.hasChildren ? row.expanded : undefined"
+                  @click="pickMoveTarget(row)"
+                >
+                  <button
+                    v-if="row.hasChildren"
+                    class="tree-toggle"
+                    type="button"
+                    :title="row.expanded ? '折叠' : '展开'"
+                    @click="toggleMoveFolder($event, row.path)"
+                  >
+                    {{ row.expanded ? '▾' : '▸' }}
+                  </button>
+                  <span v-else class="tree-toggle is-empty" />
+                  <span class="tree-name">{{ row.name }}</span>
+                </div>
+              </div>
+            </template>
+          </div>
           <button class="btn is-mini" type="button" :disabled="state.busy" @click="moveAll">移动</button>
         </div>
         <button class="btn is-block is-ghost is-danger" type="button" :disabled="state.busy" @click="removeAll">
@@ -661,6 +753,103 @@ function fileInfo(entry) {
   background: var(--panel-2);
   color: var(--text-2);
   font-size: 11px;
+}
+
+/* 移动到：树形选择器 */
+.tree-select {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.tree-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  padding: 0 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.tree-trigger::after {
+  content: '▾';
+  flex: none;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.tree-current {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+
+.tree-pop {
+  position: absolute;
+  z-index: 21;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+}
+
+.tree-option {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: var(--text-2);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tree-option:hover {
+  background: rgba(13, 153, 255, 0.12);
+}
+
+.tree-option.is-active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.tree-toggle {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 9px;
+  line-height: 14px;
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.tree-toggle.is-empty {
+  cursor: default;
+  opacity: 0;
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hint {
