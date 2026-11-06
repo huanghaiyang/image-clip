@@ -208,7 +208,6 @@ const canRedoAssets = computed(() => redo.length > 0);
 
 /** 导入单个图片文件：解码 → 建立素材项 → 自动检测 AABB。 */
 async function addOneFile(file) {
-  console.trace('[debug][asset] add', file?.name, new Error().stack);
   const buffer = await file.arrayBuffer();
   const { bitmap, imageData, width, height } = await decodeToRgba(file);
   const item = reactive({

@@ -23,7 +23,7 @@ import {
 import { resizeMaskBilinear } from '@shared/cutout.js';
 import { polygonArea, rasterizePolygon, scalePolygon } from '@shared/selection.js';
 
-import { fetchCutoutStatus, segmentImage } from '../lib/cutout/index.js';
+import { cutoutConcurrency, fetchCutoutStatus, segmentImage } from '../lib/cutout/index.js';
 
 import { useWorkspace } from './useWorkspace.js';
 import { saveBlobToLibrary } from './useLibrary.js';
@@ -1211,67 +1211,83 @@ export async function batchBackgroundRemoval({ saveToLibrary = false } = {}) {
 
   const results = [];
   let failed = 0;
-  try {
-    for (const item of all) {
-      try {
-        let alpha = null;
-        if (useAi) {
-          // Worker 会转移传入内存的所有权，必须复制一份
-          const segmented = await segmentImage({
-            modelId: model,
-            rgba: new Uint8ClampedArray(item.imageData.data),
-            width: item.width,
-            height: item.height,
-          });
-          alpha = segmented.alpha;
-        }
-        const selection = polygonNorm
-          ? rasterizePolygon(
-              polygonNorm.map((point) => ({ x: point.x * item.width, y: point.y * item.height })),
-              item.width,
-              item.height,
-            )
-          : null;
-        const built = alpha
-          ? buildSubjectMask(alpha, item.width, item.height, {
-              feather: options.feather,
-              erode: options.erode,
-              selection,
-              selectionMode: selection ? options.selectionMode : 'all',
-            })
-          : buildBackgroundMask(item.imageData.data, item.width, item.height, {
-              colors,
-              tolerance: options.tolerance,
-              connected: options.connected,
-              feather: options.feather,
-              erode: options.erode,
-              selection,
-              selectionMode: selection ? options.selectionMode : 'all',
-            });
-        const applied = applyMaskToRgba(item.imageData.data, item.width, item.height, built.mask, {
-          decontaminate: options.decontaminate,
-          colors,
-        });
+  // AI 推理在 Worker 池里跑，可以同时处理多张；颜色参数模式仍逐张处理。
+  const limit = useAi ? Math.min(cutoutConcurrency(), all.length) : 1;
 
-        const canvas = createCanvas(item.width, item.height);
-        canvas
-          .getContext('2d')
-          .putImageData(new ImageData(new Uint8ClampedArray(applied.data), item.width, item.height), 0, 0);
-        const blob = await new Promise((resolve, reject) => {
-          canvas.toBlob((result) => (result ? resolve(result) : reject(new Error('PNG 编码失败'))), 'image/png');
+  async function processItem(item) {
+    try {
+      let alpha = null;
+      if (useAi) {
+        // Worker 会转移传入内存的所有权，必须复制一份
+        const segmented = await segmentImage({
+          modelId: model,
+          rgba: new Uint8ClampedArray(item.imageData.data),
+          width: item.width,
+          height: item.height,
         });
-        const filename = `${stripExtension(item.name)}-去背景.png`;
-        await workspace.actions.addImageBlob(blob, filename);
-        if (saveToLibrary) await saveBlobToLibrary(blob, filename, '抠图结果');
-        results.push({ name: filename, coverage: built.coverage });
-      } catch (err) {
-        failed += 1;
-        console.warn('[bgremove] 批量抠图失败:', item.name, err.message);
+        alpha = segmented.alpha;
       }
+      const selection = polygonNorm
+        ? rasterizePolygon(
+            polygonNorm.map((point) => ({ x: point.x * item.width, y: point.y * item.height })),
+            item.width,
+            item.height,
+          )
+        : null;
+      const built = alpha
+        ? buildSubjectMask(alpha, item.width, item.height, {
+            feather: options.feather,
+            erode: options.erode,
+            selection,
+            selectionMode: selection ? options.selectionMode : 'all',
+          })
+        : buildBackgroundMask(item.imageData.data, item.width, item.height, {
+            colors,
+            tolerance: options.tolerance,
+            connected: options.connected,
+            feather: options.feather,
+            erode: options.erode,
+            selection,
+            selectionMode: selection ? options.selectionMode : 'all',
+          });
+      const applied = applyMaskToRgba(item.imageData.data, item.width, item.height, built.mask, {
+        decontaminate: options.decontaminate,
+        colors,
+      });
+
+      const canvas = createCanvas(item.width, item.height);
+      canvas
+        .getContext('2d')
+        .putImageData(new ImageData(new Uint8ClampedArray(applied.data), item.width, item.height), 0, 0);
+      const blob = await new Promise((resolve, reject) => {
+        canvas.toBlob((result) => (result ? resolve(result) : reject(new Error('PNG 编码失败'))), 'image/png');
+      });
+      const filename = `${stripExtension(item.name)}-去背景.png`;
+      await workspace.actions.addImageBlob(blob, filename);
+      if (saveToLibrary) await saveBlobToLibrary(blob, filename, '抠图结果');
+      return { name: filename, coverage: built.coverage };
+    } catch (err) {
+      console.warn('[bgremove] 批量抠图失败:', item.name, err.message);
+      return null;
+    } finally {
       state.batch.done += 1;
-      // 让出一帧，避免连续计算把界面卡住
-      await new Promise((resolve) => setTimeout(resolve, 0));
     }
+  }
+
+  try {
+    const queue = [...all];
+    await Promise.all(
+      Array.from({ length: limit }, async () => {
+        while (queue.length) {
+          const item = queue.shift();
+          const result = await processItem(item);
+          if (result) results.push(result);
+          else failed += 1;
+          // 让出一帧，避免连续计算把界面卡住
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+      }),
+    );
 
     setStatus(
       `批量抠图完成：${results.length}/${all.length} 张 · ${Math.round(performance.now() - started)}ms` +
