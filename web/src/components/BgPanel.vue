@@ -15,13 +15,20 @@ import RangeField from './ui/RangeField.vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import SwitchField from './ui/SwitchField.vue';
 
-const { selected } = useWorkspace();
+const { selected, state: workspaceState } = useWorkspace();
 const { state, activeEntry, cutoutModels, actions } = useBgRemoval();
 
 const entry = computed(() => activeEntry.value);
 const item = computed(() => selected.value ?? null);
 const customColor = ref('#ffffff');
 const saveToLibrary = ref(false);
+const batchSaveToLibrary = ref(false);
+const itemCount = computed(() => workspaceState.items.length);
+
+const modeTabs = [
+  { value: 'ai', label: 'AI 抠图', hint: '用浏览器内模型自动识别主体' },
+  { value: 'color', label: '参数抠图', hint: '按背景色与容差去除' },
+];
 
 const toolOptions = [
   { value: 'lasso', label: '套索', hint: '手绘或智能选区，限定去除范围或保护内容' },
@@ -71,6 +78,11 @@ function runAi() {
 function addCustomColor() {
   actions.useColor(customColor.value);
 }
+
+function runBatch() {
+  if (!entry.value || state.batch.running || state.busy) return;
+  void actions.batchBackgroundRemoval({ saveToLibrary: batchSaveToLibrary.value });
+}
 </script>
 
 <template>
@@ -85,11 +97,23 @@ function addCustomColor() {
 
       <template v-else>
         <section class="section">
+          <SegmentedControl
+            :model-value="state.tab"
+            :options="modeTabs"
+            block
+            @update:model-value="actions.setTab($event)"
+          />
+          <p v-if="entry.mode === 'none'" class="hint">
+            当前未抠图：在「AI 抠图」运行模型，或在「参数抠图」开始抠图后才会生成掩膜。
+          </p>
+        </section>
+
+        <section class="section">
           <h3 class="section-title">工具</h3>
           <SegmentedControl :model-value="state.tool" :options="toolOptions" size="sm" block @update:model-value="actions.setTool($event)" />
         </section>
 
-        <section class="section">
+        <section v-if="state.tab === 'color'" class="section">
           <div class="section-head">
             <h3 class="section-title">背景色</h3>
             <button class="btn is-ghost is-mini" type="button" @click="actions.autoDetectColors()">重新自动识别</button>
@@ -126,7 +150,7 @@ function addCustomColor() {
           </p>
         </section>
 
-        <section class="section">
+        <section v-if="state.tab === 'ai'" class="section">
           <div class="section-head">
             <h3 class="section-title">AI 精准抠像</h3>
             <span v-if="entry.ai.alpha" class="chip">已接管掩膜</span>
@@ -159,7 +183,7 @@ function addCustomColor() {
           </p>
         </section>
 
-        <section class="section">
+        <section v-if="state.tab === 'color'" class="section">
           <h3 class="section-title">去除参数</h3>
           <RangeField
             label="颜色容差"
@@ -192,6 +216,42 @@ function addCustomColor() {
             :max="10"
             suffix="px"
             hint="先腐蚀再羽化，可去掉背景色残留的一圈描边"
+            @update:model-value="actions.setOption('erode', $event)"
+          />
+          <SwitchField
+            label="边缘颜色反混合"
+            :model-value="entry.options.decontaminate"
+            hint="按公式反算前景色，消除半透明边缘的底色污染"
+            @update:model-value="actions.setOption('decontaminate', $event)"
+          />
+          <button
+            v-if="entry.mode === 'none'"
+            class="btn is-primary is-block mt-8"
+            type="button"
+            @click="actions.startColorRemoval()"
+          >
+            开始参数抠图
+          </button>
+        </section>
+
+        <section v-if="state.tab === 'ai'" class="section">
+          <h3 class="section-title">边缘处理</h3>
+          <RangeField
+            label="边缘羽化"
+            :model-value="entry.options.feather"
+            :min="0"
+            :max="20"
+            suffix="px"
+            hint="让 AI 掩膜边缘过渡更自然，适合毛发或抗锯齿边缘"
+            @update:model-value="actions.setOption('feather', $event)"
+          />
+          <RangeField
+            label="向内收缩"
+            :model-value="entry.options.erode"
+            :min="0"
+            :max="10"
+            suffix="px"
+            hint="先腐蚀再羽化，可去掉主体外沿残留的一圈背景色"
             @update:model-value="actions.setOption('erode', $event)"
           />
           <SwitchField
@@ -293,6 +353,32 @@ function addCustomColor() {
           <p class="hint">
             结果会作为新素材加入左侧列表（PNG，保留透明通道），原图不变；应用后仍停留在原图，可继续调参再应用。
           </p>
+
+          <div class="batch-block">
+            <div class="stat-row">
+              <span class="muted">批量模板</span>
+              <span class="mono">{{ state.tab === 'ai' ? 'AI 模型' : '颜色参数' }}</span>
+            </div>
+            <div class="stat-row">
+              <span class="muted">素材列表</span>
+              <span class="mono">{{ itemCount }} 张</span>
+            </div>
+            <button
+              class="btn is-block mt-8"
+              type="button"
+              :disabled="state.batch.running || state.busy || !itemCount"
+              @click="runBatch"
+            >
+              {{ state.batch.running ? `正在批量抠图 ${state.batch.done}/${state.batch.total}` : `批量抠图（${itemCount} 张）` }}
+            </button>
+            <label class="check-row">
+              <input v-model="batchSaveToLibrary" type="checkbox" />
+              <span>批量结果同时保存到资源库/抠图结果</span>
+            </label>
+            <p class="hint">
+              参考裁剪的图集模式：以当前{{ state.tab === 'ai' ? ' AI 模型' : ' 颜色参数与容差' }}为统一模板，逐张处理左侧素材列表；套索选区按图片比例换算。
+            </p>
+          </div>
         </section>
 
         <p v-if="entry.error" class="panel-error">{{ entry.error }}</p>
@@ -434,6 +520,12 @@ function addCustomColor() {
 
 .mt-8 {
   margin-top: 8px;
+}
+
+.batch-block {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
 }
 
 .hint {

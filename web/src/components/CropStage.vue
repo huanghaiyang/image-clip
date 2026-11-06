@@ -516,7 +516,8 @@ function onWheel(event) {
       <canvas ref="overlayEl" class="overlay" />
 
       <!-- 图集模式：右侧层条，逐层预览裁切效果 -->
-      <div v-if="atlasEnabled" class="layer-strip">
+      <!-- @wheel.stop：滚轮留给层条自己滚动，不再冒泡到舞台触发缩放 -->
+      <div v-if="atlasEnabled" class="layer-strip" @wheel.stop>
         <div class="layer-strip-head mono">{{ atlasIndex + 1 }}/{{ atlasCount }}</div>
         <div class="layer-list">
           <button

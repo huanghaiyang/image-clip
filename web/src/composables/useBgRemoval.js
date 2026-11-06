@@ -86,6 +86,10 @@ const workspace = useWorkspace();
 const state = reactive({
   // 套索不默认启用：进入背景去除先给「平移」，需要选区时再手动点「套索」
   tool: 'pan', // lasso | pick | pan
+  // 抠图方式标签页：AI 抠图 / 参数抠图（默认停在 AI，但不会自动运行）
+  tab: 'ai', // ai | color
+  // 批量抠图进度（参考裁剪工作区的批量裁剪）
+  batch: { running: false, done: 0, total: 0, saveToLibrary: false },
   busy: false,
   status: '',
   error: '',
@@ -118,6 +122,18 @@ function createCanvas(width, height) {
   canvas.width = Math.max(1, Math.round(width));
   canvas.height = Math.max(1, Math.round(height));
   return canvas;
+}
+
+/** 「默认不抠图」状态：预览画布直接显示原图。 */
+function drawOriginalPreview(entry) {
+  const preview = entry.preview;
+  let canvas = entry.previewCanvas;
+  if (!canvas || canvas.width !== preview.width || canvas.height !== preview.height) {
+    canvas = createCanvas(preview.width, preview.height);
+    entry.previewCanvas = markRaw(canvas);
+  }
+  const image = new ImageData(new Uint8ClampedArray(preview.data), preview.width, preview.height);
+  canvas.getContext('2d').putImageData(image, 0, 0);
 }
 
 /** 生成预览数据：大图按最长边 1600 缩放，小图直接用原数据（零拷贝引用）。 */
@@ -185,6 +201,8 @@ function ensureEntry(item = activeItem.value) {
     detected: detected.colors,
     transparentRatio: detected.transparentRatio,
     colors: defaultColorState(detected.colors),
+    // 默认不抠图：只有用户明确选「参数抠图」或运行 AI 之后才生成掩膜
+    mode: 'none', // none | color | ai
     options: { ...DEFAULT_OPTIONS },
     polygon: [],
     draftPoints: [],
@@ -238,13 +256,25 @@ async function recompute(entry) {
   const started = performance.now();
   try {
     const preview = entry.preview;
+    // 默认不抠图：选图后先原样显示，等用户选参数抠图 / 运行 AI 再生成掩膜
+    if (entry.mode === 'none') {
+      if (token !== entry.renderToken) return;
+      drawOriginalPreview(entry);
+      entry.previewMask = null;
+      entry.coverage = 0;
+      entry.removedPixels = 0;
+      entry.elapsedMs = 0;
+      entry.error = '';
+      entry.previewVersion += 1;
+      return;
+    }
     const colors = entry.colors.filter((color) => color.enabled).map((color) => parseColor(color));
     const selection =
       entry.polygon.length >= 3
         ? rasterizePolygon(scalePolygon(entry.polygon, preview.scale), preview.width, preview.height)
         : null;
 
-    const built = entry.ai.alpha
+    const built = entry.mode === 'ai' && entry.ai.alpha
       ? buildSubjectMask(entry.ai.previewAlpha, preview.width, preview.height, {
           feather: scaledRadius(entry.options.feather, preview.scale),
           erode: scaledRadius(entry.options.erode, preview.scale),
@@ -314,6 +344,7 @@ let lastRecord = { id: '', group: '', at: 0 };
 
 function entrySnapshot(entry) {
   return {
+    mode: entry.mode,
     colors: entry.colors.map((color) => ({ ...color })),
     options: { ...entry.options },
     polygon: entry.polygon.map((point) => ({ x: point.x, y: point.y })),
@@ -353,6 +384,7 @@ function applyEntrySnapshot(entry, snapshot) {
   // 工具偏好不属于“可撤销的文档状态”：撤销时保留用户当前的套索模式/半径/简化与掩膜显示
   const toolPrefs = {};
   for (const key of TOOL_PREF_KEYS) toolPrefs[key] = entry.options[key];
+  entry.mode = snapshot.mode ?? 'none';
   entry.colors = snapshot.colors.map((color) => ({ ...color }));
   entry.options = { ...DEFAULT_OPTIONS, ...snapshot.options, ...toolPrefs };
   entry.detected = snapshot.detected.map((color) => ({ ...color }));
@@ -676,6 +708,37 @@ export function setTool(tool) {
   markSessionDirty('bgremove');
 }
 
+/**
+ * 切换「AI 抠图 / 参数抠图」标签页。
+ * 切到参数页立即按颜色参数生效；切到 AI 页时如果还没有 AI 结果，就回到“不抠图”，
+ * 避免标签页和画面结果对不上。
+ */
+export function setTab(tab) {
+  const next = tab === 'color' ? 'color' : 'ai';
+  state.tab = next;
+  const entry = ensureEntry(activeItem.value);
+  if (!entry) return;
+  const mode = next === 'color' ? 'color' : entry.ai.alpha ? 'ai' : 'none';
+  if (entry.mode !== mode) {
+    entry.mode = mode;
+    scheduleRecompute(entry);
+  }
+  markSessionDirty('bgremove');
+}
+
+/** 参数抠图页的显式入口：默认不抠图时，点一下才按当前颜色参数生成掩膜。 */
+export function startColorRemoval() {
+  const entry = ensureEntry(activeItem.value);
+  if (!entry) return;
+  if (entry.mode !== 'color') {
+    recordEntryHistory(entry);
+    entry.mode = 'color';
+    scheduleRecompute(entry);
+    markSessionDirty('bgremove');
+  }
+  setStatus('已按当前颜色参数抠图，可继续调整容差 / 背景色');
+}
+
 /** 舞台缩放变化时记录当前比例，供参数面板换算“屏幕像素”吸附半径。 */
 export function setViewScale(scale) {
   const value = Number(scale);
@@ -697,6 +760,8 @@ export function setOption(key, value) {
     return;
   }
   recordEntryHistory(entry, `option:${key}`);
+  // 默认不抠图：第一次改抠图参数就视为“开始参数抠图”，AI 结果则继续保留
+  if (entry.mode === 'none') entry.mode = 'color';
   entry.options[key] = value;
   scheduleRecompute(entry);
   markSessionDirty('bgremove');
@@ -723,11 +788,17 @@ export function resetOptions() {
 
 // --------------------------------------------------------------- 颜色
 
+/** 任何颜色操作都视为开始「参数抠图」；AI 结果不受影响。 */
+function ensureColorMode(entry) {
+  if (entry.mode === 'none') entry.mode = 'color';
+}
+
 export function autoDetectColors() {
   const item = activeItem.value;
   const entry = ensureEntry(item);
   if (!entry) return;
   recordEntryHistory(entry);
+  ensureColorMode(entry);
   const detected = detectColors(item);
   entry.detected = detected.colors;
   entry.transparentRatio = detected.transparentRatio;
@@ -746,6 +817,7 @@ export function toggleColor(index) {
   if (!entry?.colors[index]) return;
   recordEntryHistory(entry);
   entry.colors[index].enabled = !entry.colors[index].enabled;
+  ensureColorMode(entry);
   scheduleRecompute(entry);
   markSessionDirty('bgremove');
 }
@@ -763,6 +835,7 @@ export function useColor(input, { exclusive = false } = {}) {
   if (exclusive) {
     for (const item of entry.colors) item.enabled = item.hex.toLowerCase() === hex.toLowerCase();
   }
+  ensureColorMode(entry);
   scheduleRecompute(entry);
   markSessionDirty('bgremove');
   setStatus(`背景色已设为 ${hex.toUpperCase()}${exclusive ? '（仅去除该颜色）' : ''}`);
@@ -773,6 +846,7 @@ export function removeColor(index) {
   if (!entry?.colors[index]) return;
   recordEntryHistory(entry);
   entry.colors.splice(index, 1);
+  ensureColorMode(entry);
   scheduleRecompute(entry);
   markSessionDirty('bgremove');
 }
@@ -969,6 +1043,9 @@ export async function runAiCutout(modelId) {
     entry.ai.status = 'ready';
     entry.ai.progress = null;
     entry.ai.elapsedMs = result.elapsedMs;
+    // AI 结果接管掩膜；标签页也切到 AI，保持面板与画面一致
+    entry.mode = 'ai';
+    state.tab = 'ai';
     recordEntryHistory(entry, 'ai-cutout');
     scheduleRecompute(entry);
     markSessionDirty('bgremove');
@@ -990,16 +1067,18 @@ export function setAiModel(modelId) {
   if (entry && modelId) entry.ai.model = modelId;
 }
 
-/** 清除 AI 结果，回到颜色抠图。 */
+/** 清除 AI 结果，回到「默认不抠图」。 */
 export function clearAiCutout() {
   const entry = ensureEntry(activeItem.value);
   if (!entry || !entry.ai.alpha) return;
   recordEntryHistory(entry);
   resetAiState(entry);
   entry.ai.status = 'idle';
+  entry.mode = 'none';
+  state.tab = 'ai';
   scheduleRecompute(entry);
   markSessionDirty('bgremove');
-  setStatus('已清除 AI 抠像结果，回到颜色抠图');
+  setStatus('已清除 AI 抠像结果，当前不抠图');
 }
 
 // --------------------------------------------------------------- 应用
@@ -1021,6 +1100,10 @@ export async function applyBackgroundRemoval({ saveToLibrary = false } = {}) {
     return null;
   }
   if (state.busy) return null;
+  if (entry.mode === 'none') {
+    setError('还没有抠图结果：先在「AI 抠图」运行模型，或在「参数抠图」开始去除背景');
+    return null;
+  }
 
   state.busy = true;
   const started = performance.now();
@@ -1037,7 +1120,8 @@ export async function applyBackgroundRemoval({ saveToLibrary = false } = {}) {
     }
 
     const selection = polygon.length >= 3 ? rasterizePolygon(polygon, item.width, item.height) : null;
-    const built = entry.ai.alpha
+    const useAi = entry.mode === 'ai' && entry.ai.alpha;
+    const built = useAi
       ? buildSubjectMask(entry.ai.alpha, item.width, item.height, {
           feather: options.feather,
           erode: options.erode,
@@ -1088,6 +1172,121 @@ export async function applyBackgroundRemoval({ saveToLibrary = false } = {}) {
   }
 }
 
+// --------------------------------------------------------------- 批量抠图
+
+/**
+ * 批量抠图（参考裁剪工作区的图集/批量裁剪）：
+ * 以当前标签页的方法为模板——参数页用当前颜色与去除参数，AI 页用当前模型，
+ * 套索选区按归一化坐标换算到每张图，逐个生成 `-去背景.png` 加入素材列表。
+ */
+export async function batchBackgroundRemoval({ saveToLibrary = false } = {}) {
+  const template = ensureEntry(activeItem.value);
+  const all = [...workspace.state.items];
+  if (!template) {
+    setError('请先选择一张图片作为批量模板');
+    return null;
+  }
+  if (!all.length) {
+    setError('素材列表为空，无法批量抠图');
+    return null;
+  }
+  if (state.batch.running || state.busy) return null;
+
+  const useAi = state.tab === 'ai';
+  const model = template.ai.model;
+  const colors = template.colors.filter((color) => color.enabled).map((color) => parseColor(color));
+  const options = { ...template.options };
+  const polygonNorm =
+    template.polygon.length >= 3
+      ? template.polygon.map((point) => ({ x: point.x / template.width, y: point.y / template.height }))
+      : null;
+
+  const started = performance.now();
+  state.batch.running = true;
+  state.batch.done = 0;
+  state.batch.total = all.length;
+  state.batch.saveToLibrary = saveToLibrary;
+  state.busy = true;
+  setStatus(`正在批量抠图（${useAi ? 'AI' : '颜色参数'}）：${all.length} 张…`);
+
+  const results = [];
+  let failed = 0;
+  try {
+    for (const item of all) {
+      try {
+        let alpha = null;
+        if (useAi) {
+          // Worker 会转移传入内存的所有权，必须复制一份
+          const segmented = await segmentImage({
+            modelId: model,
+            rgba: new Uint8ClampedArray(item.imageData.data),
+            width: item.width,
+            height: item.height,
+          });
+          alpha = segmented.alpha;
+        }
+        const selection = polygonNorm
+          ? rasterizePolygon(
+              polygonNorm.map((point) => ({ x: point.x * item.width, y: point.y * item.height })),
+              item.width,
+              item.height,
+            )
+          : null;
+        const built = alpha
+          ? buildSubjectMask(alpha, item.width, item.height, {
+              feather: options.feather,
+              erode: options.erode,
+              selection,
+              selectionMode: selection ? options.selectionMode : 'all',
+            })
+          : buildBackgroundMask(item.imageData.data, item.width, item.height, {
+              colors,
+              tolerance: options.tolerance,
+              connected: options.connected,
+              feather: options.feather,
+              erode: options.erode,
+              selection,
+              selectionMode: selection ? options.selectionMode : 'all',
+            });
+        const applied = applyMaskToRgba(item.imageData.data, item.width, item.height, built.mask, {
+          decontaminate: options.decontaminate,
+          colors,
+        });
+
+        const canvas = createCanvas(item.width, item.height);
+        canvas
+          .getContext('2d')
+          .putImageData(new ImageData(new Uint8ClampedArray(applied.data), item.width, item.height), 0, 0);
+        const blob = await new Promise((resolve, reject) => {
+          canvas.toBlob((result) => (result ? resolve(result) : reject(new Error('PNG 编码失败'))), 'image/png');
+        });
+        const filename = `${stripExtension(item.name)}-去背景.png`;
+        await workspace.actions.addImageBlob(blob, filename);
+        if (saveToLibrary) await saveBlobToLibrary(blob, filename, '抠图结果');
+        results.push({ name: filename, coverage: built.coverage });
+      } catch (err) {
+        failed += 1;
+        console.warn('[bgremove] 批量抠图失败:', item.name, err.message);
+      }
+      state.batch.done += 1;
+      // 让出一帧，避免连续计算把界面卡住
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    setStatus(
+      `批量抠图完成：${results.length}/${all.length} 张 · ${Math.round(performance.now() - started)}ms` +
+        `${saveToLibrary ? ' · 已保存到资源库/抠图结果' : ''}${failed ? ` · 失败 ${failed}` : ''}`,
+    );
+    return { results, failed, total: all.length };
+  } catch (err) {
+    setError(`批量抠图失败：${err.message}`);
+    return null;
+  } finally {
+    state.batch.running = false;
+    state.busy = false;
+  }
+}
+
 // --------------------------------------------------------------- 临时会话
 
 /** 背景去除只保存参数与选区，预览图在恢复后按原图重新计算。 */
@@ -1095,6 +1294,8 @@ export function exportSession() {
   const items = {};
   for (const [id, entry] of Object.entries(entries)) {
     items[id] = {
+      // AI 掩膜体积大不持久化，恢复后 AI 页需要重新运行
+      mode: entry.mode === 'ai' ? 'none' : entry.mode,
       colors: entry.colors.map((color) => ({ ...color })),
       options: { ...entry.options },
       polygon: entry.polygon.map((point) => ({ x: point.x, y: point.y })),
@@ -1104,7 +1305,7 @@ export function exportSession() {
       transparentRatio: entry.transparentRatio,
     };
   }
-  return { tool: state.tool, items };
+  return { tool: state.tool, tab: state.tab, items };
 }
 
 export function importSession(doc) {
@@ -1115,6 +1316,7 @@ export function importSession(doc) {
   if (!doc || typeof doc !== 'object') return;
   // 套索不默认启用：恢复会话只带回取色器/平移，不还原上次的套索工具
   state.tool = ['pick', 'pan'].includes(doc.tool) ? doc.tool : 'pan';
+  state.tab = doc.tab === 'color' ? 'color' : 'ai';
 
   for (const [id, saved] of Object.entries(doc.items ?? {})) {
     const item = workspace.state.items.find((entry) => entry.id === id);
@@ -1122,6 +1324,7 @@ export function importSession(doc) {
     const entry = ensureEntry(item);
     if (!entry || !saved) continue;
     if (Array.isArray(saved.colors)) entry.colors = saved.colors.map((color) => ({ ...color }));
+    entry.mode = saved.mode === 'color' ? 'color' : 'none';
     if (saved.options) Object.assign(entry.options, saved.options);
     if (Array.isArray(saved.detected)) entry.detected = saved.detected.map((color) => ({ ...color }));
     if (Number.isFinite(saved.transparentRatio)) entry.transparentRatio = saved.transparentRatio;
@@ -1164,6 +1367,8 @@ export function useBgRemoval() {
     actions: {
       prepareSelected,
       setTool,
+      setTab,
+      startColorRemoval,
       setViewScale,
       setOption,
       resetOptions,
@@ -1182,6 +1387,7 @@ export function useBgRemoval() {
       clearAiCutout,
       loadCutoutStatus,
       applyBackgroundRemoval,
+      batchBackgroundRemoval,
       undoBg,
       redoBg,
       exportSession,
