@@ -1176,18 +1176,18 @@ export async function applyBackgroundRemoval({ saveToLibrary = false } = {}) {
 
 /**
  * 批量抠图（参考裁剪工作区的图集/批量裁剪）：
- * 以当前标签页的方法为模板——参数页用当前颜色与去除参数，AI 页用当前模型，
- * 套索选区按归一化坐标换算到每张图，逐个生成 `-去背景.png` 加入素材列表。
+ * 只处理「当前素材」里勾选的图片；以当前标签页的方法为模板——参数页用当前颜色与去除参数，
+ * AI 页用当前模型，套索选区按归一化坐标换算到每张图，逐个生成 `-去背景.png` 加入素材列表。
  */
 export async function batchBackgroundRemoval({ saveToLibrary = false } = {}) {
   const template = ensureEntry(activeItem.value);
-  const all = [...workspace.state.items];
+  const all = [...workspace.checkedItems.value];
   if (!template) {
     setError('请先选择一张图片作为批量模板');
     return null;
   }
   if (!all.length) {
-    setError('素材列表为空，无法批量抠图');
+    setError('请先在左侧「当前素材」中勾选要批量抠图的图片');
     return null;
   }
   if (state.batch.running || state.busy) return null;

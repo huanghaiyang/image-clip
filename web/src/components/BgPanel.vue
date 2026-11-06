@@ -15,7 +15,7 @@ import RangeField from './ui/RangeField.vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import SwitchField from './ui/SwitchField.vue';
 
-const { selected, state: workspaceState } = useWorkspace();
+const { selected, checkedItems } = useWorkspace();
 const { state, activeEntry, cutoutModels, actions } = useBgRemoval();
 
 const entry = computed(() => activeEntry.value);
@@ -23,7 +23,7 @@ const item = computed(() => selected.value ?? null);
 const customColor = ref('#ffffff');
 const saveToLibrary = ref(false);
 const batchSaveToLibrary = ref(false);
-const itemCount = computed(() => workspaceState.items.length);
+const itemCount = computed(() => checkedItems.value.length);
 
 const modeTabs = [
   { value: 'ai', label: 'AI 抠图', hint: '用浏览器内模型自动识别主体' },
@@ -360,7 +360,7 @@ function runBatch() {
               <span class="mono">{{ state.tab === 'ai' ? 'AI 模型' : '颜色参数' }}</span>
             </div>
             <div class="stat-row">
-              <span class="muted">素材列表</span>
+              <span class="muted">已勾选素材</span>
               <span class="mono">{{ itemCount }} 张</span>
             </div>
             <button
@@ -376,7 +376,7 @@ function runBatch() {
               <span>批量结果同时保存到资源库/抠图结果</span>
             </label>
             <p class="hint">
-              参考裁剪的图集模式：以当前{{ state.tab === 'ai' ? ' AI 模型' : ' 颜色参数与容差' }}为统一模板，逐张处理左侧素材列表；套索选区按图片比例换算。
+              参考裁剪的图集模式：只处理左侧「当前素材」中勾选的图片；以当前{{ state.tab === 'ai' ? ' AI 模型' : ' 颜色参数与容差' }}为统一模板，套索选区按图片比例换算。
             </p>
           </div>
         </section>

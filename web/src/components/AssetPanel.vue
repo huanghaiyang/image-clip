@@ -19,7 +19,7 @@ import { buildResourceTree, collectFolderPaths, flattenResourceTree } from '../l
 import { formatBytes, formatRatio } from '../lib/imaging.js';
 import ViewToggle from './ui/ViewToggle.vue';
 
-const { state, selected, stats, actions } = useWorkspace();
+const { state, selected, checkedItems, stats, actions } = useWorkspace();
 const {
   state: libraryState,
   entries: libraryEntries,
@@ -197,25 +197,21 @@ function deleteSelectedEntries() {
 
 // --------------------------------------------------------------- 当前素材多选
 /**
- * 当前素材列表的多选：只为「批量保存到素材库」服务，
- * 与资源库的 Shift / Ctrl 多选保持同样的手感；点击行本身仍然切换正在编辑的素材。
+ * 多选状态放在 workspace 里（state.checkedIds），因为图集模式、批量抠图、批量裁剪
+ * 都只处理这里勾选的素材；本组件只负责交互与导入素材库。
  */
-const checkedIds = ref(new Set());
+const checkedIds = computed(() => new Set(state.checkedIds));
 const workspaceAnchor = ref('');
 const importing = ref(false);
 const importNote = ref('');
 
-const checkedItems = computed(() => items.value.filter((item) => checkedIds.value.has(item.id)));
 /** 已经在素材库里的素材不需要重复导入，只统计还没落盘的 */
 const importableItems = computed(() => checkedItems.value.filter((item) => !item.libraryPath));
 const allChecked = computed(() => items.value.length > 0 && checkedItems.value.length === items.value.length);
 const someChecked = computed(() => checkedItems.value.length > 0 && !allChecked.value);
 
 function toggleChecked(id) {
-  const next = new Set(checkedIds.value);
-  if (next.has(id)) next.delete(id);
-  else next.add(id);
-  checkedIds.value = next;
+  actions.toggleCheckedItem(id);
   workspaceAnchor.value = id;
   importNote.value = '';
 }
@@ -229,7 +225,7 @@ function checkWorkspaceItem(event, item) {
     if (from >= 0 && to >= 0) {
       const range = ids.slice(Math.min(from, to), Math.max(from, to) + 1);
       const additive = event.ctrlKey || event.metaKey || event.altKey;
-      checkedIds.value = additive ? new Set([...checkedIds.value, ...range]) : new Set(range);
+      actions.setCheckedItems(additive ? [...checkedIds.value, ...range] : range);
       importNote.value = '';
       return;
     }
@@ -247,7 +243,8 @@ function onWorkspaceRowClick(event, item) {
 }
 
 function toggleCheckAll() {
-  checkedIds.value = allChecked.value ? new Set() : new Set(items.value.map((item) => item.id));
+  if (allChecked.value) actions.clearCheckedItems();
+  else actions.checkAllItems();
   importNote.value = '';
 }
 
@@ -274,22 +271,10 @@ async function importCheckedToLibrary() {
     }
     if (done) await libraryActions.refresh({ quiet: true });
     importNote.value = `已导入 ${done} 张到素材库${failed ? `，失败 ${failed} 张` : ''}`;
-    checkedIds.value = new Set();
   } finally {
     importing.value = false;
   }
 }
-
-// 移除素材后同步清理勾选，避免状态里留下已经不存在 id
-watch(
-  () => items.value.map((item) => item.id).join(','),
-  () => {
-    const alive = new Set(items.value.map((item) => item.id));
-    const next = [...checkedIds.value].filter((id) => alive.has(id));
-    if (next.length !== checkedIds.value.size) checkedIds.value = new Set(next);
-    if (!items.value.length) importNote.value = '';
-  },
-);
 
 // 资源库刷新后（删除 / 外部改动），把已经不存在于列表的选中项清掉
 watch(libraryImages, (list) => {

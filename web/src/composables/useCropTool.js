@@ -4,10 +4,10 @@
  * 设计目标：
  *  - 常用比例一键切换（1:1 / 4:3 / 3:2 / 16:9 / 9:16 / 4:5 …）；
  *  - 支持指定输出像素尺寸，并把尺寸保存为可复用预设（localStorage）；
- *  - 批量裁剪：把当前裁剪框按**归一化坐标**套用到素材列表里的每一张图。
+ *  - 批量裁剪：把当前裁剪框按**归一化坐标**套用到「当前素材」里勾选的每一张图。
  *    视频关键帧通常尺寸一致，归一化后得到完全相同的构图，便于做序列帧。
  */
-import { computed, reactive } from 'vue';
+import { computed, reactive, watch } from 'vue';
 
 import {
   clampRect,
@@ -81,9 +81,18 @@ const state = reactive({
   atlasNorm: null,
 });
 
-const atlasItems = computed(() => workspace.state.items ?? []);
+// 图集 / 批量裁剪只作用于「当前素材」里勾选的项目
+const atlasItems = computed(() => workspace.checkedItems.value ?? []);
 const atlasCount = computed(() => atlasItems.value.length);
 const atlasIndex = computed(() => Math.min(Math.max(0, state.atlas.layer), Math.max(0, atlasCount.value - 1)));
+
+// 勾选被清空时自动退出图集，避免舞台停在空列表上
+watch(atlasCount, (count) => {
+  if (count || !state.atlas.enabled) return;
+  state.atlas.enabled = false;
+  state.atlasNorm = null;
+  setError('已取消全部勾选，图集模式已退出');
+});
 
 const activeItem = computed(() => {
   if (state.atlas.enabled) return atlasItems.value[atlasIndex.value] ?? null;
@@ -327,12 +336,12 @@ export function toggleAtlas(force) {
   const next = typeof force === 'boolean' ? force : !state.atlas.enabled;
   if (next === state.atlas.enabled) return;
   if (next && !atlasCount.value) {
-    setError('素材列表为空，无法进入图集模式');
+    setError('请先在左侧「当前素材」中勾选要图集处理的图片');
     return;
   }
   recordCropHistory();
   if (next) {
-    const selectedIndex = workspace.state.items.findIndex((item) => item.id === workspace.state.selectedId);
+    const selectedIndex = atlasItems.value.findIndex((item) => item.id === workspace.state.selectedId);
     state.atlas.layer = selectedIndex >= 0 ? selectedIndex : 0;
     state.atlas.enabled = true;
     const item = activeItem.value;
@@ -346,7 +355,7 @@ export function toggleAtlas(force) {
       state.imageId = null;
       syncCrop();
     }
-    setStatus(`图集模式：${atlasCount.value} 层叠加，一个裁剪框作用到全部`);
+    setStatus(`图集模式：${atlasCount.value} 层（已勾选素材），一个裁剪框作用到全部`);
   } else {
     const current = activeItem.value;
     state.atlas.enabled = false;
@@ -479,15 +488,15 @@ export async function applyCurrentCrop(options = {}) {
 }
 
 /**
- * 批量裁剪：以当前裁剪框为模板，按归一化比例套用到所有素材。
+ * 批量裁剪：以当前裁剪框为模板，按归一化比例套用到**勾选的素材**。
  *
  * @param {{saveToLibrary?:boolean,download?:boolean}} [options]
  */
 export async function batchCrop(options = {}) {
   const template = syncCrop();
-  const all = [...workspace.state.items];
+  const all = [...workspace.checkedItems.value];
   if (!template || all.length === 0) {
-    setError('素材列表为空，无法批量裁剪');
+    setError('请先在左侧「当前素材」中勾选要批量裁剪的图片');
     return null;
   }
   if (state.batch.running) return null;

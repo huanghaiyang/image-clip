@@ -26,6 +26,8 @@ let uid = 0;
 const state = reactive({
   items: [],
   selectedId: null,
+  // 当前素材列表的多选（图集模式 / 批量抠图只作用于这些素材）
+  checkedIds: [],
   engine: 'client',
   output: { format: 'png', quality: 92 },
   options: {
@@ -44,6 +46,8 @@ const state = reactive({
 });
 
 const selected = computed(() => state.items.find((item) => item.id === state.selectedId) ?? null);
+/** 已勾选的素材，按素材列表顺序返回。 */
+const checkedItems = computed(() => state.items.filter((item) => state.checkedIds.includes(item.id)));
 const stats = computed(() => {
   const total = state.items.length;
   const ready = state.items.filter((item) => item.bounds && !item.empty).length;
@@ -204,6 +208,7 @@ const canRedoAssets = computed(() => redo.length > 0);
 
 /** 导入单个图片文件：解码 → 建立素材项 → 自动检测 AABB。 */
 async function addOneFile(file) {
+  console.trace('[debug][asset] add', file?.name, new Error().stack);
   const buffer = await file.arrayBuffer();
   const { bitmap, imageData, width, height } = await decodeToRgba(file);
   const item = reactive({
@@ -318,6 +323,7 @@ export function removeItem(id) {
   if (index < 0) return;
   recordHistory();
   const [removed] = state.items.splice(index, 1);
+  state.checkedIds = state.checkedIds.filter((checked) => checked !== id);
   if (state.selectedId === id) {
     state.selectedId = state.items[Math.min(index, state.items.length - 1)]?.id ?? null;
   }
@@ -329,11 +335,33 @@ export function clearItems() {
   recordHistory();
   state.items.splice(0, state.items.length);
   state.selectedId = null;
+  state.checkedIds = [];
   setStatus('已清空素材');
 }
 
 export function selectItem(id) {
   state.selectedId = id;
+}
+
+// --------------------------------------------------------------- 多选
+
+export function toggleCheckedItem(id) {
+  const index = state.checkedIds.indexOf(id);
+  if (index >= 0) state.checkedIds.splice(index, 1);
+  else state.checkedIds.push(id);
+}
+
+export function setCheckedItems(ids) {
+  const wanted = new Set(Array.isArray(ids) ? ids : []);
+  state.checkedIds = state.items.filter((item) => wanted.has(item.id)).map((item) => item.id);
+}
+
+export function checkAllItems() {
+  state.checkedIds = state.items.map((item) => item.id);
+}
+
+export function clearCheckedItems() {
+  state.checkedIds = [];
 }
 
 export function resetOptions() {
@@ -607,6 +635,7 @@ export function useWorkspace() {
   return {
     state: readonly(state),
     selected,
+    checkedItems,
     stats,
     canUndoAssets,
     canRedoAssets,
@@ -620,6 +649,10 @@ export function useWorkspace() {
       setItemLibraryPath,
       clearItems,
       selectItem,
+      toggleCheckedItem,
+      setCheckedItems,
+      checkAllItems,
+      clearCheckedItems,
       setEngine,
       setOption,
       setOutput,

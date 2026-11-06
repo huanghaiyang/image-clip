@@ -12,7 +12,7 @@ import { useWorkspace } from '../composables/useWorkspace.js';
 import { useCropTool, BUILTIN_SIZES, CROP_RATIOS } from '../composables/useCropTool.js';
 import SegmentedControl from './ui/SegmentedControl.vue';
 
-const { state: workspaceState } = useWorkspace();
+const { state: workspaceState, checkedItems } = useWorkspace();
 const { state, actions, activeItem, outputSize, normalizedRect, canApply, atlasCount } = useCropTool();
 
 const presetName = ref('');
@@ -78,7 +78,7 @@ function savePreset() {
           <h3 class="section-title">图集模式</h3>
           <label class="check-row">
             <input type="checkbox" :checked="state.atlas.enabled" @change="actions.toggleAtlas()" />
-            <span>素材像纸一样叠加，统一裁剪框</span>
+            <span>勾选的素材像纸一样叠加，统一裁剪框</span>
           </label>
           <template v-if="state.atlas.enabled">
             <div class="atlas-row">
@@ -88,7 +88,7 @@ function savePreset() {
             </div>
             <p class="hint">舞台右侧层条可逐层预览裁切效果，方向键 ←/→ 也能翻层。</p>
           </template>
-          <p v-else class="hint">适合图集 / 序列帧：一个裁剪框按相对位置作用到每张图。</p>
+          <p v-else class="hint">适合图集 / 序列帧：先在左侧勾选素材，一个裁剪框按相对位置作用到每张图。</p>
         </section>
 
         <section class="section">
@@ -217,10 +217,10 @@ function savePreset() {
 
         <section class="section">
           <h3 class="section-title">
-            批量裁剪（{{ workspaceState.items.length }} 张）<span v-if="state.atlas.enabled" class="tag-atlas">图集</span>
+            批量裁剪（已选 {{ checkedItems.length }} 张）<span v-if="state.atlas.enabled" class="tag-atlas">图集</span>
           </h3>
           <p class="hint">
-            以{{ state.atlas.enabled ? '图集统一裁剪框' : '当前裁剪框' }}为模板，按相对位置套用到左侧所有素材。归一化取景：
+            以{{ state.atlas.enabled ? '图集统一裁剪框' : '当前裁剪框' }}为模板，按相对位置套用到左侧勾选的素材。归一化取景：
             <span class="mono">{{ normalizedSummary }}</span>
           </p>
           <label class="check-row">
@@ -234,10 +234,10 @@ function savePreset() {
           <button
             class="btn is-block mt-8"
             type="button"
-            :disabled="state.batch.running || workspaceState.items.length === 0"
+            :disabled="state.batch.running || checkedItems.length === 0"
             @click="actions.batchCrop({ saveToLibrary, download: downloadZip })"
           >
-            {{ state.batch.running ? `裁剪中 ${state.batch.done}/${state.batch.total}` : `批量裁剪 ${workspaceState.items.length} 张` }}
+            {{ state.batch.running ? `裁剪中 ${state.batch.done}/${state.batch.total}` : `批量裁剪 ${checkedItems.length} 张` }}
           </button>
           <div v-if="state.batch.running" class="progress">
             <span class="progress-fill" :style="{ width: `${batchProgress}%` }" />
