@@ -596,6 +596,13 @@ export async function importSession(snapshot, blobs = {}) {
   return state.items;
 }
 
+/** 素材保存到资源库后回填来源路径（用于列表标记与重复导入判断）。 */
+export function setItemLibraryPath(id, path) {
+  const item = state.items.find((entry) => entry.id === id);
+  if (!item) return;
+  item.libraryPath = path || '';
+}
+
 export function useWorkspace() {
   return {
     state: readonly(state),
@@ -610,6 +617,7 @@ export function useWorkspace() {
       addImageBlob,
       loadSamples,
       removeItem,
+      setItemLibraryPath,
       clearItems,
       selectItem,
       setEngine,

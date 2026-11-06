@@ -14,7 +14,7 @@ import { useWorkspace } from '../composables/useWorkspace.js';
 import { pickLibraryImages } from '../composables/useLibraryImport.js';
 import { confirm } from '../composables/useConfirm.js';
 import { useResourceViewMode } from '../composables/useResourceViewMode.js';
-import { libraryThumbUrl } from '../lib/library.js';
+import { libraryThumbUrl, uploadBlobToLibrary } from '../lib/library.js';
 import { buildResourceTree, collectFolderPaths, flattenResourceTree } from '../lib/resourceTree.js';
 import { formatBytes, formatRatio } from '../lib/imaging.js';
 import ViewToggle from './ui/ViewToggle.vue';
@@ -195,6 +195,102 @@ function deleteSelectedEntries() {
   return deleteEntries(selectedEntries.value);
 }
 
+// --------------------------------------------------------------- 当前素材多选
+/**
+ * 当前素材列表的多选：只为「批量保存到素材库」服务，
+ * 与资源库的 Shift / Ctrl 多选保持同样的手感；点击行本身仍然切换正在编辑的素材。
+ */
+const checkedIds = ref(new Set());
+const workspaceAnchor = ref('');
+const importing = ref(false);
+const importNote = ref('');
+
+const checkedItems = computed(() => items.value.filter((item) => checkedIds.value.has(item.id)));
+/** 已经在素材库里的素材不需要重复导入，只统计还没落盘的 */
+const importableItems = computed(() => checkedItems.value.filter((item) => !item.libraryPath));
+const allChecked = computed(() => items.value.length > 0 && checkedItems.value.length === items.value.length);
+const someChecked = computed(() => checkedItems.value.length > 0 && !allChecked.value);
+
+function toggleChecked(id) {
+  const next = new Set(checkedIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  checkedIds.value = next;
+  workspaceAnchor.value = id;
+  importNote.value = '';
+}
+
+/** 勾选框：Ctrl/Cmd/Alt 追加，Shift 从上一张连选。 */
+function checkWorkspaceItem(event, item) {
+  if (event.shiftKey) {
+    const ids = items.value.map((entry) => entry.id);
+    const from = ids.indexOf(workspaceAnchor.value);
+    const to = ids.indexOf(item.id);
+    if (from >= 0 && to >= 0) {
+      const range = ids.slice(Math.min(from, to), Math.max(from, to) + 1);
+      const additive = event.ctrlKey || event.metaKey || event.altKey;
+      checkedIds.value = additive ? new Set([...checkedIds.value, ...range]) : new Set(range);
+      importNote.value = '';
+      return;
+    }
+  }
+  toggleChecked(item.id);
+}
+
+function onWorkspaceRowClick(event, item) {
+  actions.selectItem(item.id);
+  if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) {
+    checkWorkspaceItem(event, item);
+    return;
+  }
+  workspaceAnchor.value = item.id;
+}
+
+function toggleCheckAll() {
+  checkedIds.value = allChecked.value ? new Set() : new Set(items.value.map((item) => item.id));
+  importNote.value = '';
+}
+
+/** 把勾选的当前素材逐个写回素材库（根目录），已入库的自动跳过。 */
+async function importCheckedToLibrary() {
+  const targets = importableItems.value;
+  if (!targets.length || importing.value) return;
+  importing.value = true;
+  importNote.value = '';
+  let done = 0;
+  let failed = 0;
+  try {
+    for (const item of targets) {
+      try {
+        const blob = new Blob([item.buffer], { type: item.type || 'image/png' });
+        const result = await uploadBlobToLibrary(blob, item.name, '');
+        const path = result?.entry?.path ?? '';
+        if (path) actions.setItemLibraryPath(item.id, path);
+        done += 1;
+      } catch (err) {
+        failed += 1;
+        console.warn('[assets] 导入素材库失败:', item.name, err.message);
+      }
+    }
+    if (done) await libraryActions.refresh({ quiet: true });
+    importNote.value = `已导入 ${done} 张到素材库${failed ? `，失败 ${failed} 张` : ''}`;
+    checkedIds.value = new Set();
+  } finally {
+    importing.value = false;
+  }
+}
+
+// 移除素材后同步清理勾选，避免状态里留下已经不存在 id
+watch(
+  () => items.value.map((item) => item.id).join(','),
+  () => {
+    const alive = new Set(items.value.map((item) => item.id));
+    const next = [...checkedIds.value].filter((id) => alive.has(id));
+    if (next.length !== checkedIds.value.size) checkedIds.value = new Set(next);
+    if (!items.value.length) importNote.value = '';
+  },
+);
+
 // 资源库刷新后（删除 / 外部改动），把已经不存在于列表的选中项清掉
 watch(libraryImages, (list) => {
   const alive = new Set(list.map((entry) => entry.path));
@@ -271,14 +367,52 @@ onMounted(() => {
           还没有工作素材。<br />切换到「资源库」选择图片，或上传到素材库。
         </p>
 
+        <div v-if="items.length" class="workspace-tools">
+          <label class="workspace-check-all">
+            <input
+              type="checkbox"
+              :checked="allChecked"
+              :indeterminate.prop="someChecked"
+              @change="toggleCheckAll"
+            />
+            <span>全选{{ checkedItems.length ? `（已选 ${checkedItems.length}）` : '' }}</span>
+          </label>
+          <button
+            class="btn is-mini"
+            type="button"
+            :disabled="importing || !importableItems.length"
+            @click="importCheckedToLibrary"
+          >
+            {{ importing ? '导入中…' : `保存选中到素材库（${importableItems.length}）` }}
+          </button>
+        </div>
+        <p v-if="importNote" class="workspace-note">{{ importNote }}</p>
+
         <button
           v-for="item in items"
           :key="item.id"
           class="asset"
-          :class="{ 'is-active': selected && selected.id === item.id, 'is-empty': item.resultEmpty }"
+          :class="{
+            'is-active': selected && selected.id === item.id,
+            'is-empty': item.resultEmpty,
+            'is-checked': checkedIds.has(item.id),
+          }"
           type="button"
-          @click="actions.selectItem(item.id)"
+          @click="onWorkspaceRowClick($event, item)"
         >
+          <span
+            class="select-mark"
+            :class="{ 'is-on': checkedIds.has(item.id) }"
+            role="checkbox"
+            :aria-checked="checkedIds.has(item.id)"
+            :title="checkedIds.has(item.id) ? '取消勾选' : '勾选后可批量保存到素材库'"
+            @click.stop="checkWorkspaceItem($event, item)"
+            @dblclick.stop
+          >
+            <svg v-if="checkedIds.has(item.id)" width="9" height="9" viewBox="0 0 10 10" fill="none">
+              <path d="M2 5.2 4.1 7.3 8 3.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+            </svg>
+          </span>
           <span class="asset-thumb">
             <img :src="item.thumbnail" :alt="item.name" />
           </span>
@@ -873,6 +1007,42 @@ onMounted(() => {
 .asset.is-active {
   background: var(--accent-soft);
   border-color: rgba(13, 153, 255, 0.45);
+}
+
+/* 当前素材多选：勾选行加一层底色，和“正在编辑”区分开 */
+.asset.is-checked {
+  background: var(--panel-2);
+  border-color: rgba(13, 153, 255, 0.35);
+}
+
+.workspace-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 2px 8px;
+}
+
+.workspace-check-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.workspace-check-all input {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--accent);
+}
+
+.workspace-note {
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 .asset.is-empty .asset-dims {
