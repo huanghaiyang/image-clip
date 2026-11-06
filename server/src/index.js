@@ -380,7 +380,7 @@ export function createApp() {
         res
           .status(200)
           .type('text/plain; charset=utf-8')
-          .send('image-clip server 已启动。开发模式请访问 Vite 地址（默认 http://127.0.0.1:5173）；或先执行 npm run build 生成 web/dist。');
+          .send('image-clip server 已启动。开发模式请访问 Vite 地址（默认 http://127.0.0.1:5174）；或先执行 npm run build 生成 web/dist。');
         return;
       }
       next();

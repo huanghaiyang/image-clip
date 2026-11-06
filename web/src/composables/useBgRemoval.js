@@ -84,7 +84,8 @@ const OPTION_RECORD_GAP = 500;
 const workspace = useWorkspace();
 
 const state = reactive({
-  tool: 'lasso', // lasso | pick | pan
+  // 套索不默认启用：进入背景去除先给「平移」，需要选区时再手动点「套索」
+  tool: 'pan', // lasso | pick | pan
   busy: false,
   status: '',
   error: '',
@@ -1112,7 +1113,8 @@ export function importSession(doc) {
     delete entries[id];
   }
   if (!doc || typeof doc !== 'object') return;
-  if (['lasso', 'pick', 'pan'].includes(doc.tool)) state.tool = doc.tool;
+  // 套索不默认启用：恢复会话只带回取色器/平移，不还原上次的套索工具
+  state.tool = ['pick', 'pan'].includes(doc.tool) ? doc.tool : 'pan';
 
   for (const [id, saved] of Object.entries(doc.items ?? {})) {
     const item = workspace.state.items.find((entry) => entry.id === id);

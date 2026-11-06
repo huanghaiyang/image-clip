@@ -18,8 +18,8 @@ Node + Vue 的图片处理应用。当前版本聚焦一个功能：
 
 ```bash
 npm install          # 安装 server + web 两端的依赖
-npm run dev          # 同时启动 Node API(8787) 和 Vite 前端(5173)
-# 打开 http://127.0.0.1:5173
+npm run dev          # 同时启动 Node API(8787) 和 Vite 前端(5174)
+# 打开 http://127.0.0.1:5174
 ```
 
 生产模式（同一个 Node 进程同时托管 API 和前端产物）：

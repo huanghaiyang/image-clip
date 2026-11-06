@@ -38,7 +38,7 @@ export default defineConfig({
     conditions: ['onnxruntime-web-use-extern-wasm'],
   },
   server: {
-    port: 5173,
+    port: 5174,
     host: '127.0.0.1',
     fs: { allow: [repoRoot] },
     proxy: {
