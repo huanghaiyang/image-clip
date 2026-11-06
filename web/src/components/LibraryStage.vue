@@ -35,6 +35,9 @@ const {
   previewEntry,
   previewIndex,
   previewList,
+  duplicateGroups,
+  duplicatePaths,
+  duplicateGroupOf,
   actions,
 } = useLibrary();
 const { actions: videoActions, state: videoState } = useVideo();
@@ -393,6 +396,24 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
         清除选择
       </button>
       <button class="btn is-mini is-ghost" type="button" :disabled="state.refreshing" @click="actions.refresh()">刷新</button>
+      <button
+        class="btn is-mini is-ghost"
+        type="button"
+        title="在当前文件夹内按内容 hash 查找相同的资源（只做高亮标记，不移动/删除文件）"
+        :disabled="state.duplicates.scanning"
+        @click="actions.scanDuplicates()"
+      >
+        {{ state.duplicates.scanning ? '查重中…' : '查重' }}
+      </button>
+      <button
+        v-if="duplicateGroups.length"
+        class="btn is-mini is-ghost"
+        type="button"
+        title="清除重复标记"
+        @click="actions.clearDuplicates()"
+      >
+        清除标记
+      </button>
       <button class="btn is-mini is-ghost" type="button" title="查看已删除的资源" @click="trashOpen = true">
         回收站
       </button>
@@ -449,7 +470,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
           v-for="entry in currentEntries"
           :key="entry.path"
           class="card"
-          :class="{ 'is-selected': selectedSet.has(entry.path), 'is-editing': editingPaths.has(entry.path) }"
+          :class="{
+            'is-selected': selectedSet.has(entry.path),
+            'is-editing': editingPaths.has(entry.path),
+            'is-duplicate': duplicatePaths.has(entry.path),
+          }"
           type="button"
           :title="entry.path"
           @click="select($event, entry)"
@@ -466,6 +491,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
             <span v-else class="thumb-icon">{{ KIND_ICON[entry.kind] ?? '▤' }}</span>
             <span v-if="entrySize(entry)" class="badge-size mono">{{ entrySize(entry) }}</span>
             <span v-if="editingPaths.has(entry.path)" class="badge-editing">编辑中</span>
+            <span v-if="duplicatePaths.has(entry.path)" class="badge-dup">重复 {{ duplicateGroupOf.get(entry.path) }}</span>
             <span v-if="entry.kind === 'video'" class="badge-video">▶</span>
             <span
               class="thumb-rename"
@@ -541,7 +567,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
           <button
             v-else
             class="tree-row is-file"
-            :class="{ 'is-selected': selectedSet.has(row.path), 'is-editing': editingPaths.has(row.path) }"
+            :class="{
+              'is-selected': selectedSet.has(row.path),
+              'is-editing': editingPaths.has(row.path),
+              'is-duplicate': duplicatePaths.has(row.path),
+            }"
             type="button"
             :title="row.path"
             :style="{ paddingLeft: `${8 + row.depth * 16 + 14}px` }"
@@ -563,6 +593,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
               <span class="tree-row-meta mono">{{ entryMeta(row.entry) }}</span>
             </span>
             <span v-if="editingPaths.has(row.path)" class="edit-flag">编辑中</span>
+            <span v-if="duplicatePaths.has(row.path)" class="dup-flag">重复 {{ duplicateGroupOf.get(row.path) }}</span>
             <span
               class="row-rename"
               role="button"
@@ -987,6 +1018,39 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
 
 .card.is-editing {
   border-color: rgba(13, 153, 255, 0.7);
+}
+
+/* 查重标记：同文件夹内内容相同的资源，用琥珀色区分（只标记，不做处理） */
+.card.is-duplicate {
+  border-color: rgba(240, 160, 40, 0.8);
+  box-shadow: inset 0 0 0 1px rgba(240, 160, 40, 0.35);
+}
+
+.badge-dup {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(240, 160, 40, 0.92);
+  color: #2b1a00;
+  font-size: 9px;
+  line-height: 14px;
+  font-weight: 600;
+}
+
+.tree-row.is-duplicate {
+  box-shadow: inset 2px 0 #f0a028;
+}
+
+.dup-flag {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(240, 160, 40, 0.18);
+  color: #f0a028;
+  font-size: 10px;
+  line-height: 16px;
 }
 
 .tree-row.is-editing {

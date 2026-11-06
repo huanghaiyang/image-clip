@@ -41,6 +41,12 @@ export function fetchLibraryTree() {
   return requestJson('/api/library/tree', { cache: 'no-store' });
 }
 
+/** 同文件夹内按内容 hash 查重；仅返回分组用于高亮，不改动文件。 */
+export function fetchLibraryDuplicates(dir = '') {
+  const query = dir ? `?dir=${encodeURIComponent(dir)}` : '';
+  return requestJson(`/api/library/duplicates${query}`, { cache: 'no-store' });
+}
+
 /**
  * 上传一个 File/Blob 到资源库。
  * @param {File|Blob} file

@@ -23,6 +23,8 @@ const { state, selected, checkedItems, stats, actions } = useWorkspace();
 const {
   state: libraryState,
   entries: libraryEntries,
+  duplicatePaths,
+  duplicateGroupOf,
   actions: libraryActions,
 } = useLibrary();
 const { state: appMode } = useAppMode();
@@ -145,6 +147,7 @@ function rowClass(entry) {
     'is-editing': editingPath.value === entry.path,
     'is-loaded': loadedPaths.value.has(entry.path),
     'is-selected': selectedPaths.value.has(entry.path),
+    'is-duplicate': duplicatePaths.value.has(entry.path),
   };
 }
 
@@ -549,6 +552,9 @@ onMounted(() => {
               </span>
               <span class="library-meta">
                 <span class="library-dir" :title="row.entry.path">{{ row.entry.dir || '根目录' }}</span>
+                <span v-if="duplicatePaths.has(row.entry.path)" class="tag is-dup">
+                  重复 {{ duplicateGroupOf.get(row.entry.path) }}
+                </span>
                 <span v-if="editingPath === row.entry.path" class="tag is-editing">编辑中</span>
                 <span v-else-if="loadedPaths.has(row.entry.path)" class="tag is-library">已加入</span>
               </span>
@@ -979,6 +985,18 @@ onMounted(() => {
   flex: none;
   background: var(--accent);
   color: #fff;
+}
+
+/* 查重标记：同目录内容相同的资源，只高亮不做处理 */
+.tag.is-dup {
+  flex: none;
+  background: rgba(240, 160, 40, 0.2);
+  color: #f0a028;
+}
+
+.asset.library-asset.is-duplicate {
+  border-color: rgba(240, 160, 40, 0.7);
+  box-shadow: inset 0 0 0 1px rgba(240, 160, 40, 0.28);
 }
 
 .assets-list {

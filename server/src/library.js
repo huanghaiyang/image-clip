@@ -1031,6 +1031,51 @@ export function createLibrary(options = {}) {
     return null;
   }
 
+  /**
+   * 在**同一个文件夹内**按内容 hash（sha256）查找重复资源。
+   * 只有大小相同的文件才会读盘算哈希，结果仅供前端高亮标记，不改动任何文件。
+   */
+  async function findDuplicates(dir = '') {
+    const target = String(dir || '')
+      .replace(/\\/g, '/')
+      .replace(/^\/+|\/+$/g, '');
+    const { entries: allEntries } = await scan();
+    const files = allEntries.filter((entry) => entry.dir === target);
+
+    const bySize = new Map();
+    for (const entry of files) {
+      const bucket = bySize.get(entry.bytes);
+      if (bucket) bucket.push(entry);
+      else bySize.set(entry.bytes, [entry]);
+    }
+
+    const groups = [];
+    for (const [size, list] of bySize) {
+      if (list.length < 2) continue;
+      const byHash = new Map();
+      for (const entry of list) {
+        const { abs } = resolve(entry.path, { allowRoot: false });
+        const stat = await fs.stat(abs).catch(() => null);
+        if (!stat?.isFile()) continue;
+        const checksum = await checksumOf(entry.path, abs, stat);
+        const bucket = byHash.get(checksum);
+        if (bucket) bucket.push(entry.path);
+        else byHash.set(checksum, [entry.path]);
+      }
+      for (const [checksum, paths] of byHash) {
+        if (paths.length > 1) groups.push({ checksum, size, paths });
+      }
+    }
+
+    groups.sort((a, b) => b.paths.length - a.paths.length || a.paths[0].localeCompare(b.paths[0], 'zh-Hans-CN'));
+    return {
+      dir: target,
+      groups,
+      files: files.length,
+      duplicateFiles: groups.reduce((sum, group) => sum + group.paths.length, 0),
+    };
+  }
+
   const api = {
     root,
     thumbnailRoot,
@@ -1057,6 +1102,7 @@ export function createLibrary(options = {}) {
     moveVersions,
     rememberChecksum,
     findDuplicateByChecksum,
+    findDuplicates,
     invalidate() {
       meta = null;
       versionsIndex = null;
@@ -1108,6 +1154,14 @@ export function createLibraryRouter(library) {
     '/tree',
     wrap(async (_req, res) => {
       res.json(await library.scan());
+    }),
+  );
+
+  // 同文件夹内按内容 hash 查重（只返回分组，供前端高亮）
+  router.get(
+    '/duplicates',
+    wrap(async (req, res) => {
+      res.json(await library.findDuplicates(req.query.dir ?? ''));
     }),
   );
 

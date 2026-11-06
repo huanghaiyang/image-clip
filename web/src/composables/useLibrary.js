@@ -20,6 +20,7 @@ import {
   restoreLibraryVersion,
   uploadLibraryFile,
   uploadBlobToLibrary,
+  fetchLibraryDuplicates,
 } from '../lib/library.js';
 import { useWorkspace } from './useWorkspace.js';
 import { setMode } from './useAppMode.js';
@@ -55,6 +56,8 @@ const state = reactive({
   selected: [], // 相对路径数组，可包含文件夹
   previewPath: null,
   upload: { active: false, name: '', percent: 0, index: 0, total: 0, skipped: [], failed: [] },
+  // 同目录查重结果：dir 与当前目录不一致时自动失效（只做高亮标记）
+  duplicates: { dir: '', scanning: false, groups: [] },
 });
 
 const entries = computed(() => tree.value.entries ?? []);
@@ -147,6 +150,18 @@ const breadcrumbs = computed(() => {
 const canGoUp = computed(() => Boolean(state.currentDir));
 
 const moveTargets = computed(() => [{ path: '', name: '资源库根目录' }, ...folders.value]);
+
+/** 查重结果只在扫描时所在的目录里生效；切换目录后自动隐藏标记。 */
+const duplicateGroups = computed(() => (state.duplicates.dir === state.currentDir ? state.duplicates.groups : []));
+const duplicatePaths = computed(() => new Set(duplicateGroups.value.flatMap((group) => group.paths)));
+/** 路径 → 第几组重复，用于在缩略图上显示组号。 */
+const duplicateGroupOf = computed(() => {
+  const map = new Map();
+  duplicateGroups.value.forEach((group, index) => {
+    for (const path of group.paths) map.set(path, index + 1);
+  });
+  return map;
+});
 
 const selectedSummary = computed(() => {
   const files = selectedEntries.value;
@@ -730,6 +745,36 @@ export function entryByPath(path) {
   return entries.value.find((entry) => entry.path === path) ?? null;
 }
 
+/**
+ * 对资源库当前目录做一次内容查重（sha256），只标记不处理。
+ * 结果与目录绑定：切到别的目录后高亮自动消失。
+ */
+async function scanDuplicates() {
+  if (state.duplicates.scanning) return;
+  const dir = state.currentDir;
+  state.duplicates.scanning = true;
+  try {
+    const result = await fetchLibraryDuplicates(dir);
+    const groups = Array.isArray(result?.groups) ? result.groups : [];
+    state.duplicates.dir = dir;
+    state.duplicates.groups = groups;
+    const label = dir || '根目录';
+    const count = result?.duplicateFiles ?? groups.reduce((sum, group) => sum + group.paths.length, 0);
+    if (count) setStatus(`「${label}」发现 ${groups.length} 组重复资源（共 ${count} 个文件），已在列表高亮`);
+    else setStatus(`「${label}」没有内容相同的资源`);
+  } catch (err) {
+    setError(`查重失败：${err.message}`);
+  } finally {
+    state.duplicates.scanning = false;
+  }
+}
+
+function clearDuplicates() {
+  state.duplicates.dir = '';
+  state.duplicates.groups = [];
+  setStatus('');
+}
+
 export function useLibrary() {
   return {
     state: readonly(state),
@@ -748,6 +793,9 @@ export function useLibrary() {
     breadcrumbs,
     canGoUp,
     moveTargets,
+    duplicateGroups,
+    duplicatePaths,
+    duplicateGroupOf,
     actions: {
       refresh: refreshLibrary,
       setDir,
@@ -782,6 +830,8 @@ export function useLibrary() {
       stepPreview,
       openInEditor,
       entryByPath,
+      scanDuplicates,
+      clearDuplicates,
     },
   };
 }
