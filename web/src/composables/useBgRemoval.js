@@ -18,6 +18,8 @@ import {
   colorDistance,
   colorToHex,
   detectBackgroundColors,
+  detectHolesInMask,
+  fillMaskHoles,
   parseColor,
 } from '@shared/bgremove.js';
 import { resizeMaskBilinear } from '@shared/cutout.js';
@@ -42,10 +44,13 @@ const DEFAULT_OPTIONS = {
   // 智能套索的可调参数（单位都是“屏幕像素”，与图片大小/缩放无关）
   lassoRadius: 14, // 吸附半径：鼠标离边缘多远仍能吸住
   lassoSimplify: 0.8, // 路径简化容差：越小折角越圆润、顶点越多；0=保留全部吸附点
+  // 去噪（孔洞）
+  autoRemoveHoles: false, // 自动去噪（默认关）
+  maxHoleArea: 2,         // 面积 ≤ 该值 的孔洞自动填掉（单位：预览分辨率像素）
 };
 
 /** 只影响套索交互/显示的工具偏好：不进撤销栈，撤销时也保持不变。 */
-const TOOL_PREF_KEYS = ['lassoMode', 'lassoRadius', 'lassoSimplify', 'showMask'];
+const TOOL_PREF_KEYS = ['lassoMode', 'lassoRadius', 'lassoSimplify', 'showMask', 'autoRemoveHoles', 'maxHoleArea'];
 
 /** AI 抠图的默认状态（每个素材独立保存）。 */
 function defaultAiState() {
@@ -226,6 +231,8 @@ function ensureEntry(item = activeItem.value) {
     error: '',
     renderToken: 0,
     timer: null,
+    holes: [], // detectHolesInMask 返回；每次 recompute 刷新
+    holesRemovedIds: [], // 用户通过"点选孔洞"手动标记要去掉的洞 id；recompute 最后应用到 mask
   });
 
   entries[item.id] = entry;
@@ -291,6 +298,38 @@ async function recompute(entry) {
           selectionMode: selection ? entry.options.selectionMode : 'all',
         });
 
+    // 孔洞（去噪）：在 built.mask 已构建完成后跑
+    if (entry.options.autoRemoveHoles && entry.options.maxHoleArea > 0) {
+      const filled = fillMaskHoles(built.mask, preview.width, preview.height, {
+        maxArea: entry.options.maxHoleArea,
+      });
+      built.mask = filled.mask;
+    }
+    entry.holes = detectHolesInMask(built.mask, preview.width, preview.height, {
+      minArea: 1,
+      maxHoles: 50,
+    });
+
+    // 应用用户手动标记要去掉的孔洞（即使参数改动重新跑了 buildBackgroundMask，
+    // 这些洞也会再次被扣掉——除非 undo 恢复 holesRemovedIds）
+    if (entry.holesRemovedIds.length) {
+      const removed = new Set(entry.holesRemovedIds);
+      for (const hole of entry.holes) {
+        if (!removed.has(hole.id)) continue;
+        const { x: bx, y: by, width: bw, height: bh } = hole.bbox;
+        for (let dy = 0; dy < bh; dy += 1) {
+          const y = by + dy;
+          const rowOffset = y * preview.width;
+          for (let dx = 0; dx < bw; dx += 1) {
+            const i = rowOffset + bx + dx;
+            if (built.mask[i] === 0) built.mask[i] = 255;
+          }
+        }
+      }
+      // 再次过滤，让 UI 上的 holes 列表不再显示已移除的项
+      entry.holes = entry.holes.filter((h) => !removed.has(h.id));
+    }
+
     const applied = applyMaskToRgba(preview.data, preview.width, preview.height, built.mask, {
       decontaminate: entry.options.decontaminate,
       colors,
@@ -350,6 +389,7 @@ function entrySnapshot(entry) {
     polygon: entry.polygon.map((point) => ({ x: point.x, y: point.y })),
     detected: entry.detected.map((color) => ({ ...color })),
     transparentRatio: entry.transparentRatio,
+    holesRemovedIds: [...entry.holesRemovedIds],
     // 只保存 alpha 的引用：重复改参数时不会把几十 MB 的掩膜复制进历史
     ai: {
       model: entry.ai.model,
@@ -389,6 +429,7 @@ function applyEntrySnapshot(entry, snapshot) {
   entry.options = { ...DEFAULT_OPTIONS, ...snapshot.options, ...toolPrefs };
   entry.detected = snapshot.detected.map((color) => ({ ...color }));
   entry.transparentRatio = snapshot.transparentRatio;
+  entry.holesRemovedIds = snapshot.holesRemovedIds ? [...snapshot.holesRemovedIds] : [];
   const ai = snapshot.ai ?? { model: entry.ai.model, alpha: null };
   entry.ai = {
     ...defaultAiState(),
@@ -1137,6 +1178,38 @@ export async function applyBackgroundRemoval({ saveToLibrary = false } = {}) {
           selection,
           selectionMode: selection ? options.selectionMode : 'all',
         });
+
+    // 孔洞（去噪）：原图重算
+    if (options.autoRemoveHoles && options.maxHoleArea > 0) {
+      const filled = fillMaskHoles(built.mask, item.width, item.height, {
+        maxArea: Math.round(options.maxHoleArea * (item.width / entry.preview.width)),
+      });
+      built.mask = filled.mask;
+    }
+    if (entry.holesRemovedIds.length) {
+      const scale = item.width / entry.preview.width;
+      const previewHoles = detectHolesInMask(
+        entry.previewMask,
+        entry.preview.width,
+        entry.preview.height,
+        { minArea: 1, maxHoles: 1000 },
+      );
+      const removed = new Set(entry.holesRemovedIds);
+      for (const h of previewHoles) {
+        if (!removed.has(h.id)) continue;
+        const bx = Math.max(0, Math.round(h.bbox.x * scale));
+        const by = Math.max(0, Math.round(h.bbox.y * scale));
+        const bw = Math.min(item.width, Math.round(h.bbox.width * scale));
+        const bh = Math.min(item.height, Math.round(h.bbox.height * scale));
+        for (let dy = 0; dy < bh; dy += 1) {
+          const rowOffset = (by + dy) * item.width;
+          for (let dx = 0; dx < bw; dx += 1) {
+            const i = rowOffset + bx + dx;
+            if (built.mask[i] === 0) built.mask[i] = 255;
+          }
+        }
+      }
+    }
     const applied = applyMaskToRgba(item.imageData.data, item.width, item.height, built.mask, {
       decontaminate: options.decontaminate,
       colors,
@@ -1250,6 +1323,13 @@ export async function batchBackgroundRemoval({ saveToLibrary = false } = {}) {
             selection,
             selectionMode: selection ? options.selectionMode : 'all',
           });
+      // 批量只支持"自动去噪"（每张图的孔洞位置不同，模板的 holesRemovedIds 无法复用）
+      if (options.autoRemoveHoles && options.maxHoleArea > 0) {
+        const filled = fillMaskHoles(built.mask, item.width, item.height, {
+          maxArea: options.maxHoleArea,
+        });
+        built.mask = filled.mask;
+      }
       const applied = applyMaskToRgba(item.imageData.data, item.width, item.height, built.mask, {
         decontaminate: options.decontaminate,
         colors,
@@ -1372,6 +1452,41 @@ export function clearSession() {
   state.lastPick = null;
 }
 
+// --------------------------------------------------------------- 孔洞操作
+
+/** 把 entry.holes 里 id 命中的那个加入 holesRemovedIds；下一次 recompute 自动把它写进 mask=255 */
+export function removeHole(entry, holeId) {
+  if (!entry || !holeId) return false;
+  if (entry.holesRemovedIds.includes(holeId)) return false;
+  recordEntryHistory(entry, 'holes');
+  entry.holesRemovedIds.push(holeId);
+  scheduleRecompute(entry);
+  return true;
+}
+
+/** 一键去掉当前预览里能识别出的所有孔洞 */
+export function applyAllHoles(entry) {
+  if (!entry) return 0;
+  if (!entry.holes.length) return 0;
+  const pending = entry.holes.filter((h) => !entry.holesRemovedIds.includes(h.id));
+  if (!pending.length) return 0;
+  recordEntryHistory(entry, 'holes');
+  for (const h of pending) entry.holesRemovedIds.push(h.id);
+  scheduleRecompute(entry);
+  return pending.length;
+}
+
+/** 根据「预览分辨率坐标」定位当前光标下的孔洞（返回 hole 或 null） */
+export function holeAtPoint(entry, x, y) {
+  if (!entry || !entry.holes || !entry.holes.length) return null;
+  for (const hole of entry.holes) {
+    if (x >= hole.bbox.x && x <= hole.bbox.x + hole.bbox.width && y >= hole.bbox.y && y <= hole.bbox.y + hole.bbox.height) {
+      return hole;
+    }
+  }
+  return null;
+}
+
 export function useBgRemoval() {
   return {
     state: readonly(state),
@@ -1409,6 +1524,9 @@ export function useBgRemoval() {
       exportSession,
       importSession,
       clearSession,
+      removeHole,
+      applyAllHoles,
+      holeAtPoint,
     },
   };
 }

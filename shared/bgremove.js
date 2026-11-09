@@ -512,3 +512,241 @@ function countMask(mask) {
   for (let i = 0; i < mask.length; i += 1) if (mask[i] > 127) hits += 1;
   return hits;
 }
+
+// ------------------------------------------------------------------ 孔洞检测 / 孔洞填充
+
+/**
+ * 在"去除掩膜"上找出被 255 像素完全包围的 0 值孤岛（孔洞）。
+ *
+ * 掩膜语义：0 = 要保留，255 = 要去除；与 buildBackgroundMask / buildSubjectMask 一致。
+ * "孔洞" 指 4-连通的一段 0 值像素，且其中**没有任何一个**像素触到图片边缘
+ * （触到边缘的 0 是"保留区域本体"，不属于洞）。
+ *
+ * @param {Uint8Array|Uint8ClampedArray} mask 长度 width*height
+ * @param {number} width
+ * @param {number} height
+ * @param {{ minArea?:number, maxHoles?:number }} [options]
+ * @returns {{ id:string, area:number, bbox:{ x:number, y:number, width:number, height:number } }[]}
+ *   按面积降序排列；大的在前；最多返回 maxHoles（默认 50）
+ */
+export function detectHolesInMask(mask, width, height, options = {}) {
+  const w = Math.max(1, Math.floor(Number(width) || 1));
+  const h = Math.max(1, Math.floor(Number(height) || 1));
+  const n = w * h;
+  if (!mask || mask.length < n) return [];
+  const minArea = Math.max(1, Math.floor(Number(options.minArea) || 1));
+  const maxHoles = Math.max(1, Math.min(1000, Math.floor(Number(options.maxHoles) || 50)));
+
+  // 两趟 BFS：
+  //   第一趟：从边缘像素出发，对所有 mask=0 的像素做 4-连通泛洪填充 → 标记"已到达"
+  //     （这些是触到边缘的保留本体，不是洞）。
+  //   第二趟：遍历 mask=0 且未标记的像素，每一段 4-连通即是一个洞。
+  const reached = new Uint8Array(n); // 0=未到达，1=已到达
+  const stack = new Int32Array(n);
+  let top = 0;
+
+  const push = (index) => {
+    if (mask[index] === 0 && !reached[index]) {
+      reached[index] = 1;
+      stack[top++] = index;
+    }
+  };
+
+  for (let x = 0; x < w; x += 1) {
+    push(x);
+    push((h - 1) * w + x);
+  }
+  for (let y = 0; y < h; y += 1) {
+    push(y * w);
+    push(y * w + w - 1);
+  }
+
+  while (top > 0) {
+    const idx = stack[--top];
+    const x = idx % w;
+    const y = (idx - x) / w;
+    if (x > 0) push(idx - 1);
+    if (x + 1 < w) push(idx + 1);
+    if (y > 0) push(idx - w);
+    if (y + 1 < h) push(idx + w);
+  }
+
+  // 第二趟：收集孔洞
+  const holes = [];
+  const visited = new Uint8Array(n);
+  for (let i = 0; i < n; i += 1) {
+    if (mask[i] !== 0 || reached[i] || visited[i]) continue;
+
+    // BFS 收集 4-连通分量
+    let holeTop = 0;
+    stack[holeTop++] = i;
+    visited[i] = 1;
+    let area = 0;
+    let minX = w;
+    let minY = h;
+    let maxX = -1;
+    let maxY = -1;
+
+    while (holeTop > 0) {
+      const idx = stack[--holeTop];
+      const x = idx % w;
+      const y = (idx - x) / w;
+      area += 1;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+
+      if (x > 0) {
+        const ni = idx - 1;
+        if (!visited[ni] && mask[ni] === 0 && !reached[ni]) {
+          visited[ni] = 1;
+          stack[holeTop++] = ni;
+        }
+      }
+      if (x + 1 < w) {
+        const ni = idx + 1;
+        if (!visited[ni] && mask[ni] === 0 && !reached[ni]) {
+          visited[ni] = 1;
+          stack[holeTop++] = ni;
+        }
+      }
+      if (y > 0) {
+        const ni = idx - w;
+        if (!visited[ni] && mask[ni] === 0 && !reached[ni]) {
+          visited[ni] = 1;
+          stack[holeTop++] = ni;
+        }
+      }
+      if (y + 1 < h) {
+        const ni = idx + w;
+        if (!visited[ni] && mask[ni] === 0 && !reached[ni]) {
+          visited[ni] = 1;
+          stack[holeTop++] = ni;
+        }
+      }
+    }
+
+    if (area >= minArea) {
+      holes.push({
+        id: `${minX},${minY},${maxX},${maxY},${area}`,
+        area,
+        bbox: {
+          x: minX,
+          y: minY,
+          width: maxX - minX + 1,
+          height: maxY - minY + 1,
+        },
+      });
+    }
+  }
+
+  holes.sort((a, b) => b.area - a.area);
+  return holes.slice(0, maxHoles);
+}
+
+/**
+ * 把「面积 <= maxArea 的孔洞」直接标记为去除（写 255）。
+ * 用于"自动去噪"：参数抠图 / AI 抠图模式下勾选后实时生效。
+ *
+ * @param {Uint8Array} mask 输入掩膜；**会在副本上改**（不修改入参本身）
+ * @param {number} width
+ * @param {number} height
+ * @param {{ maxArea?:number }} [options] 默认 2：去掉 ≤2 像素的孔
+ * @returns {{ mask:Uint8Array, filledPixels:number }}
+ */
+export function fillMaskHoles(mask, width, height, options = {}) {
+  const w = Math.max(1, Math.floor(Number(width) || 1));
+  const h = Math.max(1, Math.floor(Number(height) || 1));
+  const n = w * h;
+  if (!mask || mask.length < n) return { mask: Uint8Array.from(mask ?? []), filledPixels: 0 };
+  const maxArea = Math.max(0, Math.floor(Number(options.maxArea) ?? 2));
+  if (!maxArea) return { mask: Uint8Array.from(mask), filledPixels: 0 };
+
+  const out = Uint8Array.from(mask); // 不改入参
+  const reached = new Uint8Array(n);
+  const stack = new Int32Array(n);
+  let top = 0;
+  const push = (index) => {
+    if (out[index] === 0 && !reached[index]) {
+      reached[index] = 1;
+      stack[top++] = index;
+    }
+  };
+
+  for (let x = 0; x < w; x += 1) {
+    push(x);
+    push((h - 1) * w + x);
+  }
+  for (let y = 0; y < h; y += 1) {
+    push(y * w);
+    push(y * w + w - 1);
+  }
+
+  while (top > 0) {
+    const idx = stack[--top];
+    const x = idx % w;
+    const y = (idx - x) / w;
+    if (x > 0) push(idx - 1);
+    if (x + 1 < w) push(idx + 1);
+    if (y > 0) push(idx - w);
+    if (y + 1 < h) push(idx + w);
+  }
+
+  let filledPixels = 0;
+  const visited = new Uint8Array(n);
+  for (let i = 0; i < n; i += 1) {
+    if (out[i] !== 0 || reached[i] || visited[i]) continue;
+
+    let holeTop = 0;
+    stack[holeTop++] = i;
+    visited[i] = 1;
+    let area = 0;
+    const members = []; // 用同一个 stack 先暂存（maxArea 小的时候不会爆）
+
+    while (holeTop > 0) {
+      const idx = stack[--holeTop];
+      members.push(idx);
+      area += 1;
+      const x = idx % w;
+      const y = (idx - x) / w;
+      if (x > 0) {
+        const ni = idx - 1;
+        if (!visited[ni] && out[ni] === 0 && !reached[ni]) {
+          visited[ni] = 1;
+          stack[holeTop++] = ni;
+        }
+      }
+      if (x + 1 < w) {
+        const ni = idx + 1;
+        if (!visited[ni] && out[ni] === 0 && !reached[ni]) {
+          visited[ni] = 1;
+          stack[holeTop++] = ni;
+        }
+      }
+      if (y > 0) {
+        const ni = idx - w;
+        if (!visited[ni] && out[ni] === 0 && !reached[ni]) {
+          visited[ni] = 1;
+          stack[holeTop++] = ni;
+        }
+      }
+      if (y + 1 < h) {
+        const ni = idx + w;
+        if (!visited[ni] && out[ni] === 0 && !reached[ni]) {
+          visited[ni] = 1;
+          stack[holeTop++] = ni;
+        }
+      }
+    }
+
+    if (area <= maxArea) {
+      for (let k = 0; k < area; k += 1) {
+        out[members[k]] = 255;
+        filledPixels += 1;
+      }
+    }
+  }
+
+  return { mask: out, filledPixels };
+}

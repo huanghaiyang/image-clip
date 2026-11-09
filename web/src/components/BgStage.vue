@@ -41,6 +41,7 @@ const {
 
 const overlayEl = ref(null);
 const panning = ref(false);
+const hoveredHole = ref(null); // { id, area, bbox } | null
 const item = computed(() => selected.value ?? null);
 const entry = computed(() => activeEntry.value);
 
@@ -50,6 +51,7 @@ let drag = null; // {mode:'pan', clientX, clientY} | {mode:'lasso'}
 const cursorClass = computed(() => {
   if (state.tool === 'pan') return 'cursor-grab';
   if (state.tool === 'pick') return 'cursor-pick';
+  if (state.tool === 'hole') return 'cursor-hole';
   return 'cursor-lasso';
 });
 
@@ -106,11 +108,30 @@ function onPointerDown(event) {
     return;
   }
 
+  if (state.tool === 'hole') {
+    // 孔洞工具：点选当前光标下的那个孔洞 → 移除
+    const hole = actions.holeAtPoint(entry.value, point.preview.x, point.preview.y);
+    if (hole) actions.removeHole(entry.value, hole.id);
+    drag = null;
+    return;
+  }
+
   drag = { mode: 'lasso' };
   actions.beginLasso(point.preview, screenScale());
 }
 
 function onPointerMove(event) {
+  // hole 工具的 hover 检测：不走 drag 状态，直接查当前点有没有命中孔洞
+  if (state.tool === 'hole') {
+    const point = pointFromEvent(event);
+    if (!point) return;
+    const e = entry.value;
+    const hole = e ? actions.holeAtPoint(e, point.preview.x, point.preview.y) : null;
+    hoveredHole.value = hole;
+    scheduleOverlay();
+    return;
+  }
+
   if (panning.value || !drag) return;
 
   if (drag.mode === 'pan') {
@@ -256,6 +277,53 @@ function drawOverlay() {
     ctx.arc(first.x, first.y, 3, 0, Math.PI * 2);
     ctx.fill();
   }
+
+  // ----------------------------------------------------------- 孔洞标记
+  const holes = e.holes;
+  if (state.tool === 'hole' && holes && holes.length) {
+    const highlight = hoveredHole.value?.id;
+    for (const hole of holes) {
+      const { x: bx, y: by, width: bw, height: bh } = hole.bbox;
+      const tl = toScreen({ x: bx, y: by });
+      const br = toScreen({ x: bx + bw, y: by + bh });
+      const cx = (tl.x + br.x) / 2;
+      const cy = (tl.y + br.y) / 2;
+      const diag = Math.hypot(bw, bh) * k;
+      const r = Math.max(4, Math.min(28, diag * 0.5));
+      const isHighlight = hole.id === highlight;
+
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = isHighlight ? 'rgba(255,80,80,0.32)' : 'rgba(255,180,80,0.22)';
+      ctx.fill();
+      ctx.strokeStyle = isHighlight ? '#ff3f3f' : '#ffb450';
+      ctx.lineWidth = isHighlight ? 2 : 1.2;
+      ctx.stroke();
+
+      if (isHighlight) {
+        const tr = toScreen({ x: bx + bw, y: by });
+        const bl = toScreen({ x: bx, y: by + bh });
+        ctx.beginPath();
+        ctx.moveTo(tl.x, tl.y);
+        ctx.lineTo(tr.x, tr.y);
+        ctx.lineTo(br.x, br.y);
+        ctx.lineTo(bl.x, bl.y);
+        ctx.closePath();
+        ctx.strokeStyle = '#ff3f3f';
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([4, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (hole.area > 1) {
+          ctx.fillStyle = '#ff3f3f';
+          ctx.font = '11px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(`${hole.area}px`, cx, cy);
+        }
+      }
+    }
+  }
 }
 
 // --------------------------------------------------------------- 生命周期
@@ -294,6 +362,8 @@ watchEffect(() => {
     void last.x;
     void last.y;
   }
+  void e.holes?.length;
+  void hoveredHole.value?.id;
   void view.containerWidth;
   void view.containerHeight;
   void displayWidth.value;
@@ -362,6 +432,11 @@ function onWheel(event) {
           空格 / 中键拖动平移
         </template>
         <template v-else-if="state.tool === 'pick'">点击画面取背景色（仅去除该颜色） · 空格 / 中键拖动平移</template>
+        <template v-else-if="state.tool === 'hole'">
+          点击画面上的孔洞标记将其移除 ·
+          {{ entry?.holes?.length ? `已检测到 ${entry.holes.length} 个孔洞` : '当前没有检测到孔洞' }} ·
+          空格 / 中键拖动平移
+        </template>
         <template v-else>拖动平移画面 · 空格 / 中键也可拖动</template>
         <template v-if="entry?.computing"> · 计算中…</template>
         <template v-else-if="entry"> · {{ (entry.coverage * 100).toFixed(1) }}% 透明</template>
@@ -412,6 +487,11 @@ function onWheel(event) {
 
 .cursor-pick {
   cursor: copy;
+}
+
+.cursor-hole {
+  cursor: not-allowed;
+  cursor: var(--cursor-hole, cell);
 }
 
 .cursor-grab {

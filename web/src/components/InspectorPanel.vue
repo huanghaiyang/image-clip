@@ -4,7 +4,7 @@ import { computed, ref } from 'vue';
 import RangeField from './ui/RangeField.vue';
 import SwitchField from './ui/SwitchField.vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
-import { useWorkspace } from '../composables/useWorkspace.js';
+import { useWorkspace, ATLAS_NOISE_ALPHA } from '../composables/useWorkspace.js';
 import { formatBytes, formatRatio } from '../lib/imaging.js';
 
 const { state, selected, checkedItems, trimAtlas, actions, meta } = useWorkspace();
@@ -196,6 +196,7 @@ const atlasSummary = computed(() => {
         <h3 class="section-title">图集透明裁剪（最大 AABB）</h3>
         <p class="muted note">
           先在左侧「当前素材」勾选图片：各图的内容框换算成相对坐标后取并集，用同一个最大 AABB 裁切，序列帧的取景保持一致。
+          并集计算会忽略 alpha ≤ {{ ATLAS_NOISE_ALPHA }} 的近透明噪点，避免个别帧的杂点把取景框撑大。
         </p>
 
         <template v-if="trimAtlas">

@@ -33,6 +33,7 @@ const modeTabs = [
 const toolOptions = [
   { value: 'lasso', label: '套索', hint: '手绘或智能选区，限定去除范围或保护内容' },
   { value: 'pick', label: '取色器', hint: '点击画面取背景色' },
+  { value: 'hole', label: '噪点', hint: '点选画面上的孔洞将其移除' },
   { value: 'pan', label: '平移', hint: '拖动查看大图' },
 ];
 
@@ -51,6 +52,12 @@ const coverageText = computed(() => {
   const e = entry.value;
   if (!e) return '—';
   return `${(e.coverage * 100).toFixed(2)}%`;
+});
+
+const topHoles = computed(() => {
+  const e = entry.value;
+  if (!e?.holes?.length) return [];
+  return e.holes.slice(0, 8); // 面积已按降序排列
 });
 
 // ------------------------------------------------------------ AI 精准抠像
@@ -89,7 +96,7 @@ function runBatch() {
   <aside class="panel bg-panel">
     <div class="panel-title">
       <span>背景去除</span>
-      <span class="chip">{{ state.tool === 'lasso' ? '套索' : state.tool === 'pick' ? '取色器' : '平移' }}</span>
+      <span class="chip">{{ state.tool === 'lasso' ? '套索' : state.tool === 'pick' ? '取色器' : state.tool === 'hole' ? '噪点' : '平移' }}</span>
     </div>
 
     <div class="panel-body">
@@ -260,6 +267,66 @@ function runBatch() {
             hint="按公式反算前景色，消除半透明边缘的底色污染"
             @update:model-value="actions.setOption('decontaminate', $event)"
           />
+        </section>
+
+        <section v-if="entry.mode !== 'none'" class="section">
+          <h3 class="section-title">噪点处理</h3>
+          <SwitchField
+            label="自动去噪"
+            :model-value="entry.options.autoRemoveHoles"
+            hint="预览实时生效：把面积 ≤ 阈值、被去除区域完全包围的小孔洞直接填掉"
+            @update:model-value="actions.setOption('autoRemoveHoles', $event)"
+          />
+          <RangeField
+            label="最小孔洞面积"
+            :model-value="entry.options.maxHoleArea"
+            :min="1"
+            :max="200"
+            :step="1"
+            suffix="px"
+            hint="面积 ≤ 该值 的孔会被自动填掉；默认 2"
+            :disabled="!entry.options.autoRemoveHoles"
+            @update:model-value="actions.setOption('maxHoleArea', $event)"
+          />
+
+          <div class="hole-status">
+            <span class="muted">检测到</span>
+            <span class="mono accent">{{ entry.holes.length }}</span>
+            <span class="muted">个孔洞（预览分辨率像素）</span>
+          </div>
+
+          <template v-if="topHoles.length">
+            <div class="hole-list">
+              <div v-for="hole in topHoles" :key="hole.id" class="hole-row">
+                <span class="mono">{{ hole.area }}px</span>
+                <span class="hole-pos mono">@ {{ hole.bbox.x }},{{ hole.bbox.y }}</span>
+                <button
+                  class="btn is-ghost is-mini"
+                  type="button"
+                  title="移除此孔洞"
+                  @click="actions.removeHole(entry, hole.id)"
+                >
+                  移除
+                </button>
+              </div>
+              <button
+                v-if="entry.holes.length > topHoles.length"
+                class="hole-more muted"
+                type="button"
+              >
+                其余 {{ entry.holes.length - topHoles.length }} 个略…
+              </button>
+            </div>
+            <button class="btn is-block mt-8" type="button" @click="actions.applyAllHoles(entry)">
+              一键移除全部孔洞（{{ entry.holes.length }}）
+            </button>
+            <p class="hint">
+              也可以切到右侧「噪点」工具直接在画面上点选；已移除的孔洞会跟随参数撤销/重做。
+            </p>
+          </template>
+          <p v-else class="hint">
+            没有检测到孔洞。参数抠图模式下确认「只去除与边缘连通区域」已开启，主体身上的残留杂点才会被识别为孔洞。
+          </p>
         </section>
 
         <section class="section">
@@ -539,5 +606,47 @@ function runBatch() {
   margin: 10px 12px;
   color: var(--danger);
   font-size: 11px;
+}
+
+.hole-status {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  margin: 6px 0;
+}
+
+.hole-status .accent {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.hole-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.hole-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  font-size: 11px;
+}
+
+.hole-pos {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.hole-more {
+  align-self: flex-end;
+  margin-top: 2px;
+  font-size: 10px;
 }
 </style>

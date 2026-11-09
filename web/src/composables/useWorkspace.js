@@ -6,7 +6,7 @@
  * 一律 markRaw，避免 Vue 深度代理带来的额外开销。
  */
 import { computed, markRaw, reactive, readonly } from 'vue';
-import { ALGORITHM, DEFAULT_OPTIONS } from '@shared/aabb.js';
+import { ALGORITHM, DEFAULT_OPTIONS, detectBounds } from '@shared/aabb.js';
 
 import {
   ImageDecodeError,
@@ -52,16 +52,58 @@ const checkedItems = computed(() => state.items.filter((item) => state.checkedId
 /**
  * 图集（透明裁剪）：把勾选素材各自的内容框换算成归一化坐标后取并集，
  * 得到「最大 AABB」；再用同一个相对框裁切每张图，序列帧构图才能对齐。
+ *
+ * 并集使用「去噪」AABB：单帧 AABB 只按 alpha > 1 判定内容，去背景残留的
+ * alpha 2~6 杂点会落在很远的位置，一帧就能把整批并集撑大一大圈。
+ * 因此并集统一忽略 alpha 小于 ATLAS_NOISE_ALPHA 的像素。
  */
+export const ATLAS_NOISE_ALPHA = 8;
+
+const noiseBoundsCache = new Map();
+
+function atlasBounds(item) {
+  const options = optionsSnapshot();
+  const threshold = Math.max(options.alphaThreshold, ATLAS_NOISE_ALPHA);
+  const key = [
+    threshold,
+    options.matchColor ? options.backgroundColor : '',
+    options.colorTolerance,
+    options.padding,
+    item.width,
+    item.height,
+    item.detectedAt ?? 0,
+  ].join('|');
+  const hit = noiseBoundsCache.get(item.id);
+  if (hit && hit.key === key) return hit.bounds;
+
+  let bounds = item.bounds;
+  if (item.imageData) {
+    try {
+      const result = detectBounds(item.imageData.data, item.width, item.height, { ...options, alphaThreshold: threshold });
+      if (!result.empty) bounds = result.bounds;
+    } catch {
+      // 数据异常时退回单帧检测结果
+    }
+  }
+  noiseBoundsCache.set(item.id, { key, bounds });
+  return bounds;
+}
+
 const trimAtlas = computed(() => {
-  const list = checkedItems.value.filter((item) => item.bounds && !item.resultEmpty && item.width && item.height);
+  const usable = checkedItems.value.filter((item) => item.bounds && !item.resultEmpty && item.width && item.height);
+  const list = usable
+    .map((item) => {
+      const bounds = atlasBounds(item);
+      return bounds && bounds.width > 0 && bounds.height > 0 ? { item, bounds } : null;
+    })
+    .filter(Boolean);
   if (!list.length) return null;
+
   let left = 1;
   let top = 1;
   let right = 0;
   let bottom = 0;
-  for (const item of list) {
-    const { bounds } = item;
+  for (const { item, bounds } of list) {
     left = Math.min(left, bounds.x / item.width);
     top = Math.min(top, bounds.y / item.height);
     right = Math.max(right, (bounds.x + bounds.width) / item.width);
@@ -73,7 +115,7 @@ const trimAtlas = computed(() => {
     width: Math.min(1, right) - Math.max(0, left),
     height: Math.min(1, bottom) - Math.max(0, top),
   };
-  return { count: list.length, items: list, norm };
+  return { count: list.length, skipped: usable.length - list.length, items: list.map((row) => row.item), norm };
 });
 const stats = computed(() => {
   const total = state.items.length;

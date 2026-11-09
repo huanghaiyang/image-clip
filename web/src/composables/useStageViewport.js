@@ -56,6 +56,17 @@ export function useSpaceHeld() {
   return spaceHeld;
 }
 
+/**
+ * 全局"当前视口"引用：同一时刻只有一个 Stage 组件被挂载，所以每次
+ * useStageViewport() 创建新实例时都会覆盖它。App.vue 的 0 键 fit 就靠这个。
+ */
+let activeViewport = null;
+
+/** 手动把当前激活视口重置为"适合窗口"。App.vue 的 0 键统一走这里。 */
+export function resetActiveViewport() {
+  activeViewport?.resetView();
+}
+
 export function useStageViewport() {
   const spaceHeld = useSpaceHeld();
   let panState = null;
@@ -230,6 +241,9 @@ export function useStageViewport() {
     height: `${displayHeight.value}px`,
     transform: `translate(${view.panX}px, ${view.panY}px)`,
   }));
+
+  // 注册为当前激活视口，供 App.vue 的 0 键 fit 调用
+  activeViewport = { resetView };
 
   return {
     container,

@@ -47,6 +47,7 @@ import { useVideo } from './composables/useVideo.js';
 import { useAudio } from './composables/useAudio.js';
 import { useEraser } from './composables/useEraser.js';
 import { usePixelPaint } from './composables/usePixelPaint.js';
+import { resetActiveViewport } from './composables/useStageViewport.js';
 import { openImportPicker, useUploadPicker } from './composables/useUploadPicker.js';
 import { useWorkSession } from './composables/useWorkSession.js';
 import { useUndo } from './composables/useUndo.js';
@@ -185,7 +186,8 @@ function onKeydown(event) {
   }
 
   if (tool === 'eraser') {
-    // 橡皮擦：撤销/重做走全局 Ctrl+Z，这里只处理笔刷大小
+    // 橡皮擦：撤销/重做走全局 Ctrl+Z，这里只处理笔刷大小和 fit
+    if (event.key === '0') resetActiveViewport();
     if (event.key === '[' || event.key === ']') {
       const step = event.key === ']' ? 2 : -2;
       const next = Math.min(400, Math.max(2, eraserState.brush.size + step));
@@ -196,6 +198,7 @@ function onKeydown(event) {
 
   if (tool === 'pixel') {
     // 像素笔绘：撤销/重做走全局 Ctrl+Z；[ ] 调笔刷；B/E/I 切换画笔/橡皮/吸管；G 网格
+    if (event.key === '0') resetActiveViewport();
     if (event.key === '[' || event.key === ']') {
       const step = event.key === ']' ? 1 : -1;
       pixelActions.setBrush('size', pixelState.brush.size + step);
@@ -223,8 +226,19 @@ function onKeydown(event) {
     return;
   }
 
-  if (tool === 'cropimage' && (event.key === 'Delete' || event.key === 'Backspace') && state.selectedId) {
-    actions.removeItem(state.selectedId);
+  if (tool === 'cropimage') {
+    // 图片裁剪：0 适合窗口，Delete/Backspace 删除当前素材
+    if (event.key === '0') resetActiveViewport();
+    if ((event.key === 'Delete' || event.key === 'Backspace') && state.selectedId) {
+      actions.removeItem(state.selectedId);
+    }
+    return;
+  }
+
+  if (tool === 'bgremove') {
+    // 去背景：0 适合窗口
+    if (event.key === '0') resetActiveViewport();
+    return;
   }
 }
 
