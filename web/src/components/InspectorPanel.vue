@@ -1,15 +1,18 @@
 <script setup>
 /** 右侧检查器：检测参数 / 当前结果 / 导出（对应 Figma 的右侧属性面板）。 */
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import RangeField from './ui/RangeField.vue';
 import SwitchField from './ui/SwitchField.vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import { useWorkspace, ATLAS_NOISE_ALPHA } from '../composables/useWorkspace.js';
 import { formatBytes, formatRatio } from '../lib/imaging.js';
 
-const { state, selected, checkedItems, trimAtlas, actions, meta } = useWorkspace();
+const { state, selected, checkedItems, trimAtlas, spriteGroup, actions, meta } = useWorkspace();
 
 const atlasSaveToLibrary = ref(true);
+// 精灵图：列数 0 表示自动方阵，间距单位为像素
+const spriteColumns = ref(0);
+const spriteGap = ref(0);
 
 const items = computed(() => state.items);
 const exportable = computed(() => items.value.filter((item) => item.bounds && !item.resultEmpty));
@@ -41,6 +44,27 @@ const atlasSummary = computed(() => {
   return `${(norm.x * 100).toFixed(1)}% , ${(norm.y * 100).toFixed(1)}% · ${(norm.width * 100).toFixed(1)}% × ${(
     norm.height * 100
   ).toFixed(1)}%`;
+});
+
+const spriteMaxColumns = computed(() => Math.max(1, spriteGroup.value?.frames.length ?? 1));
+watch(spriteMaxColumns, (max) => {
+  if (spriteColumns.value > max) spriteColumns.value = max;
+});
+const spritePlan = computed(() => {
+  const group = spriteGroup.value;
+  if (!group) return null;
+  const count = group.frames.length;
+  const auto = Math.ceil(Math.sqrt(count));
+  const cols = Math.max(1, Math.min(count, spriteColumns.value || auto));
+  const gap = Math.max(0, Math.round(spriteGap.value) || 0);
+  const rows = Math.ceil(count / cols);
+  return {
+    count,
+    cols,
+    rows,
+    width: cols * group.width + (cols - 1) * gap,
+    height: rows * group.height + (rows - 1) * gap,
+  };
 });
 </script>
 
@@ -226,6 +250,61 @@ const atlasSummary = computed(() => {
           图集透明裁剪{{ trimAtlas ? ` ${trimAtlas.count} 张` : '' }}
         </button>
         <p class="muted note">结果会作为新素材加入左侧列表，原图保持不变。</p>
+      </section>
+
+      <!-- 精灵图 -->
+      <section class="section">
+        <h3 class="section-title">精灵图（Sprite）</h3>
+        <p class="muted note">
+          把勾选的同尺寸素材按方阵拼成一张 PNG（保留透明通道）。图集透明裁剪的结果天然同尺寸，勾选后可直接导出。
+        </p>
+
+        <template v-if="spriteGroup">
+          <dl class="kv">
+            <div class="kv-row">
+              <dt>同尺寸帧</dt>
+              <dd class="mono">{{ spriteGroup.frames.length }} 张 · {{ spriteGroup.width }} × {{ spriteGroup.height }}</dd>
+            </div>
+            <div class="kv-row" v-if="spritePlan">
+              <dt>输出尺寸</dt>
+              <dd class="mono accent">
+                {{ spritePlan.width }} × {{ spritePlan.height }}（{{ spritePlan.cols }} 列 × {{ spritePlan.rows }} 行）
+              </dd>
+            </div>
+          </dl>
+          <p v-if="spriteGroup.skipped" class="muted note">
+            另有 {{ spriteGroup.skipped }} 张素材尺寸不同，不会参与拼图。
+          </p>
+
+          <RangeField
+            label="列数"
+            :model-value="spriteColumns"
+            :min="0"
+            :max="spriteMaxColumns"
+            suffix="列"
+            :hint="`0 表示自动方阵（约 ${Math.ceil(Math.sqrt(spriteGroup.frames.length))} 列）。`"
+            @update:model-value="spriteColumns = $event"
+          />
+          <RangeField
+            label="帧间距"
+            :model-value="spriteGap"
+            :min="0"
+            :max="32"
+            suffix="px"
+            hint="帧之间留出的透明间隙。"
+            @update:model-value="spriteGap = $event"
+          />
+
+          <button
+            class="btn is-primary is-block"
+            type="button"
+            :disabled="state.busy"
+            @click="actions.exportSpriteSheet({ columns: spriteColumns, gap: spriteGap })"
+          >
+            导出精灵图（{{ spriteGroup.frames.length }} 帧）
+          </button>
+        </template>
+        <p v-else class="muted empty">先在左侧勾选要拼成精灵图的素材。</p>
       </section>
 
       <!-- 导出 -->

@@ -19,7 +19,7 @@ import {
 import { analyzeWith, cropWith } from '../lib/engine.js';
 import { blobToBytes, createZip } from '../lib/zip.js';
 import { onLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
-import { canvasToBlob, cropToBlob, stripExtension } from '../lib/imageops.js';
+import { canvasToBlob, createCanvas, cropToBlob, stripExtension } from '../lib/imageops.js';
 
 let uid = 0;
 
@@ -117,6 +117,30 @@ const trimAtlas = computed(() => {
   };
   return { count: list.length, skipped: usable.length - list.length, items: list.map((row) => row.item), norm };
 });
+/**
+ * 精灵图导出的帧组：勾选素材中尺寸完全一致、数量最多的那一组。
+ * 图集透明裁剪用的是同一个归一化取景框，结果天然同尺寸，
+ * 勾选这些结果就能直接拼成一张精灵图。
+ */
+const spriteGroup = computed(() => {
+  const usable = checkedItems.value.filter((item) => item.bitmap && item.width > 0 && item.height > 0);
+  if (!usable.length) return null;
+
+  const groups = new Map();
+  for (const item of usable) {
+    const key = `${item.width}x${item.height}`;
+    let group = groups.get(key);
+    if (!group) groups.set(key, (group = { width: item.width, height: item.height, frames: [] }));
+    group.frames.push(item);
+  }
+
+  let best = null;
+  for (const group of groups.values()) {
+    if (!best || group.frames.length > best.frames.length) best = group;
+  }
+  return { ...best, skipped: usable.length - best.frames.length, groupCount: groups.size };
+});
+
 const stats = computed(() => {
   const total = state.items.length;
   const ready = state.items.filter((item) => item.bounds && !item.empty).length;
@@ -616,6 +640,48 @@ export async function trimAtlasBatch({ saveToLibrary = true } = {}) {
   }
 }
 
+/**
+ * 精灵图导出：把勾选素材中同尺寸的那一组按方阵拼成一张 PNG。
+ * columns=0 时按 ⌈√N⌉ 自动决定列数；gap 为帧间距（像素，透明填充）。
+ */
+export async function exportSpriteSheet({ columns = 0, gap = 0 } = {}) {
+  const group = spriteGroup.value;
+  if (!group) {
+    setError('请先在左侧「当前素材」勾选要拼成精灵图的图片');
+    return;
+  }
+
+  state.busy = true;
+  try {
+    const { frames, width, height } = group;
+    const auto = Math.ceil(Math.sqrt(frames.length));
+    const cols = Math.max(1, Math.min(frames.length, Math.round(columns) || auto));
+    const rows = Math.ceil(frames.length / cols);
+    const spacing = Math.max(0, Math.round(Number(gap) || 0));
+
+    const sheetWidth = cols * width + (cols - 1) * spacing;
+    const sheetHeight = rows * height + (rows - 1) * spacing;
+    const canvas = createCanvas(sheetWidth, sheetHeight);
+    const ctx = canvas.getContext('2d');
+    frames.forEach((item, index) => {
+      const col = index % cols;
+      const row = Math.floor(index / cols);
+      ctx.drawImage(item.bitmap, col * (width + spacing), row * (height + spacing));
+    });
+
+    const blob = await canvasToBlob(canvas, 'image/png');
+    const filename = `${stripExtension(frames[0].name)}-sprite-${cols}x${rows}.png`;
+    downloadBlob(blob, filename);
+    setStatus(
+      `已导出精灵图 ${filename}（${sheetWidth}×${sheetHeight}，${frames.length} 帧${group.skipped ? `，跳过 ${group.skipped} 张不同尺寸` : ''}）`,
+    );
+  } catch (err) {
+    setError(`导出精灵图失败：${err.message}`);
+  } finally {
+    state.busy = false;
+  }
+}
+
 /** 挂载时检查 Node 服务端能力（状态栏展示）。 */
 export async function checkServer() {
   try {
@@ -774,6 +840,7 @@ export function useWorkspace() {
     selected,
     checkedItems,
     trimAtlas,
+    spriteGroup,
     stats,
     canUndoAssets,
     canRedoAssets,
@@ -801,6 +868,7 @@ export function useWorkspace() {
       copyBounds,
       saveTrimmedItem,
       trimAtlasBatch,
+      exportSpriteSheet,
       checkServer,
       toggleTheme,
       recomputeAll,

@@ -31,6 +31,7 @@ import AudioSidebar from './components/AudioSidebar.vue';
 import AudioStage from './components/AudioStage.vue';
 import AudioPanel from './components/AudioPanel.vue';
 import PixelPaintStage from './components/PixelPaintStage.vue';
+import SpriteStage from './components/SpriteStage.vue';
 import StatusBar from './components/StatusBar.vue';
 import ChatDrawer from './components/ChatDrawer.vue';
 import UploadDialog from './components/UploadDialog.vue';
@@ -47,6 +48,7 @@ import { useVideo } from './composables/useVideo.js';
 import { useAudio } from './composables/useAudio.js';
 import { useEraser } from './composables/useEraser.js';
 import { usePixelPaint } from './composables/usePixelPaint.js';
+import { useSprite } from './composables/useSprite.js';
 import { resetActiveViewport } from './composables/useStageViewport.js';
 import { openImportPicker, useUploadPicker } from './composables/useUploadPicker.js';
 import { useWorkSession } from './composables/useWorkSession.js';
@@ -60,6 +62,7 @@ const { state: videoState, actions: videoActions } = useVideo();
 const { state: audioState, actions: audioActions } = useAudio();
 const { state: eraserState, actions: eraserActions } = useEraser();
 const { state: pixelState, actions: pixelActions } = usePixelPaint();
+const { actions: spriteActions } = useSprite();
 const { state: uploadState } = useUploadPicker();
 const { state: sessionState, actions: sessionActions } = useWorkSession();
 const { actions: undoActions } = useUndo();
@@ -67,7 +70,7 @@ const { actions: undoActions } = useUndo();
 const mode = computed(() => appMode.mode);
 
 /** 这些图片工具的舞台没有内置拖放，交给窗口级处理。 */
-const WINDOW_DROP_TOOLS = new Set(['cropimage', 'bgremove', 'eraser', 'pixel']);
+const WINDOW_DROP_TOOLS = new Set(['cropimage', 'bgremove', 'eraser', 'pixel', 'sprite']);
 
 /** 资源库 / 视频 / 音频直接入库；图片处理入库后自动载入素材列表。 */
 async function importFiles(files, { toLibrary = false } = {}) {
@@ -215,6 +218,20 @@ function onKeydown(event) {
     return;
   }
 
+  if (tool === 'sprite') {
+    // 精灵图：空格播放/暂停，←/→ 逐帧
+    if (event.key === ' ') {
+      event.preventDefault();
+      spriteActions.togglePlay();
+      return;
+    }
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      spriteActions.step(event.key === 'ArrowLeft' ? -1 : 1);
+    }
+    return;
+  }
+
   if (tool === 'crop') {
     if (event.key === '0') actions.setView('zoom', 'fit');
     if (event.key.toLowerCase() === 'r' && !meta) {
@@ -320,6 +337,7 @@ watch(
         <BgStage v-else-if="activeTool === 'bgremove'" />
         <EraserStage v-else-if="activeTool === 'eraser'" />
         <PixelPaintStage v-else-if="activeTool === 'pixel'" />
+        <SpriteStage v-else-if="activeTool === 'sprite'" />
         <WatermarkStage v-else-if="activeTool === 'watermark'" />
         <StageCanvas v-else />
         <ImageToolPanel />
