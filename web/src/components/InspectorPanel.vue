@@ -1,6 +1,6 @@
 <script setup>
 /** 右侧检查器：检测参数 / 当前结果 / 导出（对应 Figma 的右侧属性面板）。 */
-import { computed, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import RangeField from './ui/RangeField.vue';
 import SwitchField from './ui/SwitchField.vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
@@ -45,6 +45,35 @@ const atlasSummary = computed(() => {
     norm.height * 100
   ).toFixed(1)}%`;
 });
+
+// 图集透明裁剪预览：按当前并集取景框裁出前 12 张，只读展示
+const ATLAS_PREVIEW_LIMIT = 12;
+const atlasPreview = ref(null);
+const atlasPreviewBusy = ref(false);
+
+async function openAtlasPreview() {
+  if (atlasPreviewBusy.value || !trimAtlas.value) return;
+  atlasPreviewBusy.value = true;
+  try {
+    closeAtlasPreview();
+    atlasPreview.value = await actions.previewAtlasCrop({ limit: ATLAS_PREVIEW_LIMIT });
+    if (atlasPreview.value) window.addEventListener('keydown', onAtlasPreviewKey);
+  } finally {
+    atlasPreviewBusy.value = false;
+  }
+}
+
+function closeAtlasPreview() {
+  window.removeEventListener('keydown', onAtlasPreviewKey);
+  for (const row of atlasPreview.value?.results ?? []) URL.revokeObjectURL(row.url);
+  atlasPreview.value = null;
+}
+
+function onAtlasPreviewKey(event) {
+  if (event.key === 'Escape') closeAtlasPreview();
+}
+
+onBeforeUnmount(closeAtlasPreview);
 
 const spriteMaxColumns = computed(() => Math.max(1, spriteGroup.value?.frames.length ?? 1));
 watch(spriteMaxColumns, (max) => {
@@ -242,6 +271,14 @@ const spritePlan = computed(() => {
           <span>保存到资源库/裁剪结果</span>
         </label>
         <button
+          class="btn is-block is-ghost"
+          type="button"
+          :disabled="state.busy || !trimAtlas || atlasPreviewBusy"
+          @click="openAtlasPreview"
+        >
+          {{ atlasPreviewBusy ? '正在生成预览…' : '预览裁剪效果' }}
+        </button>
+        <button
           class="btn is-primary is-block"
           type="button"
           :disabled="state.busy || !trimAtlas"
@@ -350,6 +387,41 @@ const spritePlan = computed(() => {
       </section>
     </div>
   </aside>
+
+  <!-- 图集透明裁剪预览：只读展示每张图的裁切结果 -->
+  <Teleport to="body">
+    <div v-if="atlasPreview" class="atlas-mask" @click.self="closeAtlasPreview">
+      <div class="atlas-dialog" role="dialog" aria-modal="true" aria-label="图集透明裁剪预览">
+        <header class="atlas-head">
+          <div>
+            <h2>图集透明裁剪预览</h2>
+            <p class="atlas-sub">
+              {{ atlasPreview.count }} 张共用同一取景框 · 预览前 {{ atlasPreview.results.length }} 张 · 实际裁切尺寸与预览一致
+            </p>
+          </div>
+          <button class="atlas-close" type="button" title="关闭 (Esc)" @click="closeAtlasPreview">×</button>
+        </header>
+
+        <div v-if="atlasPreview.results.length" class="atlas-grid">
+          <figure v-for="row in atlasPreview.results" :key="row.id" class="atlas-item">
+            <div class="atlas-thumb">
+              <img :src="row.url" :alt="row.name" />
+            </div>
+            <figcaption>
+              <span class="atlas-name" :title="row.name">{{ row.name }}</span>
+              <span class="atlas-size mono">{{ row.sourceWidth }}×{{ row.sourceHeight }} → {{ row.width }}×{{ row.height }}</span>
+            </figcaption>
+          </figure>
+        </div>
+        <p v-else class="atlas-empty">预览生成失败，请重新勾选素材后重试。</p>
+
+        <footer class="atlas-foot">
+          <span class="muted">预览不会改动素材，也不会写入资源库。</span>
+          <button class="btn is-mini" type="button" @click="closeAtlasPreview">关闭</button>
+        </footer>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -505,5 +577,146 @@ const spritePlan = computed(() => {
 
 .is-last .btn + .btn {
   margin-top: 6px;
+}
+
+/* ---------- 图集透明裁剪预览 ---------- */
+.atlas-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+  background: rgba(8, 10, 14, 0.66);
+  backdrop-filter: blur(3px);
+}
+
+.atlas-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(960px, 100%);
+  max-height: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 10px);
+  background: var(--panel);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.atlas-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.atlas-head h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.atlas-sub {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.atlas-close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.atlas-close:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.atlas-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+  padding: 14px 16px;
+  overflow: auto;
+}
+
+.atlas-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
+}
+
+.atlas-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 120px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  /* 棋盘格底：便于确认透明区域是否保留 */
+  background-color: var(--panel-2);
+  background-image: repeating-conic-gradient(rgba(255, 255, 255, 0.08) 0% 25%, transparent 0% 50%);
+  background-size: 12px 12px;
+  overflow: hidden;
+}
+
+.atlas-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.atlas-item figcaption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.atlas-name {
+  font-size: 11px;
+  color: var(--text);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.atlas-size {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.atlas-empty {
+  margin: 0;
+  padding: 40px 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.atlas-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
 }
 </style>

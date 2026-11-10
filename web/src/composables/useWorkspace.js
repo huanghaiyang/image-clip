@@ -595,14 +595,49 @@ export async function saveTrimmedItem(item) {
   }
 }
 
-/** 按归一化框裁切一张素材（保留 PNG alpha）。 */
-async function cropByNorm(item, norm) {
+/** 归一化取景框 → 当前素材的像素矩形；批量裁剪与预览共用，保证两者结果一致。 */
+function normRect(item, norm) {
   const x = Math.max(0, Math.min(item.width - 1, Math.round(norm.x * item.width)));
   const y = Math.max(0, Math.min(item.height - 1, Math.round(norm.y * item.height)));
   const width = Math.max(1, Math.min(item.width - x, Math.round(norm.width * item.width)));
   const height = Math.max(1, Math.min(item.height - y, Math.round(norm.height * item.height)));
-  const rect = { x, y, width, height };
+  return { x, y, width, height };
+}
+
+async function cropByNorm(item, norm) {
+  const rect = normRect(item, norm);
   return cropToBlob(item.bitmap, rect, rect, { type: 'image/png' });
+}
+
+/**
+ * 图集透明裁剪预览：按当前并集取景框裁出前 limit 张，返回可直接展示的 object URL。
+ * 只读操作，不写入素材列表 / 资源库；调用方负责 revokeObjectURL 释放。
+ */
+export async function previewAtlasCrop({ limit = 12 } = {}) {
+  const atlas = trimAtlas.value;
+  if (!atlas) {
+    setError('请先在左侧「当前素材」勾选要图集透明裁剪的图片');
+    return null;
+  }
+  const results = [];
+  for (const item of atlas.items.slice(0, limit)) {
+    try {
+      const rect = normRect(item, atlas.norm);
+      const blob = await cropByNorm(item, atlas.norm);
+      results.push({
+        id: item.id,
+        name: item.name,
+        url: URL.createObjectURL(blob),
+        sourceWidth: item.width,
+        sourceHeight: item.height,
+        width: rect.width,
+        height: rect.height,
+      });
+    } catch (err) {
+      console.warn('[workspace] 图集裁剪预览失败:', item.name, err.message);
+    }
+  }
+  return { count: atlas.count, norm: { ...atlas.norm }, results };
 }
 
 /** 图集透明裁剪：所有勾选素材共用最大 AABB，结果写回素材列表，可选存入资源库。 */
@@ -868,6 +903,7 @@ export function useWorkspace() {
       copyBounds,
       saveTrimmedItem,
       trimAtlasBatch,
+      previewAtlasCrop,
       exportSpriteSheet,
       checkServer,
       toggleTheme,
