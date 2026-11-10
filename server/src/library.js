@@ -300,9 +300,52 @@ export function createLibrary(options = {}) {
     return { ...base, ...info };
   }
 
+  const FOLDER_PREVIEW_LIMIT = 4;
+  /** 直接子项里没有图片/视频时继续往子目录找，但限制层数与目录数，避免大目录拖慢列表。 */
+  const FOLDER_PREVIEW_MAX_DEPTH = 2;
+  const FOLDER_PREVIEW_MAX_DIRS = 12;
+
+  /** 读取文件夹内最多 4 个图片 / 视频，供文件夹卡片拼缩略图。 */
+  async function peekFolderPreview(absDir, limit = FOLDER_PREVIEW_LIMIT) {
+    const previews = [];
+    const queue = [{ abs: absDir, depth: 0 }];
+    let visited = 0;
+    while (queue.length && previews.length < limit && visited < FOLDER_PREVIEW_MAX_DIRS) {
+      const { abs, depth } = queue.shift();
+      visited += 1;
+      const dirents = await fs.readdir(abs, { withFileTypes: true }).catch(() => []);
+      dirents.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+      for (const dirent of dirents) {
+        if (dirent.name.startsWith('.')) continue;
+        if (dirent.isDirectory()) {
+          if (depth < FOLDER_PREVIEW_MAX_DEPTH) {
+            queue.push({ abs: path.join(abs, dirent.name), depth: depth + 1 });
+          }
+          continue;
+        }
+        if (!dirent.isFile() || previews.length >= limit) continue;
+        const { kind } = classify(dirent.name);
+        // 音频没有缩略图，跳过
+        if (kind !== 'image' && kind !== 'video') continue;
+        const fileAbs = path.join(abs, dirent.name);
+        const stat = await fs.stat(fileAbs).catch(() => null);
+        if (!stat) continue;
+        const rel = toRel(fileAbs);
+        previews.push({
+          path: rel,
+          name: dirent.name,
+          kind,
+          thumbUrl: `/api/library/thumb?path=${encodeURIComponent(rel)}&v=${Math.round(stat.mtimeMs)}`,
+        });
+      }
+    }
+    return previews;
+  }
+
   /**
    * 只列一个目录的直接子项（文件夹 + 文件），不递归、不解析元数据。
    * 前端进入目录时调用，避免为了一个目录读取整个资源库。
+   * 文件夹会附带最多 4 个图片/视频缩略图，用于列表卡片预览。
    */
   async function listDirectory(dirRel = '') {
     const { abs: dirAbs, rel: dir } = resolve(dirRel || '');
@@ -311,19 +354,25 @@ export function createLibrary(options = {}) {
 
     const dirents = await fs.readdir(dirAbs, { withFileTypes: true }).catch(() => []);
     dirents.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
-    const folders = [];
+    const folderRecords = [];
     const entries = [];
     for (const dirent of dirents) {
       if (dirent.name.startsWith('.')) continue;
       const abs = path.join(dirAbs, dirent.name);
       if (dirent.isDirectory()) {
-        const rel = toRel(abs);
-        folders.push({ path: rel, name: dirent.name, parent: dir, depth: relDepth(rel) - 1 });
+        folderRecords.push({ abs, rel: toRel(abs), name: dirent.name });
       } else if (dirent.isFile()) {
         const fileStat = await fs.stat(abs).catch(() => null);
         if (fileStat) entries.push(basicEntry({ rel: toRel(abs), name: dirent.name, stat: fileStat }));
       }
     }
+    const folders = await mapLimit(folderRecords, 8, async (folder) => ({
+      path: folder.rel,
+      name: folder.name,
+      parent: dir,
+      depth: relDepth(folder.rel) - 1,
+      previews: await peekFolderPreview(folder.abs),
+    }));
     return { dir, folders, entries };
   }
 

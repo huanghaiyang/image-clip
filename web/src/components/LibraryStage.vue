@@ -285,6 +285,15 @@ function thumbOf(entry) {
   return failedThumbs.value.has(entry.path) ? '' : libraryThumbUrl(entry);
 }
 
+const FOLDER_PREVIEW_LIMIT = 4;
+
+/** 文件夹卡片最多显示 4 张图片/视频缩略图；加载失败的自动剔除，全部失败时退回文件夹图标。 */
+function folderPreviews(folder) {
+  const list = folder?.previews;
+  if (!list?.length) return [];
+  return list.filter((preview) => !failedThumbs.value.has(preview.path)).slice(0, FOLDER_PREVIEW_LIMIT);
+}
+
 function entryMeta(entry) {
   const parts = [formatSize(entry.bytes)];
   if (entry.kind === 'image' && entry.width) parts.unshift(`${entry.width}×${entry.height}`);
@@ -511,8 +520,20 @@ onBeforeUnmount(() => {
           @click="select($event, folder)"
           @dblclick="actions.openFolder(folder)"
         >
-          <span class="folder-thumb">
-            <svg class="folder-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <span class="folder-thumb" :class="{ 'has-previews': folderPreviews(folder).length }">
+            <span v-if="folderPreviews(folder).length" class="folder-previews" :class="`count-${folderPreviews(folder).length}`">
+              <img
+                v-for="preview in folderPreviews(folder)"
+                :key="preview.path"
+                class="folder-preview"
+                :src="preview.thumbUrl"
+                :alt="preview.name"
+                :title="preview.name"
+                loading="lazy"
+                @error="onThumbError(preview.path)"
+              />
+            </span>
+            <svg v-else class="folder-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path
                 d="M3 6.4c0-.9.7-1.6 1.6-1.6h4.5l1.9 2.1h8.4c.9 0 1.6.7 1.6 1.6v8.9c0 .9-.7 1.6-1.6 1.6H4.6c-.9 0-1.6-.7-1.6-1.6V6.4Z"
                 stroke="currentColor"
@@ -1054,6 +1075,46 @@ onBeforeUnmount(() => {
   height: 34px;
   color: var(--accent);
   opacity: 0.9;
+}
+
+/* 文件夹内容预览：最多 4 张缩略图铺满图标区（1 张占满、2 张并排、3 张左大右二、4 张 2×2） */
+.folder-thumb.has-previews {
+  display: block;
+  padding: 2px;
+  background: var(--panel-2);
+}
+
+.folder-previews {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  grid-template-rows: repeat(2, 1fr);
+  gap: 2px;
+  width: 100%;
+  height: 100%;
+}
+
+.folder-previews.count-1 {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+}
+
+.folder-previews.count-2 {
+  grid-template-columns: repeat(2, 1fr);
+  grid-template-rows: 1fr;
+}
+
+.folder-previews.count-3 > :first-child {
+  grid-row: span 2;
+}
+
+.folder-preview {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: cover;
+  border-radius: 2px;
+  background: var(--panel);
 }
 
 /* 平铺视图下文件夹名称完整显示：允许换行，不再省略 */
