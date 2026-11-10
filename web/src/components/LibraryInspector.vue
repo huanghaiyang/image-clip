@@ -59,6 +59,23 @@ const moveTarget = ref('');
 const moveOpen = ref(false);
 const expandedFolders = ref(new Set());
 
+/**
+ * 非法嵌套目标：选中的文件夹本身，以及它下面的所有子目录。
+ * 整体移动 / 复制到这些位置会形成自身嵌套，直接在目标树里禁用。
+ */
+const blockedTargets = computed(() => {
+  const selected = new Set(state.selected);
+  const blocked = new Set();
+  for (const folder of folders.value) {
+    if (!selected.has(folder.path)) continue;
+    blocked.add(folder.path);
+    for (const other of folders.value) {
+      if (other.path.startsWith(`${folder.path}/`)) blocked.add(other.path);
+    }
+  }
+  return blocked;
+});
+
 /** 移动目标：根目录 + 所有子目录，按树形顺序（DFS）展开成可见行。 */
 const moveRows = computed(() => {
   const children = new Map();
@@ -75,13 +92,20 @@ const moveRows = computed(() => {
     for (const folder of children.get(parent) ?? []) {
       const hasChildren = children.has(folder.path);
       const expanded = expandedFolders.value.has(folder.path);
-      rows.push({ path: folder.path, name: folder.name, depth, hasChildren, expanded });
+      rows.push({
+        path: folder.path,
+        name: folder.name,
+        depth,
+        hasChildren,
+        expanded,
+        blocked: blockedTargets.value.has(folder.path),
+      });
       if (expanded) walk(folder.path, depth + 1);
     }
   };
 
   const rootExpanded = expandedFolders.value.has('');
-  rows.push({ path: '', name: '资源库根目录', depth: 0, hasChildren: children.has(''), expanded: rootExpanded });
+  rows.push({ path: '', name: '资源库根目录', depth: 0, hasChildren: children.has(''), expanded: rootExpanded, blocked: false });
   if (rootExpanded) walk('', 1);
   return rows;
 });
@@ -110,9 +134,15 @@ function toggleMoveFolder(event, path) {
 }
 
 function pickMoveTarget(row) {
+  if (row.blocked) return;
   moveTarget.value = row.path;
   moveOpen.value = false;
 }
+
+// 切换选择后原来的目标可能变成非法嵌套，回退到根目录
+watch(blockedTargets, (blocked) => {
+  if (blocked.has(moveTarget.value)) moveTarget.value = '';
+});
 
 const preview = computed(() => {
   const list = batchList.value;
@@ -497,11 +527,13 @@ function fileInfo(entry) {
                   v-for="row in moveRows"
                   :key="row.path || '__root__'"
                   class="tree-option"
-                  :class="{ 'is-active': row.path === moveTarget }"
+                  :class="{ 'is-active': row.path === moveTarget, 'is-blocked': row.blocked }"
                   :style="{ paddingLeft: `${8 + row.depth * 14}px` }"
                   role="treeitem"
                   :aria-selected="row.path === moveTarget"
+                  :aria-disabled="row.blocked || undefined"
                   :aria-expanded="row.hasChildren ? row.expanded : undefined"
+                  :title="row.blocked ? '不能选择选中的文件夹自己或它的子目录' : row.name"
                   @click="pickMoveTarget(row)"
                 >
                   <button
@@ -530,6 +562,7 @@ function fileInfo(entry) {
             复制
           </button>
         </div>
+        <p class="hint">文件夹会连同其中的全部内容一起移动 / 复制；灰色目标表示会嵌套到文件夹自身。</p>
         <button class="btn is-block is-ghost is-danger" type="button" :disabled="state.busy" @click="removeAll">
           删除选中项
         </button>
@@ -857,6 +890,16 @@ function fileInfo(entry) {
 .tree-option.is-active {
   background: var(--accent);
   color: #fff;
+}
+
+/* 非法嵌套目标（选中的文件夹自己 / 它的子目录） */
+.tree-option.is-blocked {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.tree-option.is-blocked:hover {
+  background: none;
 }
 
 .tree-toggle {

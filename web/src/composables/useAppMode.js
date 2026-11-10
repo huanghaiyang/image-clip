@@ -36,7 +36,8 @@ export const IMAGE_TOOLS = [
 const VALID = new Set(MODES.map((mode) => mode.value));
 
 const state = reactive({
-  mode: 'image',
+  // 进入应用默认落在资源库，方便先挑素材再进入具体工作区
+  mode: 'library',
   imageTool: 'crop',
 });
 

@@ -656,6 +656,22 @@ export function createLibrary(options = {}) {
     return exists(target);
   }
 
+  /**
+   * 去掉被同批祖先目录包含的路径：整体移动 / 复制文件夹时，子项会跟着父目录一起走，
+   * 重复处理不仅没有意义，还会因为父目录先被搬走而报「项目不存在」。
+   */
+  function dropNestedPaths(paths) {
+    const items = paths
+      .map((rel) => resolve(rel, { allowRoot: false }))
+      .sort((a, b) => a.rel.length - b.rel.length);
+    const kept = [];
+    for (const item of items) {
+      if (kept.some((parent) => item.abs === parent.abs || item.abs.startsWith(parent.abs + path.sep))) continue;
+      kept.push(item);
+    }
+    return kept;
+  }
+
   /** 移动文件/文件夹到目标目录；跨盘时自动退回“复制 + 删除”。 */
   async function movePaths(paths, targetDirRel) {
     if (!Array.isArray(paths) || !paths.length) throw new LibraryError('没有需要移动的项目', 'BAD_INPUT', 400);
@@ -664,9 +680,8 @@ export function createLibrary(options = {}) {
     const results = [];
     const moved = [];
 
-    for (const rel of paths) {
+    for (const { abs, rel } of dropNestedPaths(paths)) {
       try {
-        const { abs } = resolve(rel, { allowRoot: false });
         if (!(await exists(abs))) throw new Error('项目不存在');
         if (path.resolve(abs) === path.resolve(targetDir)) {
           results.push({ from: rel, ok: true, to: targetRel || '', skipped: true });
@@ -707,10 +722,12 @@ export function createLibrary(options = {}) {
     await fs.mkdir(targetDir, { recursive: true });
     const results = [];
 
-    for (const rel of paths) {
+    for (const { abs, rel } of dropNestedPaths(paths)) {
       try {
-        const { abs } = resolve(rel, { allowRoot: false });
         if (!(await exists(abs))) throw new Error('项目不存在');
+        if (path.resolve(targetDir) === path.resolve(abs)) {
+          throw new Error('不能把文件夹复制到它自己里面');
+        }
         if (path.resolve(targetDir).startsWith(path.resolve(abs) + path.sep)) {
           throw new Error('不能把文件夹复制到它自己的子目录');
         }
