@@ -16,6 +16,7 @@ import EraserPanel from './EraserPanel.vue';
 import WatermarkPanel from './WatermarkPanel.vue';
 import PixelPaintPanel from './PixelPaintPanel.vue';
 import SpritePanel from './SpritePanel.vue';
+import GrayscalePanel from './GrayscalePanel.vue';
 import { IMAGE_TOOLS, useAppMode } from '../composables/useAppMode.js';
 
 const { state, actions } = useAppMode();
@@ -28,6 +29,7 @@ const PANELS = {
   watermark: WatermarkPanel,
   pixel: PixelPaintPanel,
   sprite: SpritePanel,
+  tint: GrayscalePanel,
 };
 
 const activeTool = computed(() => state.imageTool);

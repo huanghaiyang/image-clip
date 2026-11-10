@@ -92,7 +92,6 @@ function setZoom(value, anchor) {
 
 // ------------------------------------------------------------- 绘制
 
-let patternCache = { key: '', pattern: null };
 let rafId = 0;
 let maskLayer = null;
 let maskCanvas = null;
@@ -105,25 +104,6 @@ const resultCache = { url: '', image: null };
 function cssVar(name, fallback) {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return value || fallback;
-}
-
-function checkerPattern(ctx) {
-  const a = cssVar('--checker-a', '#1a1a1a');
-  const b = cssVar('--checker-b', '#262626');
-  const key = `${a}|${b}`;
-  if (patternCache.key !== key) {
-    const tile = document.createElement('canvas');
-    tile.width = 16;
-    tile.height = 16;
-    const tctx = tile.getContext('2d');
-    tctx.fillStyle = a;
-    tctx.fillRect(0, 0, 16, 16);
-    tctx.fillStyle = b;
-    tctx.fillRect(0, 0, 8, 8);
-    tctx.fillRect(8, 8, 8, 8);
-    patternCache = { key, pattern: ctx.createPattern(tile, 'repeat') };
-  }
-  return patternCache.pattern;
 }
 
 function requestDraw() {
@@ -203,9 +183,8 @@ function paintBase() {
 
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // 只清成透明：棋盘格/纯色背景交给 .stage 的 CSS，灰度滤镜才不会连带染背景
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = checkerPattern(ctx);
-  ctx.fillRect(0, 0, w, h);
 
   const current = item.value;
   if (!current) return;
@@ -680,7 +659,7 @@ watch(
 watch(
   () => workspaceState.theme,
   () => {
-    // 主题换了要重新取 --accent / --checker-*，掩膜层颜色也得跟着重建
+    // 主题换了要重新取 --accent，掩膜层颜色也得跟着重建
     if (maskLayer) maskLayer.setColor(cssVar('--accent', '#0d99ff'));
     invalidateMaskCache();
   },
@@ -813,6 +792,13 @@ watch(
   min-width: 0;
   overflow: hidden;
   background: var(--bg-canvas);
+  background-image: linear-gradient(45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--checker-b) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--checker-b) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-color: var(--checker-a);
   cursor: grab;
   touch-action: none;
 }

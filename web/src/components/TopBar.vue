@@ -9,9 +9,10 @@
  * 拆成「内容行 + 模式行」既保留了原有视觉，也让每个模式都有稳定宽度。
  * 图片处理工作区的工具切换在右侧属性面板的 tab 里，这里只显示当前工具的引擎控件。
  */
-import { computed } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 
 import SegmentedControl from './ui/SegmentedControl.vue';
+import RangeField from './ui/RangeField.vue';
 import { useWorkspace } from '../composables/useWorkspace.js';
 import { useWatermark } from '../composables/useWatermark.js';
 import { useLlmChat } from '../composables/useLlmChat.js';
@@ -19,6 +20,7 @@ import { useAppMode, MODES } from '../composables/useAppMode.js';
 import { useLibrary } from '../composables/useLibrary.js';
 import { useVideo } from '../composables/useVideo.js';
 import { useAudio } from '../composables/useAudio.js';
+import { useImageView } from '../composables/useImageView.js';
 import { useWorkSession } from '../composables/useWorkSession.js';
 import { useUndo } from '../composables/useUndo.js';
 import { openImportPicker } from '../composables/useUploadPicker.js';
@@ -34,6 +36,93 @@ const { state: appMode, currentMode, currentTool, activeTool, actions: modeActio
 const { state: libraryState, stats: libraryStats } = useLibrary();
 const { state: videoState, videoName } = useVideo();
 const { state: audioState } = useAudio();
+const { state: viewState, actions: viewActions } = useImageView();
+
+/** 画布查看弹出面板：灰度 + 画布背景都在里面调。 */
+const viewOpen = ref(false);
+const viewWrap = ref(null);
+const hexInput = ref(viewState.color.toUpperCase());
+const backdropHex = ref(viewState.backdropColor.toUpperCase());
+const presetColors = [
+  { hex: '#ffffff', label: '纯灰度' },
+  { hex: '#ffd28a', label: '暖金' },
+  { hex: '#9ecbff', label: '冷蓝' },
+  { hex: '#c7a5ff', label: '淡紫' },
+  { hex: '#8ef0c0', label: '青绿' },
+  { hex: '#ff9f9f', label: '珊瑚粉' },
+];
+const backdropOptions = [
+  { value: 'checker', label: '棋盘格', hint: '透明区域显示为棋盘格，便于确认Alpha' },
+  { value: 'solid', label: '纯色', hint: '用纯色铺底，看边缘与明暗更干净' },
+];
+const backdropPresets = [
+  { hex: '#ffffff', label: '白' },
+  { hex: '#d4d4d4', label: '浅灰' },
+  { hex: '#808080', label: '中灰' },
+  { hex: '#333333', label: '深灰' },
+  { hex: '#000000', label: '黑' },
+];
+
+watch(
+  () => viewState.color,
+  (color) => {
+    hexInput.value = color.toUpperCase();
+  },
+);
+
+watch(
+  () => viewState.backdropColor,
+  (color) => {
+    backdropHex.value = color.toUpperCase();
+  },
+);
+
+function toggleViewPanel() {
+  viewOpen.value = !viewOpen.value;
+}
+
+function onDocPointerDown(event) {
+  if (!viewWrap.value?.contains(event.target)) viewOpen.value = false;
+}
+
+function onViewKeydown(event) {
+  if (event.key === 'Escape') viewOpen.value = false;
+}
+
+watch(viewOpen, (open) => {
+  if (open) {
+    document.addEventListener('pointerdown', onDocPointerDown, true);
+    window.addEventListener('keydown', onViewKeydown);
+  } else {
+    document.removeEventListener('pointerdown', onDocPointerDown, true);
+    window.removeEventListener('keydown', onViewKeydown);
+  }
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', onDocPointerDown, true);
+  window.removeEventListener('keydown', onViewKeydown);
+});
+
+function applyHex() {
+  const text = hexInput.value.trim();
+  if (!/^#?([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$/.test(text)) {
+    hexInput.value = viewState.color.toUpperCase();
+    return;
+  }
+  viewActions.setColor(text);
+  hexInput.value = viewState.color.toUpperCase();
+}
+
+function applyBackdropHex() {
+  const text = backdropHex.value.trim();
+  if (!/^#?([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$/.test(text)) {
+    backdropHex.value = viewState.backdropColor.toUpperCase();
+    return;
+  }
+  viewActions.setBackdropColor(text);
+  backdropHex.value = viewState.backdropColor.toUpperCase();
+}
 const { state: sessionState, actions: sessionActions } = useWorkSession();
 const { canUndo, canRedo, actions: undoActions } = useUndo();
 
@@ -218,6 +307,131 @@ const sessionHint = computed(() => {
       </nav>
 
       <div class="mode-controls">
+        <template v-if="mode === 'image'">
+          <div ref="viewWrap" class="gray-view-wrap">
+            <button
+              class="btn is-ghost gray-toggle"
+              :class="{ 'is-on': viewState.grayscale > 0, 'is-open': viewOpen }"
+              type="button"
+              title="画布查看：实时灰度与背景色（仅影响显示）"
+              @click="toggleViewPanel"
+            >
+              <span class="gray-dot" :class="{ 'is-on': viewState.grayscale > 0 }" />画布查看
+            </button>
+
+            <div v-if="viewOpen" class="gray-popover" role="dialog" aria-label="画布查看设置">
+              <div class="gray-popover-head">
+                <span>画布查看</span>
+                <button class="gray-close" type="button" title="关闭面板（Esc）" @click="viewOpen = false">×</button>
+              </div>
+
+              <label class="gray-switch">
+                <input
+                  type="checkbox"
+                  :checked="viewState.grayscale > 0"
+                  @change="viewActions.setGrayscale($event.target.checked ? 100 : 0)"
+                />
+                <span>在画布上实时查看</span>
+              </label>
+
+              <RangeField
+                label="灰度强度"
+                :model-value="viewState.grayscale"
+                :min="0"
+                :max="100"
+                :step="1"
+                suffix="%"
+                hint="0% 关闭；100% 完全按灰度显示"
+                @update:model-value="viewActions.setGrayscale($event)"
+              />
+
+              <div class="gray-color-row">
+                <input
+                  class="gray-color"
+                  type="color"
+                  :value="viewState.color"
+                  title="选择灰度映射到的颜色"
+                  @input="viewActions.setColor($event.target.value)"
+                />
+                <input
+                  v-model="hexInput"
+                  class="gray-hex mono"
+                  type="text"
+                  maxlength="7"
+                  spellcheck="false"
+                  title="也可直接输入十六进制颜色"
+                  @change="applyHex"
+                  @keydown.enter.prevent="applyHex"
+                />
+              </div>
+
+              <div class="gray-presets">
+                <button
+                  v-for="preset in presetColors"
+                  :key="preset.hex"
+                  class="gray-preset"
+                  :class="{ 'is-active': viewState.color === preset.hex }"
+                  :style="{ background: preset.hex }"
+                  type="button"
+                  :title="preset.label"
+                  @click="viewActions.setColor(preset.hex)"
+                />
+              </div>
+
+              <p class="gray-hint">白色 = 纯灰度；选其他颜色会把灰度映射到该色。只影响显示，不修改图片与导出结果。</p>
+
+              <div class="gray-section">
+                <div class="gray-section-title">画布背景</div>
+                <SegmentedControl
+                  :model-value="viewState.backdrop"
+                  :options="backdropOptions"
+                  size="sm"
+                  block
+                  @update:model-value="viewActions.setBackdrop($event)"
+                />
+
+                <template v-if="viewState.backdrop === 'solid'">
+                  <div class="gray-color-row is-backdrop">
+                    <input
+                      class="gray-color"
+                      type="color"
+                      :value="viewState.backdropColor"
+                      title="选择画布背景色"
+                      @input="viewActions.setBackdropColor($event.target.value)"
+                    />
+                    <input
+                      v-model="backdropHex"
+                      class="gray-hex mono"
+                      type="text"
+                      maxlength="7"
+                      spellcheck="false"
+                      title="也可直接输入十六进制颜色"
+                      @change="applyBackdropHex"
+                      @keydown.enter.prevent="applyBackdropHex"
+                    />
+                  </div>
+
+                  <div class="gray-presets">
+                    <button
+                      v-for="preset in backdropPresets"
+                      :key="preset.hex"
+                      class="gray-preset is-square"
+                      :class="{ 'is-active': viewState.backdropColor === preset.hex }"
+                      :style="{ background: preset.hex }"
+                      type="button"
+                      :title="preset.label"
+                      @click="viewActions.setBackdropColor(preset.hex)"
+                    />
+                  </div>
+
+                  <p class="gray-hint">纯色背景只在图片工作区生效，用来检查边缘和明暗；导出仍然保留原图透明通道。</p>
+                </template>
+              </div>
+            </div>
+          </div>
+          <span class="mode-divider" />
+        </template>
+
         <template v-if="activeTool === 'crop'">
           <SegmentedControl
             :model-value="state.engine"
@@ -255,6 +469,8 @@ const sessionHint = computed(() => {
 
 <style scoped>
 .topbar {
+  position: relative;
+  z-index: 30;
   flex: none;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
@@ -355,6 +571,169 @@ const sessionHint = computed(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
+}
+
+/* 灰度查看：弹出面板，只作用于舞台画布的显示，不写入素材 */
+.gray-view-wrap {
+  position: relative;
+}
+
+.gray-toggle.is-on {
+  color: var(--accent);
+}
+
+.gray-toggle.is-open {
+  background: var(--hover);
+}
+
+.gray-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.gray-dot.is-on {
+  background: var(--accent);
+}
+
+.gray-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  width: 252px;
+  padding: 10px 12px 12px;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+.gray-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.gray-close {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.gray-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.gray-switch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.gray-switch input {
+  accent-color: var(--accent);
+}
+
+.gray-color-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.gray-color {
+  width: 32px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  cursor: pointer;
+}
+
+.gray-hex {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+}
+
+.gray-hex:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.gray-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.gray-preset {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+
+.gray-preset.is-active {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.gray-hint {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.gray-section {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.gray-section-title {
+  margin-bottom: 6px;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.gray-color-row.is-backdrop {
+  margin-top: 8px;
+}
+
+.gray-preset.is-square {
+  border-radius: 4px;
+}
+
+.mode-divider {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
 }
 
 .logo {

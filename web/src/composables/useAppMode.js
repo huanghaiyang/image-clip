@@ -18,7 +18,7 @@ import { checkHealth as checkWatermarkHealth } from './useWatermark.js';
 export const MODES = [
   { value: 'library', label: '资源库', key: '1', hint: '统一管理图片与视频：子目录、批量改名、预览、一键转入编辑' },
   { value: 'video', label: '视频', key: '2', hint: '播放视频、查看完整时间轴、截取关键帧、提取音频' },
-  { value: 'image', label: '图片处理', key: '3', hint: '透明裁剪 / 图片裁剪 / 背景去除 / 橡皮擦 / 水印去除 / 像素笔绘 / 精灵图' },
+  { value: 'image', label: '图片处理', key: '3', hint: '透明裁剪 / 图片裁剪 / 背景去除 / 橡皮擦 / 水印去除 / 像素笔绘 / 精灵图 / 灰度着色' },
   { value: 'audio', label: '音频', key: '4', hint: '音频时间轴 + 频谱可视化，框选区间裁剪并保存 WAV' },
 ];
 
@@ -31,6 +31,7 @@ export const IMAGE_TOOLS = [
   { value: 'watermark', label: '水印去除', hint: '识别水印掩膜并做内容修复（原有功能）' },
   { value: 'pixel', label: '像素笔绘', hint: '像素级画笔 / 橡皮 / 吸管，绘制后生成新素材或导出 PNG' },
   { value: 'sprite', label: '精灵图', hint: '导入 sprite 图，按透明分隔或网格切帧，预览并播放动画' },
+  { value: 'tint', label: '灰度着色', hint: '转成灰度后映射为任意颜色，可调强度并批量导出' },
 ];
 
 const VALID = new Set(MODES.map((mode) => mode.value));

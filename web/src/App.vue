@@ -32,6 +32,7 @@ import AudioStage from './components/AudioStage.vue';
 import AudioPanel from './components/AudioPanel.vue';
 import PixelPaintStage from './components/PixelPaintStage.vue';
 import SpriteStage from './components/SpriteStage.vue';
+import GrayscaleStage from './components/GrayscaleStage.vue';
 import StatusBar from './components/StatusBar.vue';
 import ChatDrawer from './components/ChatDrawer.vue';
 import UploadDialog from './components/UploadDialog.vue';
@@ -53,6 +54,7 @@ import { resetActiveViewport } from './composables/useStageViewport.js';
 import { openImportPicker, useUploadPicker } from './composables/useUploadPicker.js';
 import { useWorkSession } from './composables/useWorkSession.js';
 import { useUndo } from './composables/useUndo.js';
+import { useImageView } from './composables/useImageView.js';
 
 const { state, actions } = useWorkspace();
 const { state: watermarkState, actions: watermarkActions } = useWatermark();
@@ -66,11 +68,15 @@ const { actions: spriteActions } = useSprite();
 const { state: uploadState } = useUploadPicker();
 const { state: sessionState, actions: sessionActions } = useWorkSession();
 const { actions: undoActions } = useUndo();
+const { state: imageViewState, filterMatrix: imageViewMatrix } = useImageView();
 
 const mode = computed(() => appMode.mode);
 
+/** 图片工作区把舞台背景切成纯色（其余工作区不受影响）。 */
+const isSolidBackdrop = computed(() => mode.value === 'image' && imageViewState.backdrop === 'solid');
+
 /** 这些图片工具的舞台没有内置拖放，交给窗口级处理。 */
-const WINDOW_DROP_TOOLS = new Set(['cropimage', 'bgremove', 'eraser', 'pixel', 'sprite']);
+const WINDOW_DROP_TOOLS = new Set(['cropimage', 'bgremove', 'eraser', 'pixel', 'sprite', 'tint']);
 
 /** 资源库 / 视频 / 音频直接入库；图片处理入库后自动载入素材列表。 */
 async function importFiles(files, { toLibrary = false } = {}) {
@@ -232,6 +238,12 @@ function onKeydown(event) {
     return;
   }
 
+  if (tool === 'tint') {
+    // 灰度着色：0 适合窗口
+    if (event.key === '0') resetActiveViewport();
+    return;
+  }
+
   if (tool === 'crop') {
     if (event.key === '0') actions.setView('zoom', 'fit');
     if (event.key.toLowerCase() === 'r' && !meta) {
@@ -301,6 +313,13 @@ watch(
   <div class="app">
     <TopBar />
 
+    <!-- 灰度查看滤镜：矩阵由 useImageView 按强度/颜色实时计算 -->
+    <svg class="gray-view-defs" aria-hidden="true" focusable="false">
+      <filter id="image-gray-view" color-interpolation-filters="sRGB">
+        <feColorMatrix type="matrix" :values="imageViewMatrix" />
+      </filter>
+    </svg>
+
     <!-- 恢复提示：告诉用户上次的临时现场已经续上，可随时关掉 -->
     <div v-if="sessionState.restoreHint && !sessionState.hintDismissed" class="session-banner">
       <span class="session-banner-text" :title="sessionState.restoreHint">{{ sessionState.restoreHint }}</span>
@@ -308,7 +327,14 @@ watch(
       <button class="btn is-mini is-ghost" type="button" @click="sessionActions.dismissHint()">知道了</button>
     </div>
 
-    <main class="app-body">
+    <main
+      class="app-body"
+      :class="{
+        'is-gray-view': mode === 'image' && imageViewState.grayscale > 0,
+        'is-solid-backdrop': isSolidBackdrop,
+      }"
+      :style="isSolidBackdrop ? { '--stage-backdrop': imageViewState.backdropColor } : null"
+    >
       <!-- 资源库：左侧目录树 / 中间文件网格 / 右侧详情与批量操作 -->
       <template v-if="mode === 'library'">
         <LibrarySidebar />
@@ -338,6 +364,7 @@ watch(
         <EraserStage v-else-if="activeTool === 'eraser'" />
         <PixelPaintStage v-else-if="activeTool === 'pixel'" />
         <SpriteStage v-else-if="activeTool === 'sprite'" />
+        <GrayscaleStage v-else-if="activeTool === 'tint'" />
         <WatermarkStage v-else-if="activeTool === 'watermark'" />
         <StageCanvas v-else />
         <ImageToolPanel />
@@ -365,6 +392,27 @@ watch(
   display: flex;
   flex: 1;
   min-height: 0;
+}
+
+/* 灰度查看：只滤镜图片画布本身，不动工具栏、叠加层与坐标读数 */
+.app-body.is-gray-view :deep(canvas.base),
+.app-body.is-gray-view :deep(canvas.playback),
+.app-body.is-gray-view :deep(canvas.stage-canvas:not(.is-overlay)) {
+  filter: url(#image-gray-view);
+}
+
+/* 纯色背景：棋盘格画在各舞台容器的背景上，这里整片替换成纯色，滤镜只作用在图片画布上 */
+.app-body.is-solid-backdrop :deep(.stage),
+.app-body.is-solid-backdrop :deep(.anim-body) {
+  background-image: none;
+  background-color: var(--stage-backdrop);
+}
+
+.gray-view-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
 }
 
 .session-banner {

@@ -75,32 +75,6 @@ function setZoom(value, anchor) {
 
 // ------------------------------------------------------------- 画布绘制
 
-let patternCache = { key: '', pattern: null };
-
-function cssVar(name, fallback) {
-  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  return value || fallback;
-}
-
-function checkerPattern(ctx) {
-  const a = cssVar('--checker-a', '#1a1a1a');
-  const b = cssVar('--checker-b', '#262626');
-  const key = `${a}|${b}`;
-  if (patternCache.key !== key) {
-    const tile = document.createElement('canvas');
-    tile.width = 16;
-    tile.height = 16;
-    const tctx = tile.getContext('2d');
-    tctx.fillStyle = a;
-    tctx.fillRect(0, 0, 16, 16);
-    tctx.fillStyle = b;
-    tctx.fillRect(0, 0, 8, 8);
-    tctx.fillRect(8, 8, 8, 8);
-    patternCache = { key, pattern: ctx.createPattern(tile, 'repeat') };
-  }
-  return patternCache.pattern;
-}
-
 let rafId = 0;
 
 function requestDraw() {
@@ -135,9 +109,8 @@ function paint() {
 
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // 只清成透明：棋盘格/纯色背景交给 .stage 的 CSS，灰度滤镜才不会连带染背景
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = checkerPattern(ctx);
-  ctx.fillRect(0, 0, w, h);
 
   const item = selected.value;
   if (!item) return;
@@ -235,7 +208,19 @@ function onPointerMove(event) {
   }
   const data = item.imageData.data;
   const i = (iy * item.width + ix) * 4;
-  hover.value = { x: ix, y: iy, r: data[i], g: data[i + 1], b: data[i + 2], a: data[i + 3] };
+  const r = data[i];
+  const g = data[i + 1];
+  const b = data[i + 2];
+  hover.value = {
+    x: ix,
+    y: iy,
+    r,
+    g,
+    b,
+    a: data[i + 3],
+    // 加权亮度：与灰度着色工具使用同一套 sRGB 权重
+    l: Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b),
+  };
 }
 
 function onPointerUp(event) {
@@ -308,12 +293,6 @@ watch(
   () => requestDraw(),
   { flush: 'post' },
 );
-
-watch(
-  () => state.theme,
-  () => requestDraw(),
-  { flush: 'post' },
-);
 </script>
 
 <template>
@@ -369,6 +348,8 @@ watch(
       <span class="readout-sep" />
       RGBA {{ hover.r }},{{ hover.g }},{{ hover.b }}
       <span class="readout-alpha" :class="{ 'is-transparent': hover.a === 0 }">A {{ hover.a }}</span>
+      <span class="readout-sep" />
+      灰度 L {{ hover.l }}
     </div>
 
     <div v-if="!selected" class="stage-empty">
@@ -400,6 +381,13 @@ watch(
   min-width: 0;
   overflow: hidden;
   background: var(--bg-canvas);
+  background-image: linear-gradient(45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--checker-b) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--checker-b) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-color: var(--checker-a);
   cursor: grab;
   touch-action: none;
 }
