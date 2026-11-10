@@ -6,9 +6,11 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import { useWorkspace } from '../composables/useWorkspace.js';
+import { useImageView } from '../composables/useImageView.js';
 import { importFilesToLibrary, pickLibraryImages } from '../composables/useLibraryImport.js';
 
 const { state, selected, actions } = useWorkspace();
+const { state: viewState } = useImageView();
 
 const stageEl = ref(null);
 const canvasEl = ref(null);
@@ -132,7 +134,8 @@ function paint() {
   const dh = item.height * scale;
   ctx.drawImage(item.bitmap, offset.value.x, offset.value.y, dw, dh);
 
-  if (!showBox.value || !item.bounds || item.resultEmpty) return;
+  // 透明通道视图下不画压暗层：半透明黑罩在 alpha 视图里会被当成 34% 不透明度显示成一大片白
+  if (!showBox.value || !item.bounds || item.resultEmpty || viewState.alpha) return;
 
   // 裁剪掉的区域压暗，直观看到“要切掉什么”
   const fx = offset.value.x + item.bounds.x * scale;
@@ -283,7 +286,7 @@ watch(selected, () => {
   requestDraw();
 });
 
-watch([mode, showBox], () => {
+watch([mode, showBox, () => viewState.alpha], () => {
   fitToView();
   requestDraw();
 });

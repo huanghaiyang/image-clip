@@ -330,7 +330,7 @@ watch(
     <main
       class="app-body"
       :class="{
-        'is-gray-view': mode === 'image' && imageViewState.grayscale > 0,
+        'is-view-filter': mode === 'image' && (imageViewState.grayscale > 0 || imageViewState.alpha),
         'is-solid-backdrop': isSolidBackdrop,
       }"
       :style="isSolidBackdrop ? { '--stage-backdrop': imageViewState.backdropColor } : null"
@@ -394,10 +394,10 @@ watch(
   min-height: 0;
 }
 
-/* 灰度查看：只滤镜图片画布本身，不动工具栏、叠加层与坐标读数 */
-.app-body.is-gray-view :deep(canvas.base),
-.app-body.is-gray-view :deep(canvas.playback),
-.app-body.is-gray-view :deep(canvas.stage-canvas:not(.is-overlay)) {
+/* 画布查看滤镜：只滤镜图片画布本身，不动工具栏、叠加层与坐标读数 */
+.app-body.is-view-filter :deep(canvas.base),
+.app-body.is-view-filter :deep(canvas.playback),
+.app-body.is-view-filter :deep(canvas.stage-canvas:not(.is-overlay)) {
   filter: url(#image-gray-view);
 }
 

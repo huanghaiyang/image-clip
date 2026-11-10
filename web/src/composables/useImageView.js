@@ -14,6 +14,10 @@ const state = reactive({
   grayscale: 0,
   /** 灰度映射到的颜色；白色 = 纯灰度。 */
   color: '#ffffff',
+  /** 透明通道视图：把 alpha 渲染成灰度，黑 = 透明，白 = 不透明。 */
+  alpha: false,
+  /** 透明通道增益：显示时 alpha × 增益，放大后才能看见 alpha 只有个位数的残影。 */
+  alphaGain: 10,
   /** 画布背景：checker = 棋盘格，solid = 纯色。 */
   backdrop: 'checker',
   /** 纯色背景颜色。 */
@@ -45,12 +49,30 @@ function parseRgb(hex) {
   };
 }
 
+function clampGain(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return 10;
+  return Math.min(50, Math.max(1, n));
+}
+
 /**
  * 生成 feColorMatrix 的 4×5 矩阵：
- *   输出 = 原色 × (1 - s) + 亮度 × 颜色 × s
+ *  - 透明通道视图：R=G=B=alpha×增益，输出 alpha 固定 1（整块画布不透明，黑底最干净）；
+ *  - 灰度查看：输出 = 原色 × (1 - s) + 亮度 × 颜色 × s。
  * 与灰度着色工具使用的 sRGB 亮度权重保持一致。
  */
 const filterMatrix = computed(() => {
+  if (state.alpha) {
+    const g = Number(state.alphaGain.toFixed(4));
+    const rows = [
+      [0, 0, 0, g, 0],
+      [0, 0, 0, g, 0],
+      [0, 0, 0, g, 0],
+      [0, 0, 0, 0, 1],
+    ];
+    return rows.map((row) => row.map((n) => Number(n.toFixed(4))).join(' ')).join('  ');
+  }
+
   const s = state.grayscale / 100;
   const { r, g, b } = parseRgb(state.color);
   const wr = 0.2126;
@@ -79,6 +101,14 @@ export function setBackdrop(value) {
   if (value === 'checker' || value === 'solid') state.backdrop = value;
 }
 
+export function setAlpha(value) {
+  state.alpha = Boolean(value);
+}
+
+export function setAlphaGain(value) {
+  state.alphaGain = clampGain(value);
+}
+
 export function setBackdropColor(value) {
   const hex = normalizeHex(value);
   if (hex) state.backdropColor = hex;
@@ -88,6 +118,6 @@ export function useImageView() {
   return {
     state: readonly(state),
     filterMatrix,
-    actions: { setGrayscale, setColor, setBackdrop, setBackdropColor },
+    actions: { setGrayscale, setColor, setBackdrop, setBackdropColor, setAlpha, setAlphaGain },
   };
 }

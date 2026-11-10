@@ -311,12 +311,12 @@ const sessionHint = computed(() => {
           <div ref="viewWrap" class="gray-view-wrap">
             <button
               class="btn is-ghost gray-toggle"
-              :class="{ 'is-on': viewState.grayscale > 0, 'is-open': viewOpen }"
+              :class="{ 'is-on': viewState.grayscale > 0 || viewState.alpha, 'is-open': viewOpen }"
               type="button"
-              title="画布查看：实时灰度与背景色（仅影响显示）"
+              title="画布查看：实时灰度、透明通道与背景色（仅影响显示）"
               @click="toggleViewPanel"
             >
-              <span class="gray-dot" :class="{ 'is-on': viewState.grayscale > 0 }" />画布查看
+              <span class="gray-dot" :class="{ 'is-on': viewState.grayscale > 0 || viewState.alpha }" />画布查看
             </button>
 
             <div v-if="viewOpen" class="gray-popover" role="dialog" aria-label="画布查看设置">
@@ -379,6 +379,32 @@ const sessionHint = computed(() => {
               </div>
 
               <p class="gray-hint">白色 = 纯灰度；选其他颜色会把灰度映射到该色。只影响显示，不修改图片与导出结果。</p>
+
+              <div class="gray-section">
+                <div class="gray-section-title">透明通道</div>
+                <label class="gray-switch">
+                  <input
+                    type="checkbox"
+                    :checked="viewState.alpha"
+                    @change="viewActions.setAlpha($event.target.checked)"
+                  />
+                  <span>按 Alpha 显示（黑 = 透明，白 = 不透明）</span>
+                </label>
+
+                <template v-if="viewState.alpha">
+                  <RangeField
+                    label="Alpha 增益"
+                    :model-value="viewState.alphaGain"
+                    :min="1"
+                    :max="50"
+                    :step="1"
+                    suffix="×"
+                    hint="2.4% 的残影用 10× 就能看清；1× 为原始透明度"
+                    @update:model-value="viewActions.setAlphaGain($event)"
+                  />
+                  <p class="gray-hint">开启后优先显示 Alpha 通道，灰度设置暂时不生效。</p>
+                </template>
+              </div>
 
               <div class="gray-section">
                 <div class="gray-section-title">画布背景</div>
