@@ -34,6 +34,38 @@ const tab = ref(items.value.length ? 'workspace' : 'library');
 const keyword = ref('');
 const failedThumbs = ref(new Set());
 
+// --------------------------------------------------------------- 当前素材拖拽排序
+const draggingId = ref(null);
+/** 落点提示：{ id, after }，after=true 表示插到该行下方。 */
+const dropHint = ref(null);
+
+function onWorkspaceDragStart(event, item) {
+  draggingId.value = item.id;
+  dropHint.value = null;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', item.id);
+  }
+}
+
+function onWorkspaceDragOver(event, item) {
+  if (!draggingId.value || draggingId.value === item.id) return;
+  const rect = event.currentTarget.getBoundingClientRect();
+  dropHint.value = { id: item.id, after: event.clientY > rect.top + rect.height / 2 };
+}
+
+function onWorkspaceDrop(event, item) {
+  if (!draggingId.value) return;
+  const after = dropHint.value?.id === item.id ? dropHint.value.after : false;
+  actions.moveItem(draggingId.value, item.id, after);
+  onWorkspaceDragEnd();
+}
+
+function onWorkspaceDragEnd() {
+  draggingId.value = null;
+  dropHint.value = null;
+}
+
 const libraryImages = computed(() => {
   const kw = keyword.value.trim().toLowerCase();
   return libraryEntries.value
@@ -393,6 +425,15 @@ watch(
           </label>
           <div class="workspace-actions">
             <button
+              class="btn is-mini is-ghost"
+              type="button"
+              :disabled="items.length < 2"
+              title="按文件名排序（中文按拼音、数字按自然顺序）；仍可拖拽手动调整"
+              @click="actions.sortItemsByName()"
+            >
+              按名称排序
+            </button>
+            <button
               class="btn is-mini"
               type="button"
               :disabled="importing || !importableItems.length"
@@ -422,10 +463,25 @@ watch(
             'is-active': selected && selected.id === item.id,
             'is-empty': item.resultEmpty,
             'is-checked': checkedIds.has(item.id),
+            'is-dragging': draggingId === item.id,
+            'is-drop-before': dropHint?.id === item.id && !dropHint.after,
+            'is-drop-after': dropHint?.id === item.id && dropHint.after,
           }"
           type="button"
           @click="onWorkspaceRowClick($event, item)"
+          @dragover.prevent="onWorkspaceDragOver($event, item)"
+          @drop.prevent="onWorkspaceDrop($event, item)"
         >
+          <span
+            class="drag-handle"
+            role="button"
+            draggable="true"
+            title="拖拽调整顺序"
+            @dragstart="onWorkspaceDragStart($event, item)"
+            @dragend="onWorkspaceDragEnd"
+            @click.stop
+            @dblclick.stop
+          >⋮⋮</span>
           <span
             class="select-mark"
             :class="{ 'is-on': checkedIds.has(item.id) }"
@@ -997,6 +1053,40 @@ watch(
   background: var(--hover);
 }
 
+/* ---------- 当前素材拖拽排序 ---------- */
+.drag-handle {
+  flex: none;
+  align-self: center;
+  width: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: -1px;
+  cursor: grab;
+  opacity: 0.35;
+  user-select: none;
+}
+
+.asset:hover .drag-handle {
+  opacity: 0.9;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.asset.is-dragging {
+  opacity: 0.45;
+}
+
+.asset.is-drop-before {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.asset.is-drop-after {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
 .asset.is-active {
   background: var(--accent-soft);
   border-color: rgba(13, 153, 255, 0.45);
@@ -1019,6 +1109,8 @@ watch(
 
 .workspace-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 6px;
   margin-left: auto;
 }

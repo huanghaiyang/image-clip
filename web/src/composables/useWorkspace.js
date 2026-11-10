@@ -435,6 +435,36 @@ export function selectItem(id) {
   state.selectedId = id;
 }
 
+// --------------------------------------------------------------- 排序
+
+/** 按文件名排序（中文按拼音、数字按自然序），选中与勾选状态保持不变。 */
+export function sortItemsByName() {
+  if (state.items.length < 2) return;
+  recordHistory();
+  const sorted = [...state.items].sort((a, b) =>
+    a.name.localeCompare(b.name, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' }),
+  );
+  state.items.splice(0, state.items.length, ...sorted);
+  setStatus(`已按名称排序（${sorted.length} 张）`);
+}
+
+/**
+ * 手动拖拽排序：把 draggedId 插到 targetId 前（after=true 时插到其后）。
+ * 一次拖放只记一条历史，撤销可回到拖动前的顺序。
+ */
+export function moveItem(draggedId, targetId, after = false) {
+  if (!draggedId || !targetId || draggedId === targetId) return;
+  const from = state.items.findIndex((item) => item.id === draggedId);
+  if (from < 0) return;
+  const targetIndex = state.items.findIndex((item) => item.id === targetId);
+  if (targetIndex < 0) return;
+  recordHistory();
+  const [moved] = state.items.splice(from, 1);
+  const insertAt = state.items.findIndex((item) => item.id === targetId) + (after ? 1 : 0);
+  state.items.splice(insertAt, 0, moved);
+  setStatus(`已把「${moved.name}」移到第 ${insertAt + 1} 位`);
+}
+
 // --------------------------------------------------------------- 多选
 
 export function toggleCheckedItem(id) {
@@ -889,6 +919,8 @@ export function useWorkspace() {
       setItemLibraryPath,
       clearItems,
       selectItem,
+      sortItemsByName,
+      moveItem,
       toggleCheckedItem,
       setCheckedItems,
       checkAllItems,
