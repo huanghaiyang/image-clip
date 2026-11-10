@@ -37,8 +37,28 @@ async function requestJson(url, options = {}) {
   return res.json();
 }
 
-export function fetchLibraryTree() {
-  return requestJson('/api/library/tree', { cache: 'no-store' });
+/**
+ * 资源库索引。light=true 时服务端只读目录/stat，不解析图片尺寸与视频时长，
+ * 用于首屏统计与跨目录搜索；具体文件的元数据走 fetchLibraryEntryMeta 懒加载。
+ */
+export function fetchLibraryTree({ light = false } = {}) {
+  return requestJson(`/api/library/tree${light ? '?light=1' : ''}`, { cache: 'no-store' });
+}
+
+/** 只列一个目录的直接子项（懒加载）。 */
+export function fetchLibraryDirectory(dir = '') {
+  const query = dir ? `?dir=${encodeURIComponent(dir)}` : '';
+  return requestJson(`/api/library/list${query}`, { cache: 'no-store' });
+}
+
+/** 单个文件的尺寸 / 时长等元数据。 */
+export function fetchLibraryEntryMeta(path) {
+  return requestJson(`/api/library/meta?path=${encodeURIComponent(path)}`, { cache: 'no-store' });
+}
+
+/** 在系统文件资源管理器中打开目录 / 定位并选中文件。 */
+export function revealLibraryPath(path = '') {
+  return requestJson(`/api/library/reveal?path=${encodeURIComponent(path)}`, { cache: 'no-store' });
 }
 
 /** 同文件夹内按内容 hash 查重；仅返回分组用于高亮，不改动文件。 */

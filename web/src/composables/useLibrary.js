@@ -14,11 +14,14 @@ import {
   createLibraryFolder,
   deleteLibraryItems,
   fetchLibraryBlob,
+  fetchLibraryDirectory,
+  fetchLibraryEntryMeta,
   fetchLibraryTree,
   moveLibraryItems,
   copyLibraryItems,
   renameLibraryItems,
   restoreLibraryVersion,
+  revealLibraryPath,
   uploadLibraryFile,
   uploadBlobToLibrary,
   fetchLibraryDuplicates,
@@ -40,7 +43,15 @@ function initialBrowseMode() {
   }
 }
 
-const tree = shallowRef({ folders: [], entries: [], stats: { ...EMPTY_STATS } });
+/**
+ * 资源库懒加载分三层：
+ *  1. 全库轻量索引（只有名称 / 目录 / stat，不含尺寸与时长）→ 统计、跨目录搜索、树形；
+ *  2. 目录内容缓存（list?dir=）→ 进入哪个目录才请求哪个目录；
+ *  3. 元数据覆盖层（meta?path=）→ 卡片进入视口后才补尺寸 / 时长。
+ */
+const libraryIndex = shallowRef({ folders: [], entries: [], stats: { ...EMPTY_STATS }, ready: false });
+const dirCache = shallowRef(new Map());
+const metaByPath = shallowRef(new Map());
 
 const state = reactive({
   initialized: false,
@@ -56,14 +67,40 @@ const state = reactive({
   browseMode: initialBrowseMode(), // flat | tree
   selected: [], // 相对路径数组，可包含文件夹
   previewPath: null,
+  indexLoading: false,
+  indexReady: false,
+  dirLoading: false,
   upload: { active: false, name: '', percent: 0, index: 0, total: 0, skipped: [], failed: [] },
   // 同目录查重结果：dir 与当前目录不一致时自动失效（只做高亮标记）
   duplicates: { dir: '', scanning: false, groups: [] },
 });
 
-const entries = computed(() => tree.value.entries ?? []);
-const folders = computed(() => tree.value.folders ?? []);
-const stats = computed(() => tree.value.stats ?? EMPTY_STATS);
+/** 已知文件 = 轻量索引 + 已加载目录，再叠加按需补全的元数据。 */
+const entries = computed(() => {
+  if (!libraryIndex.value.ready && dirCache.value.size === 0) return [];
+  const map = new Map();
+  for (const entry of libraryIndex.value.entries) map.set(entry.path, entry);
+  for (const bucket of dirCache.value.values()) {
+    for (const entry of bucket.entries) map.set(entry.path, entry);
+  }
+  const list = [...map.values()];
+  if (!metaByPath.value.size) return list;
+  return list.map((entry) => {
+    const info = metaByPath.value.get(entry.path);
+    return info ? { ...entry, ...info } : entry;
+  });
+});
+
+const folders = computed(() => {
+  const map = new Map();
+  for (const folder of libraryIndex.value.folders) map.set(folder.path, folder);
+  for (const bucket of dirCache.value.values()) {
+    for (const folder of bucket.folders) map.set(folder.path, folder);
+  }
+  return [...map.values()].sort((a, b) => a.path.localeCompare(b.path, 'zh-Hans-CN'));
+});
+
+const stats = computed(() => libraryIndex.value.stats ?? EMPTY_STATS);
 
 const folderTree = computed(() => {
   const root = { path: '', name: '资源库', parent: null, depth: -1, isRoot: true };
@@ -72,34 +109,48 @@ const folderTree = computed(() => {
 
 const currentFolders = computed(() => {
   if (state.search.trim()) return [];
-  return folders.value
-    .filter((folder) => folder.parent === state.currentDir)
-    .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+  const cached = dirCache.value.get(state.currentDir);
+  const list = cached ? cached.folders : folders.value.filter((folder) => folder.parent === state.currentDir);
+  return [...list].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
 });
 
-/** 当前目录下的文件；搜索时跨目录。 */
-const currentEntries = computed(() => {
-  const keyword = state.search.trim().toLowerCase();
-  let list = entries.value;
-  if (keyword) {
-    list = list.filter((entry) => entry.name.toLowerCase().includes(keyword) || entry.path.toLowerCase().includes(keyword));
-  } else {
-    list = list.filter((entry) => entry.dir === state.currentDir);
-  }
+/** 统一处理类型过滤与排序。 */
+function arrangeEntries(list) {
+  let result = list;
   if (state.kindFilter !== 'all' && state.kindFilter !== 'folder') {
-    list = list.filter((entry) => entry.kind === state.kindFilter);
+    result = result.filter((entry) => entry.kind === state.kindFilter);
   }
   const byName = (a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN');
   switch (state.sort) {
     case 'kind':
-      return [...list].sort((a, b) => a.kind.localeCompare(b.kind) || byName(a, b));
+      return [...result].sort((a, b) => a.kind.localeCompare(b.kind) || byName(a, b));
     case 'mtime':
-      return [...list].sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0));
+      return [...result].sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0));
     case 'size':
-      return [...list].sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0));
+      return [...result].sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0));
     default:
-      return [...list].sort(byName);
+      return [...result].sort(byName);
   }
+}
+
+/** 当前目录下的文件；搜索时跨目录（依赖后台补全的轻量索引）。 */
+const currentEntries = computed(() => {
+  const keyword = state.search.trim().toLowerCase();
+  if (keyword) {
+    return arrangeEntries(
+      entries.value.filter(
+        (entry) => entry.name.toLowerCase().includes(keyword) || entry.path.toLowerCase().includes(keyword),
+      ),
+    );
+  }
+  const cached = dirCache.value.get(state.currentDir);
+  if (!cached) return [];
+  // 目录列表本身不含尺寸/时长，叠加按需补全的元数据
+  const list = cached.entries.map((entry) => {
+    const info = metaByPath.value.get(entry.path);
+    return info ? { ...entry, ...info } : entry;
+  });
+  return arrangeEntries(list);
 });
 
 const selectedEntries = computed(() => {
@@ -222,26 +273,134 @@ function applyPathMoves(results) {
 
 // --------------------------------------------------------------- 动作
 
+const dirRequests = new Map();
+
+/**
+ * 加载单个目录的直接子项（有缓存则直接复用）。
+ * 只有进入目录 / 展开目录时才触发，不再为了首屏读取整个资源库。
+ */
+export async function loadDir(dir = '', { force = false } = {}) {
+  const key = dir ?? '';
+  if (!force && dirCache.value.has(key)) return dirCache.value.get(key);
+  if (dirRequests.has(key)) return dirRequests.get(key);
+  state.dirLoading = true;
+  const request = fetchLibraryDirectory(key)
+    .then((data) => {
+      const next = new Map(dirCache.value);
+      next.set(key, { folders: data.folders ?? [], entries: data.entries ?? [] });
+      dirCache.value = next;
+      return next.get(key);
+    })
+    .finally(() => {
+      dirRequests.delete(key);
+      if (!dirRequests.size) state.dirLoading = false;
+    });
+  dirRequests.set(key, request);
+  return request;
+}
+
+let indexRequest = null;
+
+/**
+ * 轻量全库索引：只含名称 / 目录 / stat，不含尺寸与时长。
+ * 用于统计、跨目录搜索与树形视图；首次按需触发后在内存中复用。
+ */
+export function loadLibraryIndex({ force = false } = {}) {
+  if (!force && libraryIndex.value.ready) return Promise.resolve(libraryIndex.value);
+  if (indexRequest) return indexRequest;
+  state.indexLoading = true;
+  indexRequest = fetchLibraryTree({ light: true })
+    .then((data) => {
+      libraryIndex.value = {
+        folders: data.folders ?? [],
+        entries: data.entries ?? [],
+        stats: data.stats ?? { ...EMPTY_STATS },
+        ready: true,
+      };
+      state.indexReady = true;
+      preserveSelected();
+      return libraryIndex.value;
+    })
+    .catch((err) => {
+      setError(`读取资源库索引失败：${err.message}`);
+      return libraryIndex.value;
+    })
+    .finally(() => {
+      state.indexLoading = false;
+      indexRequest = null;
+    });
+  return indexRequest;
+}
+
+// --------------------------------------------------------------- 元数据懒加载
+const META_CONCURRENCY = 4;
+const metaQueue = [];
+const metaRequested = new Set();
+let metaRunning = 0;
+
+/** 卡片进入视口后请求尺寸 / 时长；同一路径只请求一次。 */
+export function requestEntryMeta(entry) {
+  const path = typeof entry === 'string' ? entry : entry?.path;
+  if (!path || metaRequested.has(path) || metaByPath.value.has(path)) return;
+  metaRequested.add(path);
+  metaQueue.push(path);
+  pumpMetaQueue();
+}
+
+function pumpMetaQueue() {
+  while (metaRunning < META_CONCURRENCY && metaQueue.length) {
+    const path = metaQueue.shift();
+    metaRunning += 1;
+    fetchLibraryEntryMeta(path)
+      .then((info) => {
+        if (!info) return;
+        const next = new Map(metaByPath.value);
+        next.set(path, info);
+        metaByPath.value = next;
+      })
+      .catch(() => {
+        // 单个文件解析失败不影响列表，允许下次重试
+        metaRequested.delete(path);
+      })
+      .finally(() => {
+        metaRunning -= 1;
+        pumpMetaQueue();
+      });
+  }
+}
+
+// --------------------------------------------------------------- 刷新
+
 export async function refreshLibrary({ quiet = false } = {}) {
   if (!quiet) state.loading = true;
   state.refreshing = true;
   state.error = '';
+  // 目录缓存全部失效，重新按需拉取；元数据服务端有缓存，可继续复用
+  dirCache.value = new Map();
   try {
-    const data = await fetchLibraryTree();
-    tree.value = {
-      folders: data.folders ?? [],
-      entries: data.entries ?? [],
-      stats: data.stats ?? { ...EMPTY_STATS },
-    };
-    state.initialized = true;
-    if (state.currentDir && !folders.value.some((folder) => folder.path === state.currentDir)) {
+    try {
+      await loadDir(state.currentDir, { force: true });
+    } catch (err) {
+      if (!state.currentDir) throw err;
+      // 当前目录可能已被删除/改名，退回根目录
       state.currentDir = '';
+      state.previewPath = null;
+      await loadDir('', { force: true });
     }
+    state.initialized = true;
+    // 统计、跨目录搜索、树形所需的轻量索引在后台补全，不阻塞当前目录首屏
+    void loadLibraryIndex({ force: true });
     preserveSelected();
     if (state.previewPath && !entries.value.some((entry) => entry.path === state.previewPath)) {
       state.previewPath = null;
     }
-    if (!quiet) setStatus(`资源库已刷新：${stats.value.files} 个文件 · ${stats.value.folders} 个子目录`);
+    if (!quiet) {
+      setStatus(
+        stats.value.files
+          ? `资源库已刷新：${stats.value.files} 个文件 · ${stats.value.folders} 个子目录`
+          : '资源库已刷新',
+      );
+    }
   } catch (err) {
     setError(`读取资源库失败：${err.message}`);
   } finally {
@@ -251,9 +410,11 @@ export async function refreshLibrary({ quiet = false } = {}) {
 }
 
 export function setDir(dir) {
-  state.currentDir = dir ?? '';
+  const next = dir ?? '';
+  state.currentDir = next;
   state.previewPath = null;
   state.selected = [];
+  void loadDir(next).catch((err) => setError(`读取目录失败：${err.message}`));
 }
 
 export function navigate(path) {
@@ -271,8 +432,22 @@ export function goUp() {
   setDir(parts.join('/'));
 }
 
+/** 在系统文件资源管理器中打开：文件定位选中，文件夹或根目录直接打开。 */
+export async function reveal(target = '') {
+  const rel = typeof target === 'string' ? target : target?.path ?? '';
+  state.error = '';
+  try {
+    const result = await revealLibraryPath(rel || state.currentDir);
+    setStatus(result?.selected ? '已在文件资源管理器中选中该文件' : '已在文件资源管理器中打开');
+  } catch (err) {
+    setError(`打开文件资源管理器失败：${err.message}`);
+  }
+}
+
 export function setSearch(value) {
   state.search = String(value ?? '');
+  // 跨目录搜索依赖轻量索引，第一次搜索时补全
+  if (state.search.trim()) void loadLibraryIndex();
 }
 
 export function setKindFilter(value) {
@@ -290,10 +465,14 @@ export function setBrowseMode(value) {
   } catch {
     // 存不下不影响当前会话
   }
+  // 树形视图需要完整的目录层级，按需补全轻量索引
+  if (state.browseMode === 'tree') void loadLibraryIndex();
 }
 
 export function setCurrentDir(path) {
-  state.currentDir = path ?? '';
+  const next = path ?? '';
+  state.currentDir = next;
+  void loadDir(next).catch((err) => setError(`读取目录失败：${err.message}`));
 }
 
 export function toggleSelect(path) {
@@ -821,6 +1000,10 @@ export function useLibrary() {
     duplicateGroupOf,
     actions: {
       refresh: refreshLibrary,
+      loadDir,
+      loadIndex: loadLibraryIndex,
+      requestMeta: requestEntryMeta,
+      reveal,
       setDir,
       navigate,
       openFolder,

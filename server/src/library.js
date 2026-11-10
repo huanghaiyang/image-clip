@@ -20,6 +20,7 @@
  *   文件被外部替换后 mtime 变化，会自动重新探测。
  */
 import express from 'express';
+import { spawn } from 'node:child_process';
 import { createReadStream, createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -57,7 +58,7 @@ export function createLibrary(options = {}) {
   let metaDirty = false;
   let metaTimer = null;
   let sharpModule = null;
-  let scanPromise = null;
+  const scanPromises = { light: null, full: null };
   let initPromise = null;
 
   async function init() {
@@ -172,10 +173,13 @@ export function createLibrary(options = {}) {
   /**
    * 扫描整个资源库。
    * 返回扁平的 entries + folders，由前端拼成树（这样搜索、跨目录批量操作都简单）。
+   * light=true 时只读目录与 stat，不解析图片尺寸/视频时长，用于首屏索引与统计；
+   * 单个文件的尺寸等元数据由 describePath 按需补齐。
    */
-  async function scan() {
-    if (scanPromise) return scanPromise;
-    scanPromise = (async () => {
+  async function scan({ light = false } = {}) {
+    const cacheKey = light ? 'light' : 'full';
+    if (scanPromises[cacheKey]) return scanPromises[cacheKey];
+    scanPromises[cacheKey] = (async () => {
       await loadMeta();
       const folders = [];
       const fileRecords = [];
@@ -204,7 +208,9 @@ export function createLibrary(options = {}) {
       }
 
       await walk(root, 0);
-      const entries = await mapLimit(fileRecords, 6, (record) => describeEntry(record));
+      const entries = light
+        ? fileRecords.map((record) => basicEntry(record))
+        : await mapLimit(fileRecords, 6, (record) => describeEntry(record));
       const stats = {
         files: entries.length,
         folders: folders.length,
@@ -221,17 +227,18 @@ export function createLibrary(options = {}) {
         throw err;
       })
       .finally(() => {
-        scanPromise = null;
+        scanPromises[cacheKey] = null;
       });
-    return scanPromise;
+    return scanPromises[cacheKey];
   }
 
-  async function describeEntry({ abs, rel, name, stat }) {
+  /** 只含 stat 信息的条目：不读图片/视频内容，供目录列表与轻量索引使用。 */
+  function basicEntry({ rel, name, stat }) {
     const { kind, ext } = classify(name);
-    const base = {
+    return {
       path: rel,
       name,
-      dir: path.posix.dirname(rel) === '.' ? '' : path.posix.dirname(rel),
+      dir: posixDir(rel),
       kind,
       ext,
       bytes: stat.size,
@@ -241,14 +248,17 @@ export function createLibrary(options = {}) {
         ? `/api/library/thumb?path=${encodeURIComponent(rel)}&v=${Math.round(stat.mtimeMs)}`
         : null,
     };
+  }
 
+  async function describeEntry({ abs, rel, name, stat }) {
+    const base = basicEntry({ rel, name, stat });
     const cached = meta[rel];
     if (cached && cached.size === stat.size && cached.mtime === Math.round(stat.mtimeMs)) {
       return { ...base, ...cached.meta };
     }
 
     const info = {};
-    if (kind === 'image') {
+    if (base.kind === 'image') {
       const sharp = await getSharp();
       if (sharp) {
         try {
@@ -268,7 +278,7 @@ export function createLibrary(options = {}) {
           /* 损坏的图片仍然允许在列表中出现 */
         }
       }
-    } else if (kind === 'video' || kind === 'audio') {
+    } else if (base.kind === 'video' || base.kind === 'audio') {
       try {
         const probe = await probeVideo(abs);
         Object.assign(info, {
@@ -288,6 +298,70 @@ export function createLibrary(options = {}) {
     meta[rel] = { size: stat.size, mtime: Math.round(stat.mtimeMs), meta: info };
     scheduleMetaSave();
     return { ...base, ...info };
+  }
+
+  /**
+   * 只列一个目录的直接子项（文件夹 + 文件），不递归、不解析元数据。
+   * 前端进入目录时调用，避免为了一个目录读取整个资源库。
+   */
+  async function listDirectory(dirRel = '') {
+    const { abs: dirAbs, rel: dir } = resolve(dirRel || '');
+    const stat = await fs.stat(dirAbs).catch(() => null);
+    if (!stat?.isDirectory()) throw new LibraryError('目录不存在', 'NOT_FOUND', 404);
+
+    const dirents = await fs.readdir(dirAbs, { withFileTypes: true }).catch(() => []);
+    dirents.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+    const folders = [];
+    const entries = [];
+    for (const dirent of dirents) {
+      if (dirent.name.startsWith('.')) continue;
+      const abs = path.join(dirAbs, dirent.name);
+      if (dirent.isDirectory()) {
+        const rel = toRel(abs);
+        folders.push({ path: rel, name: dirent.name, parent: dir, depth: relDepth(rel) - 1 });
+      } else if (dirent.isFile()) {
+        const fileStat = await fs.stat(abs).catch(() => null);
+        if (fileStat) entries.push(basicEntry({ rel: toRel(abs), name: dirent.name, stat: fileStat }));
+      }
+    }
+    return { dir, folders, entries };
+  }
+
+  /** 按需解析单个文件的元数据（尺寸 / 时长等），结果写入 meta 缓存。 */
+  async function describePath(rel) {
+    const { abs, rel: relPath } = resolve(rel, { allowRoot: false });
+    const stat = await fs.stat(abs).catch(() => null);
+    if (!stat?.isFile()) throw new LibraryError('文件不存在', 'NOT_FOUND', 404);
+    const entry = await describeEntry({ abs, rel: relPath, name: path.basename(abs), stat });
+    const { url, thumbUrl, path: entryPath, name, dir, kind, ext, bytes, mtime, ...info } = entry;
+    return { path: entryPath, ...info };
+  }
+
+  /**
+   * 在系统文件管理器中打开资源库路径：
+   * 文件 → 定位并选中；文件夹 / 根目录 → 直接打开。
+   * 只在服务端本机执行，路径仍走 resolve() 的穿越校验。
+   */
+  async function reveal(rel = '') {
+    const { abs } = resolve(rel || '');
+    const stat = await fs.stat(abs).catch(() => null);
+    if (!stat) throw new LibraryError('路径不存在', 'NOT_FOUND', 404);
+
+    const detached = { detached: true, stdio: 'ignore' };
+    let opened = abs;
+    let selected = false;
+    if (process.platform === 'win32') {
+      selected = stat.isFile();
+      spawn('explorer.exe', selected ? [`/select,${abs}`] : [abs], detached).unref();
+    } else if (process.platform === 'darwin') {
+      selected = stat.isFile();
+      spawn('open', selected ? ['-R', abs] : [abs], detached).unref();
+    } else {
+      // Linux 无法可靠地“选中文件”，退化为打开所在目录
+      opened = stat.isDirectory() ? abs : path.dirname(abs);
+      spawn('xdg-open', [opened], detached).unref();
+    }
+    return { opened, selected };
   }
 
   /** 上传前准备目标路径（带唯一化），返回绝对/相对路径。 */
@@ -1066,7 +1140,7 @@ export function createLibrary(options = {}) {
     const target = String(dir || '')
       .replace(/\\/g, '/')
       .replace(/^\/+|\/+$/g, '');
-    const { entries: allEntries } = await scan();
+    const { entries: allEntries } = await scan({ light: true });
     const files = allEntries.filter((entry) => entry.dir === target);
 
     const bySize = new Map();
@@ -1109,6 +1183,9 @@ export function createLibrary(options = {}) {
     cacheRoot,
     init,
     scan,
+    listDirectory,
+    describePath,
+    reveal,
     resolve,
     sanitizeName,
     prepareUpload,
@@ -1152,7 +1229,10 @@ export class LibraryError extends Error {
 /**
  * 挂载资源库 HTTP API：
  *
- *   GET  /api/library/tree                 目录树 + 全部文件
+ *   GET  /api/library/tree?light=1         目录树 + 全部文件（light=1 跳过尺寸/时长解析）
+ *   GET  /api/library/list?dir=            只列单个目录的直接子项（懒加载）
+ *   GET  /api/library/meta?path=           单个文件的尺寸/时长等元数据
+ *   GET  /api/library/reveal?path=        在系统文件管理器中打开/定位路径
  *   GET  /api/library/file?path=           原文件（支持 Range，视频可拖动播放）
  *   GET  /api/library/thumb?path=          缩略图（webp）
  *   POST /api/library/upload               原始二进制上传；X-File-Name / X-File-Dir 头
@@ -1180,8 +1260,32 @@ export function createLibraryRouter(library) {
 
   router.get(
     '/tree',
-    wrap(async (_req, res) => {
-      res.json(await library.scan());
+    wrap(async (req, res) => {
+      res.json(await library.scan({ light: String(req.query.light ?? '') === '1' }));
+    }),
+  );
+
+  // 懒加载：只返回某个目录的直接子项，进入目录时再请求
+  router.get(
+    '/list',
+    wrap(async (req, res) => {
+      res.json(await library.listDirectory(req.query.dir ?? ''));
+    }),
+  );
+
+  // 懒加载：单个文件的尺寸/时长等元数据，供列表卡片进入视口后补齐
+  router.get(
+    '/meta',
+    wrap(async (req, res) => {
+      res.json(await library.describePath(req.query.path ?? ''));
+    }),
+  );
+
+  // 在系统文件资源管理器中打开 / 定位资源库路径
+  router.get(
+    '/reveal',
+    wrap(async (req, res) => {
+      res.json(await library.reveal(String(req.query.path ?? '')));
     }),
   );
 

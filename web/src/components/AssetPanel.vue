@@ -7,7 +7,7 @@
  *  - 资源库：直接浏览资源库中的图片，点击即载入当前工作区。
  * 上传与拖拽现在统一写入资源库，保证所有模块共用同一份素材。
  */
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useAppMode } from '../composables/useAppMode.js';
 import { useLibrary } from '../composables/useLibrary.js';
 import { useWorkspace } from '../composables/useWorkspace.js';
@@ -67,6 +67,21 @@ function toggleFolder(path) {
   if (next.has(path)) next.delete(path);
   else next.add(path);
   collapsed.value = next;
+}
+
+// 资源库列表滚动分页：一次只渲染一页，避免大库卡顿
+const LIST_PAGE = 120;
+const rowLimit = ref(LIST_PAGE);
+const listSentinel = ref(null);
+let rowObserver = null;
+const visibleLibraryRows = computed(() => libraryRows.value.slice(0, rowLimit.value));
+const hasMoreLibraryRows = computed(() => libraryRows.value.length > visibleLibraryRows.value.length);
+watch([keyword, viewMode], () => {
+  rowLimit.value = LIST_PAGE;
+});
+function loadMoreLibraryRows() {
+  if (!hasMoreLibraryRows.value) return;
+  rowLimit.value = Math.min(libraryRows.value.length, rowLimit.value + LIST_PAGE);
 }
 
 /** 树中所有文件夹路径，用于「全部展开 / 全部折叠」。 */
@@ -304,7 +319,33 @@ function pickFiles() {
 onMounted(() => {
   // 直接从图片模块进入时资源库可能还没初始化，静默拉取一次
   if (!libraryState.initialized) refreshLibrary();
+  rowObserver = new IntersectionObserver(
+    (records) => {
+      if (records.some((record) => record.isIntersecting)) loadMoreLibraryRows();
+    },
+    { rootMargin: '160px' },
+  );
+  if (listSentinel.value) rowObserver.observe(listSentinel.value);
 });
+
+watch(listSentinel, (el, prev) => {
+  if (prev) rowObserver?.unobserve(prev);
+  if (el) rowObserver?.observe(el);
+});
+
+onBeforeUnmount(() => {
+  rowObserver?.disconnect();
+  rowObserver = null;
+});
+
+// 资源库 tab 需要跨目录的所有图片，按需补全轻量索引
+watch(
+  tab,
+  (value) => {
+    if (value === 'library') void libraryActions.loadIndex();
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -462,7 +503,7 @@ onMounted(() => {
           <template v-else>资源库里还没有图片。<br />点击下方「上传到素材库」导入。</template>
         </p>
 
-        <template v-for="row in libraryRows" :key="row.key">
+        <template v-for="row in visibleLibraryRows" :key="row.key">
           <button
             v-if="row.type === 'folder'"
             class="folder-row"
@@ -546,6 +587,9 @@ onMounted(() => {
             </button>
           </div>
         </template>
+        <div v-if="hasMoreLibraryRows" ref="listSentinel" class="assets-more">
+          向下滚动加载更多（{{ visibleLibraryRows.length }} / {{ libraryRows.length }}）
+        </div>
       </template>
     </div>
 
@@ -925,6 +969,13 @@ onMounted(() => {
   margin: 16px 10px;
   font-size: 11px;
   line-height: 1.7;
+}
+
+.assets-more {
+  padding: 8px 4px 10px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 10px;
 }
 
 .asset {

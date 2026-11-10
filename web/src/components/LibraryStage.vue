@@ -175,9 +175,12 @@ const visibleCount = computed(() => (state.browseMode === 'tree' ? treeRoot.valu
 
 function toggleFolder(path) {
   const next = new Set(collapsed.value);
-  if (next.has(path)) next.delete(path);
+  const expanding = !next.has(path);
+  if (expanding) next.delete(path);
   else next.add(path);
   collapsed.value = next;
+  // 展开时按需补齐该目录内容（内部有缓存，重复展开不会重复请求）
+  if (expanding) void actions.loadDir(path);
 }
 
 /** 展开当前树中的全部文件夹。 */
@@ -312,8 +315,67 @@ watch(
   },
 );
 
-onMounted(() => window.addEventListener('keydown', onPreviewKey));
-onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
+// --------------------------------------------------------------- 滚动分页 + 元数据懒加载
+const PAGE_SIZE = 60;
+const pageLimit = ref(PAGE_SIZE);
+const listSentinel = ref(null);
+let sentinelObserver = null;
+
+const pagedEntries = computed(() => currentEntries.value.slice(0, pageLimit.value));
+const hasMoreEntries = computed(() => currentEntries.value.length > pagedEntries.value.length);
+const pagedTreeRows = computed(() => treeRows.value.slice(0, pageLimit.value));
+const hasMoreTreeRows = computed(() => treeRows.value.length > pagedTreeRows.value.length);
+
+watch(
+  [() => state.currentDir, () => state.search, () => state.kindFilter, () => state.sort, () => state.browseMode],
+  () => {
+    pageLimit.value = PAGE_SIZE;
+  },
+);
+
+function loadMoreEntries() {
+  if (state.browseMode === 'tree') {
+    if (!hasMoreTreeRows.value) return;
+    pageLimit.value = Math.min(treeRows.value.length, pageLimit.value + PAGE_SIZE);
+    return;
+  }
+  if (!hasMoreEntries.value) return;
+  pageLimit.value = Math.min(currentEntries.value.length, pageLimit.value + PAGE_SIZE);
+}
+
+/** 只给已经渲染出来的卡片补尺寸 / 时长，滚动加载下一批时再继续。 */
+watch(
+  [pagedEntries, pagedTreeRows],
+  ([flatList, treeList]) => {
+    const list = state.browseMode === 'tree' ? treeList.map((row) => row.entry).filter(Boolean) : flatList;
+    for (const entry of list) {
+      if (entry.kind !== 'file') actions.requestMeta(entry);
+    }
+  },
+  { immediate: true, flush: 'post' },
+);
+
+onMounted(() => {
+  window.addEventListener('keydown', onPreviewKey);
+  sentinelObserver = new IntersectionObserver(
+    (records) => {
+      if (records.some((record) => record.isIntersecting)) loadMoreEntries();
+    },
+    { rootMargin: '240px' },
+  );
+  if (listSentinel.value) sentinelObserver.observe(listSentinel.value);
+});
+
+watch(listSentinel, (el, prev) => {
+  if (prev) sentinelObserver?.unobserve(prev);
+  if (el) sentinelObserver?.observe(el);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onPreviewKey);
+  sentinelObserver?.disconnect();
+  sentinelObserver = null;
+});
 </script>
 
 <template>
@@ -394,6 +456,18 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
       </button>
       <button class="btn is-mini is-ghost" type="button" :disabled="!state.selected.length" @click="actions.clearSelection()">
         清除选择
+      </button>
+      <button
+        class="btn is-mini is-ghost"
+        type="button"
+        :title="
+          state.selected.length === 1
+            ? '在文件资源管理器中定位到选中的这一项'
+            : '在文件资源管理器中打开当前目录'
+        "
+        @click="actions.reveal(state.selected.length === 1 ? state.selected[0] : state.currentDir)"
+      >
+        资源管理器
       </button>
       <button class="btn is-mini is-ghost" type="button" :disabled="state.refreshing" @click="actions.refresh()">刷新</button>
       <button
@@ -476,7 +550,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
         </button>
 
         <button
-          v-for="entry in currentEntries"
+          v-for="entry in pagedEntries"
           :key="entry.path"
           class="card"
           :class="{
@@ -514,11 +588,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
           <span class="card-name" :title="entry.name">{{ entry.name }}</span>
           <span class="card-meta mono">{{ entryMeta(entry) }}</span>
         </button>
+
+        <div v-if="hasMoreEntries" ref="listSentinel" class="grid-more">
+          向下滚动加载更多（{{ pagedEntries.length }} / {{ currentEntries.length }}）
+        </div>
       </div>
 
       <!-- 树形视图：箭头展开/折叠，单击选中，双击进入目录；文件双击打开 -->
       <div v-else class="tree-list">
-        <template v-for="row in treeRows" :key="row.key">
+        <template v-for="row in pagedTreeRows" :key="row.key">
           <button
             v-if="row.type === 'folder'"
             class="tree-row is-folder"
@@ -613,6 +691,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
             >
           </button>
         </template>
+        <div v-if="hasMoreTreeRows" ref="listSentinel" class="grid-more">
+          向下滚动加载更多（{{ pagedTreeRows.length }} / {{ treeRows.length }}）
+        </div>
       </div>
     </div>
 
@@ -799,6 +880,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
   gap: 10px;
   /* Shift / Alt 多选时不要连带选中文字，避免出现蓝色选区 */
   user-select: none;
+}
+
+.grid-more {
+  grid-column: 1 / -1;
+  padding: 8px 0 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 .tree-list {

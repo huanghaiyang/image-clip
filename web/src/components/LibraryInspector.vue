@@ -305,6 +305,14 @@ function fileInfo(entry) {
         </table>
         <div class="actions">
           <button class="btn is-block" type="button" @click="actions.openPreview(single.path)">预览</button>
+          <button
+            class="btn is-block is-ghost"
+            type="button"
+            title="在系统文件资源管理器中定位并选中该文件"
+            @click="actions.reveal(single)"
+          >
+            在资源管理器中打开
+          </button>
           <button v-if="single.kind === 'image'" class="btn is-block" type="button" @click="actions.openInEditor(single)">
             转入图片编辑
           </button>
@@ -372,6 +380,14 @@ function fileInfo(entry) {
         </table>
         <div class="actions">
           <button class="btn is-block" type="button" @click="actions.openFolder(singleFolder)">进入文件夹</button>
+          <button
+            class="btn is-block is-ghost"
+            type="button"
+            title="在系统文件资源管理器中打开这个文件夹"
+            @click="actions.reveal(singleFolder)"
+          >
+            在资源管理器中打开
+          </button>
           <button
             class="btn is-block is-ghost is-danger"
             type="button"
