@@ -437,33 +437,42 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
           @click="select($event, folder)"
           @dblclick="actions.openFolder(folder)"
         >
-          <span class="folder-icon">▸</span>
-          <span class="card-name" :title="folder.name">{{ folder.name }}</span>
-          <span class="card-meta">文件夹</span>
-          <span
-            class="folder-rename"
-            role="button"
-            title="重命名文件夹"
-            @click.stop="startRename(folder, true)"
-            @dblclick.stop
-            >✎</span
-          >
-          <span
-            class="folder-delete"
-            role="button"
-            title="删除文件夹（移入回收站）"
-            @click.stop="removeFolder(folder)"
-            @dblclick.stop
-          >
-            <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+          <span class="folder-thumb">
+            <svg class="folder-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path
-                d="M3 4.5h10M6.2 4.5V3.2h3.6v1.3M4.4 4.5l.6 8h6l.6-8"
+                d="M3 6.4c0-.9.7-1.6 1.6-1.6h4.5l1.9 2.1h8.4c.9 0 1.6.7 1.6 1.6v8.9c0 .9-.7 1.6-1.6 1.6H4.6c-.9 0-1.6-.7-1.6-1.6V6.4Z"
                 stroke="currentColor"
-                stroke-width="1.2"
-                stroke-linecap="round"
+                stroke-width="1.5"
+                stroke-linejoin="round"
               />
             </svg>
+            <span
+              class="folder-rename"
+              role="button"
+              title="重命名文件夹"
+              @click.stop="startRename(folder, true)"
+              @dblclick.stop
+              >✎</span
+            >
+            <span
+              class="folder-delete"
+              role="button"
+              title="删除文件夹（移入回收站）"
+              @click.stop="removeFolder(folder)"
+              @dblclick.stop
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                <path
+                  d="M3 4.5h10M6.2 4.5V3.2h3.6v1.3M4.4 4.5l.6 8h6l.6-8"
+                  stroke="currentColor"
+                  stroke-width="1.2"
+                  stroke-linecap="round"
+                />
+              </svg>
+            </span>
           </span>
+          <span class="card-name is-folder-name" :title="folder.name">{{ folder.name }}</span>
+          <span class="card-meta">文件夹</span>
         </button>
 
         <button
@@ -936,25 +945,35 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
 }
 
 .card.is-folder {
-  flex-direction: row;
-  align-items: center;
-  gap: 6px;
-  height: 46px;
-  padding: 0 10px;
   background: var(--panel-2);
 }
 
+/* 文件夹卡片：与文件卡片同构，顶部一块图标区，下方完整名称 */
+.folder-thumb {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 4 / 3;
+  border-radius: 4px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
 .folder-icon {
+  width: 34px;
+  height: 34px;
   color: var(--accent);
-  font-size: 12px;
+  opacity: 0.9;
 }
 
-.card.is-folder .card-name {
-  flex: 1;
-}
-
-.card.is-folder .card-meta {
-  flex: none;
+/* 平铺视图下文件夹名称完整显示：允许换行，不再省略 */
+.card.is-folder .is-folder-name {
+  overflow: visible;
+  white-space: normal;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
 }
 
 .thumb {
@@ -1111,6 +1130,29 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKey));
 
 .folder-delete:hover {
   color: var(--danger);
+}
+
+/* 平铺视图：文件夹的重命名 / 删除浮在图标区右上角 */
+.card.is-folder .folder-rename,
+.card.is-folder .folder-delete {
+  position: absolute;
+  top: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  opacity: 0.6;
+}
+
+.card.is-folder .folder-rename {
+  right: 26px;
+}
+
+.card.is-folder .folder-delete {
+  right: 4px;
+}
+
+.card.is-folder:hover .folder-rename,
+.card.is-folder:hover .folder-delete {
+  opacity: 1;
 }
 
 .thumb-rename {
