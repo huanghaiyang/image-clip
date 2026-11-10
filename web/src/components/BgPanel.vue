@@ -5,7 +5,7 @@
  * 参数修改后由 useBgRemoval 做 140ms 防抖重算（预览分辨率），
  * 因此拖动滑块的反馈是实时的；这里只负责把控件和状态接起来。
  */
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 
 import { CUTOUT_MODELS } from '@shared/cutout.js';
 
@@ -58,6 +58,13 @@ const topHoles = computed(() => {
   const e = entry.value;
   if (!e?.holes?.length) return [];
   return e.holes.slice(0, 8); // 面积已按降序排列
+});
+
+/** 孔洞列表默认只列前 8 个，点「其余 N 个」展开全部；切换素材时收起。 */
+const showAllHoles = ref(false);
+const holesToShow = computed(() => (showAllHoles.value ? entry.value?.holes ?? [] : topHoles.value));
+watch(entry, () => {
+  showAllHoles.value = false;
 });
 
 // ------------------------------------------------------------ AI 精准抠像
@@ -296,8 +303,8 @@ function runBatch() {
           </div>
 
           <template v-if="topHoles.length">
-            <div class="hole-list">
-              <div v-for="hole in topHoles" :key="hole.id" class="hole-row">
+            <div class="hole-list" :class="{ 'is-expanded': showAllHoles }">
+              <div v-for="hole in holesToShow" :key="hole.id" class="hole-row">
                 <span class="mono">{{ hole.area }}px</span>
                 <span class="hole-pos mono">@ {{ hole.bbox.x }},{{ hole.bbox.y }}</span>
                 <button
@@ -313,8 +320,10 @@ function runBatch() {
                 v-if="entry.holes.length > topHoles.length"
                 class="hole-more muted"
                 type="button"
+                :title="showAllHoles ? '只显示面积最大的 8 个' : '展开全部孔洞'"
+                @click="showAllHoles = !showAllHoles"
               >
-                其余 {{ entry.holes.length - topHoles.length }} 个略…
+                {{ showAllHoles ? '收起列表' : `其余 ${entry.holes.length - topHoles.length} 个略…` }}
               </button>
             </div>
             <button class="btn is-block mt-8" type="button" @click="actions.applyAllHoles(entry)">
@@ -626,6 +635,13 @@ function runBatch() {
   flex-direction: column;
   gap: 3px;
   margin-top: 4px;
+}
+
+/* 展开后限制高度，孔洞很多时在列表内部滚动，不把整个面板撑长 */
+.hole-list.is-expanded {
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .hole-row {

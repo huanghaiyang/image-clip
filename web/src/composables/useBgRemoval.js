@@ -745,7 +745,7 @@ export function prepareSelected() {
 }
 
 export function setTool(tool) {
-  state.tool = ['lasso', 'pick', 'pan'].includes(tool) ? tool : 'lasso';
+  state.tool = ['lasso', 'pick', 'hole', 'pan'].includes(tool) ? tool : 'lasso';
   markSessionDirty('bgremove');
 }
 

@@ -363,6 +363,8 @@ watchEffect(() => {
     void last.y;
   }
   void e.holes?.length;
+  void state.tool; // 切换「噪点」工具后立刻重绘标记，不用等鼠标移动
+  if (state.tool !== 'hole') hoveredHole.value = null;
   void hoveredHole.value?.id;
   void view.containerWidth;
   void view.containerHeight;
