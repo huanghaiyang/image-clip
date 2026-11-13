@@ -702,7 +702,7 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
   `destination-in` 把原图重新盖回来；
 * **脏矩形撤销**：一笔只记录笔迹包围盒（首次整块截图，扩张时补录新增条带），
   避免每次操作都存整图 ImageData（24MP ≈ 96MB/次）。历史上限 20 步；
-* 导出 `xxx-擦除.png`，可「生成新素材」「仅下载」「保存到资源库」。
+* 导出 `xxx-擦除.png`，可「生成新素材」「仅下载」「保存到资源库」「保存到当前素材」。
 
 ### 10.7 音频（`useAudio`）
 
@@ -733,10 +733,27 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 | POST | `/api/video/frames` | 截帧（`mode`+`interval`/`count`/`times`、`format`、`width`、`prefix`、`dir`） |
 | POST | `/api/video/audio` | 提取音轨（`format`、`name`、`dir`） |
 
-### 10.8 测试
+### 10.8 就地保存（覆盖当前素材）
 
-`npm test` 里新增了两组共享算法单测：
+各图片工具除了「生成新素材」之外都提供「保存到当前素材」：
+
+* **前端**：`useWorkspace.saveEditedItem(item, blob)` 是唯一入口——用 `X-Overwrite-Path`
+  覆盖资源库文件（服务端先 `snapshotVersion` 存历史版本），解码新 Blob 后**原地**替换
+  素材项的 `bitmap / imageData / buffer / width / height / thumbnail`，再重跑 AABB 检测，
+  `item.id`、列表位置与选中状态都不变（不新增素材）。
+* **格式**：编辑器输出统一是保留 alpha 的 PNG；`resolveInPlaceTarget()`（`lib/library.js`）
+  把目标路径归一成 `.png`，原文件是 JPG/WebP 时先走资源库改名再覆盖。
+* **未入库素材**：没有 `libraryPath` 的在资源库根目录建一个同名 PNG 并绑定，之后就是覆盖。
+* **缓存失效**：素材项带 `pixelVersion`（就地保存后自增）。临时会话的素材 Blob 按它判断
+  是否需要重新导出；橡皮擦 / 像素笔绘 / 水印去除的编辑层用 `item.bitmap` / `item.imageData.data`
+  的引用做基线，换了像素就重建；各舞台的 `pixelVersion` watch 触发重绘。
+
+### 10.9 测试
+
+`npm test` 里新增了几组共享算法与前端纯逻辑单测：
 
 * `shared/selection.test.js`：比例矩形、归一化往返、套索栅格化、选区模式、预览缩放换算；
-* `shared/bgremove.test.js`：边框主色识别（含双色渐变）、连通漫水、套索限制、羽化/收缩、反混合。
+* `shared/bgremove.test.js`：边框主色识别（含双色渐变）、连通漫水、套索限制、羽化/收缩、反混合；
+* `web/test/image-view.test.js`：画布查看「透明通道」的裁剪框（图片矩形 / 平移出界 / 空状态）；
+* `web/test/library-inplace.test.js`：就地保存的目标路径归一（.png 改名、根目录新建、兜底命名）。
 

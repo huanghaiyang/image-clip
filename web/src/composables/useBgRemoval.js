@@ -240,6 +240,18 @@ function ensureEntry(item = activeItem.value) {
   return entry;
 }
 
+/**
+ * 就地保存之后：旧的预览/掩膜/AI alpha 都是按旧像素算的，
+ * 清掉防抖定时器并删掉条目，让面板按新像素重建一份干净的工作区。
+ */
+function resetEntryFor(item) {
+  if (!item) return null;
+  const stale = entries[item.id];
+  if (stale?.timer) clearTimeout(stale.timer);
+  delete entries[item.id];
+  return ensureEntry(item);
+}
+
 function scheduleRecompute(entry) {
   if (!entry) return;
   entry.renderToken += 1;
@@ -1131,9 +1143,10 @@ function stripExtension(name) {
 
 /**
  * 按原始分辨率应用抠图。
- * @param {{saveToLibrary?:boolean}} [options]
+ * @param {{saveToLibrary?:boolean,inPlace?:boolean}} [options]
+ *   inPlace=true 时把结果写回当前素材（覆盖资源库文件），不新增素材。
  */
-export async function applyBackgroundRemoval({ saveToLibrary = false } = {}) {
+export async function applyBackgroundRemoval({ saveToLibrary = false, inPlace = false } = {}) {
   const item = activeItem.value;
   const entry = ensureEntry(item);
   if (!item || !entry) {
@@ -1224,13 +1237,23 @@ export async function applyBackgroundRemoval({ saveToLibrary = false } = {}) {
     });
 
     const filename = `${stripExtension(item.name)}-去背景.png`;
+    const coverage = (built.coverage * 100).toFixed(1);
+
+    if (inPlace) {
+      // 就地保存：结果直接写回当前素材，不新增素材条目
+      const saved = await workspace.actions.saveEditedItem(item, blob);
+      if (!saved) return null;
+      resetEntryFor(saved.item);
+      setStatus(`已保存到当前素材：${saved.path} · 透明 ${coverage}%`);
+      return { blob, item: saved.item, coverage: built.coverage };
+    }
+
     const newItem = await workspace.actions.addImageBlob(blob, filename);
     if (saveToLibrary) await saveBlobToLibrary(blob, filename, '抠图结果');
     // 结果只是产物：应用后回到原素材继续编辑，
     // 否则面板会切到结果图（默认参数、且已经没有背景色），再调参就像“应用没反应”
     if (newItem) workspace.actions.selectItem(item.id);
 
-    const coverage = (built.coverage * 100).toFixed(1);
     setStatus(
       `已应用背景去除：透明 ${coverage}% · ${Math.round(performance.now() - started)}ms${
         saveToLibrary ? ' · 已保存到资源库/抠图结果' : ''

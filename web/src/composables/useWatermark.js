@@ -58,6 +58,8 @@ function createEntry() {
     maskReady: false, // maskState.mask 是否可用（响应式镜像）
     maskVersion: 0, // maskState.version 的响应式镜像
     coverage: 0, // maskState.padded / maskState.total 的响应式镜像
+    /** 这份掩膜是基于哪个像素对象建立的；素材被就地保存后 item.imageData 会换新。 */
+    pixelRef: null,
     dirty: false, // 掩膜是否被本地画笔改过（界面提示“需重新去除”）
     error: '',
   };
@@ -122,8 +124,21 @@ function setError(message) {
 function entryFor(id) {
   // 只对重负载字段 markRaw（掩膜/结果 blob），entry 外壳保持响应式：
   // 否则 dirty/error 这些界面要读的小字段也跟着失去响应。
-  if (!state.entries[id]) state.entries[id] = createEntry();
-  return state.entries[id];
+  const item = workspace.state.items.find((row) => row.id === id) ?? null;
+  const pixelRef = item?.imageData?.data ?? null;
+  const existing = state.entries[id];
+  if (existing) {
+    // 会话恢复出来的条目没有像素基线：把当前像素当作基线
+    if (!existing.pixelRef) existing.pixelRef = pixelRef;
+    if (existing.pixelRef === pixelRef) return existing;
+    // 素材被「就地保存」过（像素对象换了）：掩膜与结果都基于旧像素，重建
+    revokeResult(existing);
+    delete state.entries[id];
+  }
+  const entry = createEntry();
+  entry.pixelRef = pixelRef;
+  state.entries[id] = entry;
+  return entry;
 }
 
 /** 组装 detect / remove 共用的 query 参数。 */
@@ -592,6 +607,44 @@ export function downloadResult(item = workspace.selected.value) {
 }
 
 /**
+ * 就地保存：把去除结果写回**当前素材**（覆盖资源库文件），不新增素材。
+ * 还没有结果时先按当前掩膜/参数跑一次去除。
+ */
+export async function saveInPlace(item = workspace.selected.value) {
+  if (!item) {
+    setError('请先在左侧选择一张素材');
+    return null;
+  }
+  let entry = entryFor(item.id);
+  if (!entry.result?.blob) {
+    const result = await removeFor(item);
+    if (!result?.blob) return null;
+    entry = entryFor(item.id);
+  }
+  const blob = entry.result?.blob;
+  if (!blob) {
+    setError('当前素材还没有去除结果');
+    return null;
+  }
+  if (state.busy) return null;
+
+  state.busy = true;
+  try {
+    const saved = await workspace.actions.saveEditedItem(item, blob);
+    if (!saved) return null;
+    // 结果已经落到素材上：清掉这次的掩膜与结果，避免对着同一处重复处理
+    revokeResult(state.entries[item.id]);
+    delete state.entries[item.id];
+    state.view.compare = false;
+    markSessionDirty('watermark');
+    setStatus(`已保存到当前素材：${saved.path}（旧内容已存入历史版本）`);
+    return saved;
+  } finally {
+    state.busy = false;
+  }
+}
+
+/**
  * 批量去除：素材列表里所有已检测（或有本地掩膜）的图依次走一遍 remove。
  *
  * 刻意串行而不是并发：inpaint（尤其 LaMa）在服务端是重 CPU/显存任务，
@@ -840,6 +893,7 @@ export function useWatermark() {
       clearMask,
       invertMask,
       removeFor,
+      saveInPlace,
       removeBatch,
       exportBatchZip,
       downloadResult,

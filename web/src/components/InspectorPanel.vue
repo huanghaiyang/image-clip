@@ -241,6 +241,15 @@ const spritePlan = computed(() => {
           >
             存入资源库
           </button>
+          <button
+            class="btn is-block mt-6"
+            type="button"
+            :disabled="state.busy || !selected.bounds || selected.resultEmpty"
+            @click="actions.saveTrimmedInPlace(selected)"
+          >
+            保存到当前素材（不新增）
+          </button>
+          <p class="muted note">「保存到当前素材」直接覆盖当前素材的资源库文件（旧内容自动存为历史版本），素材列表不会多出一项。</p>
         </template>
       </section>
 

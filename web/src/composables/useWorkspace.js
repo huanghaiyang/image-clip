@@ -325,6 +325,11 @@ async function addOneFile(file) {
     detectedAt: 0,
     /** 来源资源库路径；同一张库图片再次打开时直接选中，不重复建素材 */
     libraryPath: '',
+    /**
+     * 像素版本：就地保存（saveEditedItem）后自增。
+     * 用来让“按素材 id 缓存像素”的地方（临时会话的素材 Blob、各工具的编辑层）知道底图换了。
+     */
+    pixelVersion: 0,
   });
   state.items.push(item);
   state.selectedId = item.id;
@@ -625,6 +630,82 @@ export async function saveTrimmedItem(item) {
   }
 }
 
+/**
+ * 就地保存：把处理结果写回**当前素材**，不新增素材条目。
+ *
+ * 行为：
+ *  1. 覆盖资源库里的同一个文件（必要时先改名成 .png）。旧内容由服务端存成历史版本，
+ *     可以在资源库检查器里回滚；素材还没进资源库时（示例图 / 拖进来的文件），
+ *     先在资源库根目录建一个同名 PNG，后续保存就覆盖它。
+ *  2. 素材项的像素 / 尺寸 / 缩略图原地更新，id、列表位置、选中状态都不变，
+ *     所以「当前图片」就是处理结果，可以接着在这个结果上继续编辑。
+ *
+ * @param {object} item 目标素材项
+ * @param {Blob} blob 编辑结果（PNG，保留 alpha）
+ * @returns {Promise<{entry:object|null,path:string,item:object}|null>}
+ */
+export async function saveEditedItem(item, blob) {
+  if (!item || !blob) {
+    setError('没有可保存的内容');
+    return null;
+  }
+  const previousPath = item.libraryPath || '';
+  state.busy = true;
+  state.error = '';
+  try {
+    const { saveBlobToLibraryPath } = await import('./useLibrary.js');
+    const saved = await saveBlobToLibraryPath(blob, { path: previousPath, name: item.name });
+    const buffer = await blob.arrayBuffer();
+    const { bitmap, imageData, width, height } = await decodeToRgba(blob);
+
+    item.bitmap = markRaw(bitmap);
+    item.imageData = markRaw(imageData);
+    item.buffer = markRaw(buffer);
+    item.bytes = buffer.byteLength;
+    item.width = width;
+    item.height = height;
+    item.thumbnail = markRaw(makeThumbnail(bitmap, 160));
+    item.type = blob.type || 'image/png';
+    item.name = saved.entry?.name || item.name;
+    item.libraryPath = saved.path;
+    item.pixelVersion = (Number(item.pixelVersion) || 0) + 1;
+    // 像素和尺寸都换了：内容框按新图重新检测（detectedAt 归零，图集噪声缓存也会重建）
+    item.detectedAt = 0;
+    await recomputeItem(item);
+
+    setStatus(
+      previousPath
+        ? `已保存到当前素材：${saved.path}（旧内容已存入历史版本）`
+        : `已保存到资源库：${saved.path}（当前素材已绑定，之后保存直接覆盖）`,
+    );
+    return { entry: saved.entry ?? null, path: saved.path, item };
+  } catch (err) {
+    setError(`保存到当前素材失败：${err.message}`);
+    return null;
+  } finally {
+    state.busy = false;
+  }
+}
+
+/** 透明裁剪：把 AABB 裁剪结果写回当前素材（不新增素材）。 */
+export async function saveTrimmedInPlace(item) {
+  if (!item?.bounds || item.resultEmpty) {
+    setError('这张图片没有可裁剪的内容');
+    return null;
+  }
+  state.busy = true;
+  try {
+    const filename = croppedFilename(item.name, 'png');
+    const { blob } = await cropWith(state.engine, item, optionsSnapshot(), { format: 'png', quality: 100, filename });
+    return await saveEditedItem(item, blob);
+  } catch (err) {
+    setError(`保存到当前素材失败：${err.message}`);
+    return null;
+  } finally {
+    state.busy = false;
+  }
+}
+
 /** 归一化取景框 → 当前素材的像素矩形；批量裁剪与预览共用，保证两者结果一致。 */
 function normRect(item, norm) {
   const x = Math.max(0, Math.min(item.width - 1, Math.round(norm.x * item.width)));
@@ -787,6 +868,7 @@ function sessionItemMeta(item) {
     error: item.error,
     detectedAt: item.detectedAt,
     libraryPath: item.libraryPath,
+    pixelVersion: item.pixelVersion ?? 0,
   };
 }
 
@@ -868,6 +950,7 @@ export async function importSession(snapshot, blobs = {}) {
         error: '',
         detectedAt: Number(meta.detectedAt) || 0,
         libraryPath: meta.libraryPath || '',
+        pixelVersion: Number(meta.pixelVersion) || 0,
       });
       // id 是运行期自增的，恢复后要把计数器推到最大值，避免新素材撞 id
       const numeric = Number(String(meta.id).replace(/^img-/, ''));
@@ -934,6 +1017,8 @@ export function useWorkspace() {
       exportAll,
       copyBounds,
       saveTrimmedItem,
+      saveTrimmedInPlace,
+      saveEditedItem,
       trimAtlasBatch,
       previewAtlasCrop,
       exportSpriteSheet,

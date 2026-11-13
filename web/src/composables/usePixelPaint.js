@@ -223,7 +223,9 @@ function strokeSegment(entry, point) {
 
 function ensureEntry(item = activeItem.value) {
   if (!item) return null;
-  if (entries[item.id]) return entries[item.id];
+  const existing = entries[item.id];
+  // 素材被「就地保存」过（像素对象换了）→ 旧画布与撤销栈都已失效，按新像素重建
+  if (existing && existing.sourceBitmap === item.bitmap) return existing;
 
   const canvas = createCanvas(item.width, item.height);
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -237,6 +239,8 @@ function ensureEntry(item = activeItem.value) {
     name: item.name,
     width: item.width,
     height: item.height,
+    /** 这份编辑层是基于哪个像素对象建立的；就地保存后 item.bitmap 会换新 */
+    sourceBitmap: markRaw(item.bitmap),
     canvas: markRaw(canvas),
     ctx: markRaw(ctx),
     source: markRaw(source),
@@ -396,8 +400,27 @@ export function resetCanvas() {
 // --------------------------------------------------------------- 导出
 
 /**
- * 把笔绘结果生成为新素材。
- * @param {{addToWorkspace?:boolean,saveToLibrary?:boolean,download?:boolean}} [options]
+ * 就地保存之后：把「原图副本」换成刚保存的像素，并清空撤销栈
+ * （旧历史步骤指向保存前的像素，继续撤销会和磁盘上的文件对不上）。
+ */
+function rebaseEntry(entry, item) {
+  if (!entry) return;
+  const ctx = entry.source.getContext('2d');
+  ctx.clearRect(0, 0, entry.width, entry.height);
+  ctx.drawImage(entry.canvas, 0, 0);
+  entry.sourceBitmap = markRaw(item.bitmap);
+  entry.history = [];
+  entry.redo = [];
+  entry.pending = null;
+  entry.dirty = false;
+  entry.version += 1;
+  markSessionDirty('pixel');
+}
+
+/**
+ * 把笔绘结果生成为新素材，或就地写回当前素材。
+ * @param {{addToWorkspace?:boolean,saveToLibrary?:boolean,download?:boolean,inPlace?:boolean}} [options]
+ *   inPlace=true 时覆盖当前素材（不新增素材条目）。
  */
 export async function applyPaint(options = {}) {
   const item = activeItem.value;
@@ -408,11 +431,18 @@ export async function applyPaint(options = {}) {
   }
   if (state.busy) return null;
 
-  const { addToWorkspace = true, saveToLibrary: save = false, download = false } = options;
+  const { addToWorkspace = true, saveToLibrary: save = false, download = false, inPlace = false } = options;
   state.busy = true;
   try {
     const blob = await canvasToBlob(entry.canvas, 'image/png');
     const filename = `${stripExtension(item.name)}-笔绘.png`;
+    if (inPlace) {
+      const saved = await workspace.actions.saveEditedItem(item, blob);
+      if (!saved) return null;
+      rebaseEntry(entry, item);
+      setStatus(`已保存到当前素材：${saved.path}（${Math.round(blob.size / 1024)} KB）`);
+      return { blob, item: saved.item };
+    }
     let newItem = null;
     if (addToWorkspace) newItem = await workspace.actions.addImageBlob(blob, filename);
     if (save) await saveBlobToLibrary(blob, filename, '笔绘结果');

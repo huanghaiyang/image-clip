@@ -25,6 +25,7 @@ import {
   uploadLibraryFile,
   uploadBlobToLibrary,
   fetchLibraryDuplicates,
+  resolveInPlaceTarget,
 } from '../lib/library.js';
 import { useWorkspace } from './useWorkspace.js';
 import { setMode } from './useAppMode.js';
@@ -582,6 +583,61 @@ export async function saveBlobToLibrary(blob, name, dir = '导出') {
   } finally {
     state.busy = false;
     state.upload.active = false;
+  }
+}
+
+/**
+ * 就地保存：把编辑结果写回**当前素材**对应的资源库文件。
+ *
+ * 与 saveBlobToLibrary（另存为新文件）相反，这里覆盖同一个文件：
+ *  - path 有值：必要时先把文件改名成 `.png`（编辑器输出统一是保留 alpha 的 PNG，
+ *    而原文件可能是 JPG/WebP），再覆盖写入；服务端会先把旧内容存成历史版本，
+ *    所以覆盖后仍可在资源库检查器里回滚；
+ *  - path 为空（素材还没进资源库，比如示例图 / 拖进来的文件）：在资源库根目录
+ *    新建一个同名 PNG，之后再次保存就是覆盖它。
+ *
+ * @param {Blob} blob
+ * @param {{path?:string, name?:string}} [options]
+ * @returns {Promise<{entry:object|null, path:string}>}
+ */
+export async function saveBlobToLibraryPath(blob, { path = '', name = '' } = {}) {
+  if (!blob) throw new LibraryApiError('没有可保存的内容', 'EMPTY_BLOB');
+  const target = resolveInPlaceTarget(path, name || 'image');
+  state.busy = true;
+  state.error = '';
+  try {
+    let targetPath = target.path;
+    let targetName = target.name;
+
+    // 覆盖上传是「按目标路径写字节」，扩展名必须和真实编码一致，所以先改名成 .png
+    if (targetPath && target.renamed) {
+      const response = await renameLibraryItems([{ path: targetPath, name: targetName }]);
+      const result = (response?.results ?? []).find((row) => row.ok !== false && row.to);
+      if (!result?.to) {
+        const failed = (response?.results ?? []).find((row) => row.ok === false);
+        throw new LibraryApiError(failed?.error || '改名失败：无法把文件改成 PNG', 'RENAME_FAILED');
+      }
+      targetPath = result.to;
+      targetName = targetPath.split('/').pop() || targetName;
+      // 改名同样要同步资源库的选中项/当前目录/预览路径与各工作区的来源路径
+      applyPathMoves(response?.results ?? []);
+    }
+
+    const uploaded = await uploadLibraryFile(blob, {
+      name: targetName,
+      dir: target.dir,
+      overwritePath: targetPath || undefined,
+      dedup: false,
+    });
+    await refreshLibrary({ quiet: true });
+    const entry = uploaded?.entry ?? null;
+    const finalPath = entry?.path ?? targetPath ?? `${target.dir ? `${target.dir}/` : ''}${targetName}`;
+    return { entry, path: finalPath };
+  } catch (err) {
+    setError(`保存到当前素材失败：${err.message}`);
+    throw err;
+  } finally {
+    state.busy = false;
   }
 }
 

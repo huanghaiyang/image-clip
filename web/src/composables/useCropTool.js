@@ -457,7 +457,8 @@ function uniqueName(base, used) {
 
 /**
  * 裁剪当前素材。
- * @param {{addToWorkspace?:boolean,saveToLibrary?:boolean,download?:boolean}} [options]
+ * @param {{addToWorkspace?:boolean,saveToLibrary?:boolean,download?:boolean,inPlace?:boolean}} [options]
+ *   inPlace=true 时把裁剪结果写回当前素材（覆盖资源库文件），不新增素材。
  */
 export async function applyCurrentCrop(options = {}) {
   const item = syncCrop();
@@ -465,20 +466,32 @@ export async function applyCurrentCrop(options = {}) {
     setError('请先选择一张素材');
     return null;
   }
-  const { addToWorkspace = true, saveToLibrary = false, download = false } = options;
+  const { addToWorkspace = true, saveToLibrary = false, download = false, inPlace = false } = options;
   state.busy = true;
   try {
-    const blob = await cropToBlob(item.bitmap, state.rect, outputSize.value);
+    // 先记下这次输出的尺寸：就地保存后素材尺寸会变，outputSize 会跟着重算
+    const savedSize = { ...outputSize.value };
+    const blob = await cropToBlob(item.bitmap, state.rect, savedSize);
     const filename = `${stripExtension(item.name)}-裁剪.png`;
+    if (inPlace) {
+      const saved = await workspace.actions.saveEditedItem(item, blob);
+      if (!saved) return null;
+      // 结果就是当前素材：尺寸变了，取景框按新图重新适配，旧的历史步骤也随之失效
+      resetCropHistory();
+      state.imageId = null;
+      syncCrop();
+      setStatus(`已保存到当前素材：${saved.path}（${savedSize.width}×${savedSize.height}）`);
+      return { blob, item: saved.item, size: savedSize };
+    }
     let newItem = null;
     if (addToWorkspace) newItem = await workspace.actions.addImageBlob(blob, filename);
     if (saveToLibrary) await saveBlobToLibrary(blob, filename, '裁剪结果');
     if (download) downloadBlob(blob, filename);
     setStatus(
-      `已裁剪 ${state.rect.width}×${state.rect.height} → ${outputSize.value.width}×${outputSize.value.height}` +
+      `已裁剪 ${state.rect.width}×${state.rect.height} → ${savedSize.width}×${savedSize.height}` +
         `${addToWorkspace ? '（新素材）' : ''}${saveToLibrary ? '（资源库）' : ''}`,
     );
-    return { blob, newItem, size: outputSize.value };
+    return { blob, newItem, size: savedSize };
   } catch (err) {
     setError(`裁剪失败：${err.message}`);
     return null;

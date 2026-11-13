@@ -208,11 +208,21 @@ function savePreset() {
           >
             仅下载 PNG
           </button>
+          <button
+            class="btn is-block mt-6"
+            type="button"
+            :disabled="!canApply || state.busy"
+            @click="actions.applyCurrentCrop({ inPlace: true })"
+          >
+            保存到当前素材（不新增）
+          </button>
           <label class="check-row mt-8">
             <input v-model="applySaveToLibrary" type="checkbox" />
             <span>保存到资源库/裁剪结果</span>
           </label>
-          <p class="hint">裁剪结果会作为新素材加入左侧列表，原图保持不变，方便对比。</p>
+          <p class="hint">
+            裁剪结果会作为新素材加入左侧列表，原图保持不变，方便对比；「保存到当前素材」则直接覆盖当前素材的资源库文件（旧内容自动存为历史版本），不新增素材。
+          </p>
         </section>
 
         <section class="section">

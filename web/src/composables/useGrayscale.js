@@ -174,7 +174,8 @@ function renderFull(item) {
 
 /**
  * 导出当前素材的灰度着色结果。
- * @param {{addToWorkspace?:boolean,saveToLibrary?:boolean,download?:boolean}} [options]
+ * @param {{addToWorkspace?:boolean,saveToLibrary?:boolean,download?:boolean,inPlace?:boolean}} [options]
+ *   inPlace=true 时把结果写回当前素材（覆盖资源库文件），不新增素材。
  */
 export async function exportTint(options = {}) {
   const item = selected.value;
@@ -184,11 +185,17 @@ export async function exportTint(options = {}) {
   }
   if (state.busy) return null;
 
-  const { addToWorkspace = true, saveToLibrary = false, download = false } = options;
+  const { addToWorkspace = true, saveToLibrary = false, download = false, inPlace = false } = options;
   state.busy = true;
   try {
     const blob = await canvasToBlob(renderFull(item), 'image/png');
     const filename = `${stripExtension(item.name)}-灰度.png`;
+    if (inPlace) {
+      const saved = await workspace.actions.saveEditedItem(item, blob);
+      if (!saved) return null;
+      setStatus(`已保存到当前素材：${saved.path}（灰度 → ${state.options.color.toUpperCase()} · ${state.options.strength}%）`);
+      return { blob, item: saved.item };
+    }
     if (addToWorkspace) await workspace.actions.addImageBlob(blob, filename);
     if (saveToLibrary) await saveBlobToLibrary(blob, filename, '灰度结果');
     if (download) downloadBlob(blob, filename);

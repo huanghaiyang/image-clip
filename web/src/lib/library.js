@@ -120,6 +120,31 @@ export function uploadLibraryFile(file, options = {}) {
   });
 }
 
+/**
+ * 「就地保存」的目标文件：编辑器输出的都是保留 alpha 的 PNG，
+ * 所以目标统一成 `.png`；原文件是 JPG/WebP 时，服务端会先改名再覆盖（旧内容进历史版本）。
+ *
+ * @param {string} path 当前素材在资源库里的相对路径；空字符串表示还没进资源库
+ * @param {string} fallbackName 没有 path 时用来起名的素材名（允许带扩展名）
+ * @returns {{path:string, dir:string, name:string, renamed:boolean}}
+ *   path 为空表示要新建文件；renamed 表示需要先把现有文件改名成 .png
+ */
+export function resolveInPlaceTarget(path, fallbackName = 'image') {
+  const baseOf = (value) => String(value ?? '').replace(/\.[^./\\]+$/, '').replace(/[/\\]+$/, '') || 'image';
+  const cleanPath = String(path ?? '').trim();
+
+  if (!cleanPath) {
+    const name = `${baseOf(fallbackName)}.png`;
+    return { path: '', dir: '', name, renamed: false };
+  }
+
+  const slash = cleanPath.lastIndexOf('/');
+  const dir = slash >= 0 ? cleanPath.slice(0, slash) : '';
+  const currentName = cleanPath.slice(slash + 1);
+  const name = `${baseOf(currentName)}.png`;
+  return { path: cleanPath, dir, name, renamed: name !== currentName };
+}
+
 export function uploadBlobToLibrary(blob, name, dir = '') {
   return uploadLibraryFile(blob, { name, dir });
 }

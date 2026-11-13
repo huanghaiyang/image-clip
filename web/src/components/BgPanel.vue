@@ -422,12 +422,20 @@ function runBatch() {
           >
             {{ state.busy ? '正在处理…' : '按原图分辨率应用' }}
           </button>
+          <button
+            class="btn is-block mt-6"
+            type="button"
+            :disabled="state.busy"
+            @click="actions.applyBackgroundRemoval({ inPlace: true })"
+          >
+            保存到当前素材（不新增）
+          </button>
           <label class="check-row">
             <input v-model="saveToLibrary" type="checkbox" />
             <span>同时保存到资源库/抠图结果</span>
           </label>
           <p class="hint">
-            结果会作为新素材加入左侧列表（PNG，保留透明通道），原图不变；应用后仍停留在原图，可继续调参再应用。
+            结果会作为新素材加入左侧列表（PNG，保留透明通道），原图不变；应用后仍停留在原图，可继续调参再应用。「保存到当前素材」直接把结果覆盖到当前素材（旧内容自动存为历史版本），不新增素材。
           </p>
 
           <div class="batch-block">

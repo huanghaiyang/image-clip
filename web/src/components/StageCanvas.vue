@@ -307,7 +307,21 @@ watch([mode, showBox, () => viewState.alpha], () => {
 });
 
 watch(
-  () => [size.value.w, size.value.h, zoom.value, offset.value.x, offset.value.y, selected.value?.bounds?.x, selected.value?.bounds?.width, selected.value?.resultEmpty],
+  () => [
+    size.value.w,
+    size.value.h,
+    zoom.value,
+    offset.value.x,
+    offset.value.y,
+    selected.value?.bounds?.x,
+    selected.value?.bounds?.width,
+    selected.value?.resultEmpty,
+    // 就地保存会换掉 bitmap / 尺寸，pixelVersion 与 detectedAt 一起作为重绘信号
+    selected.value?.pixelVersion,
+    selected.value?.detectedAt,
+    selected.value?.width,
+    selected.value?.height,
+  ],
   () => requestDraw(),
   { flush: 'post' },
 );

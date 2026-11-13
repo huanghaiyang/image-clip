@@ -642,9 +642,9 @@ watch(
   { flush: 'post' },
 );
 
-// 换素材：重新适应窗口，掩膜缓存与结果图全部作废
+// 换素材（含「就地保存」换了像素）：重新适应窗口，掩膜缓存与结果图全部作废
 watch(
-  () => item.value?.id,
+  () => [item.value?.id, item.value?.pixelVersion],
   () => {
     maskLayer = null;
     maskCanvas = null;

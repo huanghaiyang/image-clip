@@ -456,6 +456,14 @@ async function pickTemplate() {  const input = document.createElement('input');
             下载去除结果
           </button>
           <button
+            class="btn is-block mt-6"
+            type="button"
+            :disabled="state.busy"
+            @click="actions.saveInPlace(item)"
+          >
+            保存到当前素材（不新增）
+          </button>
+          <button
             class="btn is-block"
             type="button"
             :disabled="exportable.length === 0"

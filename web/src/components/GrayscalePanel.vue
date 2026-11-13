@@ -136,11 +136,21 @@ function pickPreset(hex) {
           >
             仅下载 PNG
           </button>
+          <button
+            class="btn is-block mt-6"
+            type="button"
+            :disabled="state.busy"
+            @click="actions.exportTint({ inPlace: true })"
+          >
+            保存到当前素材（不新增）
+          </button>
           <label class="check-row">
             <input v-model="saveToLibrary" type="checkbox" />
             <span>同时保存到资源库/灰度结果</span>
           </label>
-          <p class="hint">结果作为新素材加入左侧列表，原图保持不变。</p>
+          <p class="hint">
+            结果作为新素材加入左侧列表，原图保持不变；「保存到当前素材」直接覆盖当前素材（旧内容自动存为历史版本），不新增素材。
+          </p>
         </section>
 
         <section class="section">

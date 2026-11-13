@@ -415,7 +415,8 @@ function drawOverlay() {
 // --------------------------------------------------------------- 生命周期
 
 watch(
-  () => item.value?.id,
+  // pixelVersion：素材被「就地保存」后 bitmap / 尺寸都会换，id 不变但必须重画
+  () => [item.value?.id, item.value?.pixelVersion],
   async () => {
     const current = item.value;
     if (!current) {

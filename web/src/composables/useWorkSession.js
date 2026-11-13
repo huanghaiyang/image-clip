@@ -79,8 +79,8 @@ const state = reactive({
 // --------------------------------------------------------------- 保存缓存
 /** 各现场最近一次导出结果，未变化的现场直接沿用，避免反复序列化大对象。 */
 let docs = {};
-/** 已经导出过、内容不会再变的素材 Blob 键（素材原图不参与编辑）。 */
-const assetKeys = new Set();
+/** 已经导出过的素材 Blob：id → pixelVersion（就地保存后版本变了，必须重新导出）。 */
+const assetKeys = new Map();
 /** 每个工具现场上一次导出产生的 Blob 键。 */
 let scopeBlobKeys = {};
 
@@ -200,16 +200,17 @@ async function flush() {
       if (scopes.has('workspace')) {
         const { doc } = await workspace.actions.exportSession({ withBlobs: false });
         docs.workspace = doc;
-        const liveKeys = new Set(doc.items.map((item) => `asset:${item.id}`));
-        for (const key of [...assetKeys]) {
-          if (!liveKeys.has(key)) assetKeys.delete(key);
+        const liveKeys = new Set(doc.items.map((item) => item.id));
+        for (const id of [...assetKeys.keys()]) {
+          if (!liveKeys.has(id)) assetKeys.delete(id);
         }
         for (const item of doc.items) {
           const key = `asset:${item.id}`;
-          if (assetKeys.has(key)) continue;
+          const version = Number(item.pixelVersion) || 0;
+          if (assetKeys.get(item.id) === version) continue;
           const blob = await workspace.actions.exportItemBlob(item.id);
           if (!blob) continue;
-          assetKeys.add(key);
+          assetKeys.set(item.id, version);
           blobsToWrite.set(key, blob);
         }
       }
@@ -236,7 +237,10 @@ async function flush() {
       if (scopes.has('audio')) docs.audio = audioDoc();
       if (scopes.has('chat')) docs.chat = chat.actions.exportSession();
 
-      const blobKeys = [...assetKeys, ...Object.values(scopeBlobKeys).flatMap((set) => [...set])];
+      const blobKeys = [
+        ...[...assetKeys.keys()].map((id) => `asset:${id}`),
+        ...Object.values(scopeBlobKeys).flatMap((set) => [...set]),
+      ];
 
       const doc = {
         version: 1,
@@ -542,9 +546,16 @@ export async function initSession() {
           audio: doc.audio,
           chat: doc.chat,
         };
+        // 恢复出来的素材 Blob 已经在 IndexedDB 里：按像素版本记成“已导出”，
+        // 只有就地保存（pixelVersion 变了）才会在下次落盘时重新导出
+        const restoredVersions = new Map(
+          (doc.workspace?.items ?? []).map((item) => [String(item?.id ?? ''), Number(item?.pixelVersion) || 0]),
+        );
         for (const key of doc.blobKeys ?? []) {
-          if (key.startsWith('asset:')) assetKeys.add(key);
-          else {
+          if (key.startsWith('asset:')) {
+            const id = key.slice('asset:'.length);
+            if (restoredVersions.has(id)) assetKeys.set(id, restoredVersions.get(id));
+          } else {
             const scope = blobScopeOf(key);
             if (scope) keepScopeKeys(scope, [...(scopeBlobKeys[scope] ?? []), key]);
           }
