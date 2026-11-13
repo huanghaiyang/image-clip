@@ -20,7 +20,7 @@ Node + Vue 的图片处理应用。当前版本聚焦一个功能：
 
 ```bash
 npm install          # 安装 server + web 两端的依赖
-npm run dev          # 同时启动 Node API(8787) 和 Vite 前端(5174)
+npm run dev          # 同时启动 Node API(8786) 和 Vite 前端(5174)
 # 打开 http://127.0.0.1:5174
 ```
 
@@ -28,7 +28,7 @@ npm run dev          # 同时启动 Node API(8787) 和 Vite 前端(5174)
 
 ```bash
 npm run build        # 构建 web/dist
-npm start            # http://127.0.0.1:8787
+npm start            # http://127.0.0.1:8786
 ```
 
 视频工作区（第 2 章）还需要本机 FFmpeg。它只影响**探测 / 截帧 / 提取音频 / 时间轴缩略图**，
@@ -37,7 +37,7 @@ npm start            # http://127.0.0.1:8787
 
 ```bash
 # 把 ffmpeg 与 ffprobe 放到 D:\thirdparty\ffmpeg\bin 即可，无需配置 PATH
-curl http://127.0.0.1:8787/api/video/health    # 查看搜索过的路径与可用性
+curl http://127.0.0.1:8786/api/video/health    # 查看搜索过的路径与可用性
 ```
 
 打开后点 **载入示例** 会把 `samples/` 里的三张蝴蝶图读进来看效果；也可以直接把图片
@@ -145,12 +145,12 @@ detectBounds(rgba, width, height, options) → {
 
 ```bash
 # ① 原始二进制 + query 参数
-curl -X POST 'http://127.0.0.1:8787/api/crop?alphaThreshold=8&padding=2&format=png' \
+curl -X POST 'http://127.0.0.1:8786/api/crop?alphaThreshold=8&padding=2&format=png' \
      -H 'Content-Type: image/webp' --data-binary @samples/蝴蝶-01.webp \
      -o out.png
 
 # ② JSON + dataURL
-curl -X POST http://127.0.0.1:8787/api/analyze \
+curl -X POST http://127.0.0.1:8786/api/analyze \
      -H 'Content-Type: application/json' \
      -d '{"image":"data:image/png;base64,...","options":{"matchColor":true,"colorTolerance":30}}'
 ```
@@ -303,7 +303,7 @@ LaMa 为**固定 512×512** 输入，所以按原生分辨率做重叠窗口切�
 ```bash
 npm run model:watermark    # 下载文本检测模型（4.5MB，走 hf-mirror 镜像）
 # 开启门控（接口层，默认关闭）：
-curl -X POST 'http://127.0.0.1:8787/api/watermark/detect?textGate=1' --data-binary @samples/蝴蝶-豆包AI水印.jpg
+curl -X POST 'http://127.0.0.1:8786/api/watermark/detect?textGate=1' --data-binary @samples/蝴蝶-豆包AI水印.jpg
 npm test                   # 模型存在时会跑 server/test/text-gate.test.js，缺模型自动跳过
 ```
 
@@ -400,14 +400,14 @@ npm run verify:watermark  # 量化报告 + probe-out/watermark/ 结果图
 
 ```bash
 # 健康检查（OpenCV/LaMa 是否就绪）
-curl http://127.0.0.1:8787/api/watermark/health
+curl http://127.0.0.1:8786/api/watermark/health
 
 # 检测：返回 mask.dataUrl（灰度 PNG）、rle、boxes、coverage、confidence、estimatedAlpha、diagnostics
-curl -X POST 'http://127.0.0.1:8787/api/watermark/detect?method=auto&sensitivity=55' \
+curl -X POST 'http://127.0.0.1:8786/api/watermark/detect?method=auto&sensitivity=55' \
      -H 'Content-Type: image/png' --data-binary @samples/示例-平铺水印.webp
 
 # 去除：JSON 体（image + mask）+ ?response=json 拿元信息；不传 mask 时服务端自己检测
-curl -X POST 'http://127.0.0.1:8787/api/watermark/remove?engine=auto&response=json' \
+curl -X POST 'http://127.0.0.1:8786/api/watermark/remove?engine=auto&response=json' \
      -H 'Content-Type: application/json' \
      -d '{"image":"data:image/png;base64,...","mask":"data:image/png;base64,..."}'
 ```

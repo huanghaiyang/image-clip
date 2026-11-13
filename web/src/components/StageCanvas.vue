@@ -6,7 +6,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import { useWorkspace } from '../composables/useWorkspace.js';
-import { useImageView } from '../composables/useImageView.js';
+import { useImageView, alphaViewClip } from '../composables/useImageView.js';
 import { importFilesToLibrary, pickLibraryImages } from '../composables/useLibraryImport.js';
 
 const { state, selected, actions } = useWorkspace();
@@ -56,6 +56,21 @@ function centeredOffset(scale = zoom.value) {
     y: Math.round((size.value.h - h * scale) / 2),
   };
 }
+
+/**
+ * 透明通道视图只画在不透明的画布上，所以要把滤镜结果裁到图片矩形：
+ * 否则整块舞台画布（图片之外的空白区域）都会被盖成黑色，棋盘格背景直接消失。
+ */
+const alphaClip = computed(() => {
+  if (!viewState.alpha) return null;
+  const item = selected.value;
+  if (!item) return alphaViewClip(null, size.value);
+  const scale = zoom.value;
+  const isResult = mode.value === 'result' && item.bounds && !item.resultEmpty;
+  const width = (isResult ? item.bounds.width : item.width) * scale;
+  const height = (isResult ? item.bounds.height : item.height) * scale;
+  return alphaViewClip({ x: offset.value.x, y: offset.value.y, width, height }, size.value);
+});
 
 function fitToView() {
   actions.setView('zoom', 'fit');
@@ -312,7 +327,7 @@ watch(
     @dragover="onDragOver"
     @dragleave="onDragLeave"
   >
-    <canvas ref="canvasEl" class="stage-canvas" />
+    <canvas ref="canvasEl" class="stage-canvas" :style="alphaClip ? { clipPath: alphaClip } : null" />
 
     <!-- Figma 风格选择框：1px 描边 + 8 个手柄 + 尺寸标签 -->
     <div v-if="frame" class="frame" :style="{ left: `${frame.left}px`, top: `${frame.top}px`, width: `${frame.width}px`, height: `${frame.height}px` }">

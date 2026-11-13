@@ -14,12 +14,15 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import { useWorkspace } from '../composables/useWorkspace.js';
 import { useWatermark } from '../composables/useWatermark.js';
+import { useImageView, alphaViewClip } from '../composables/useImageView.js';
 import { useSpaceHeld } from '../composables/useStageViewport.js';
 import { importFilesToLibrary, pickLibraryImages } from '../composables/useLibraryImport.js';
 import { createMaskLayer, maskToImageData } from '../lib/watermark.js';
 
 const { state: workspaceState, selected, actions: workspaceActions } = useWorkspace();
 const { state, selectedEntry, hasMask, coverage, canUndoMask, canRedoMask, actions } = useWatermark();
+/** 画布查看（灰度 / 透明通道）：只影响显示，不参与任何导出 */
+const { state: imageViewState } = useImageView();
 /** 空格 / 中键：临时进入平移，不打断画笔工具 */
 const spaceHeld = useSpaceHeld();
 
@@ -168,6 +171,16 @@ function imageRect() {
   const scale = zoom.value;
   return { x: offset.value.x, y: offset.value.y, w: w * scale, h: h * scale };
 }
+
+/**
+ * 透明通道视图的输出不透明（黑 = 全透明），而 base 画布铺满整个舞台；
+ * 不裁到图片矩形就会把图片外的棋盘格背景一起盖成黑色。
+ */
+const alphaClip = computed(() => {
+  if (!imageViewState.alpha) return null;
+  const rect = imageRect();
+  return alphaViewClip({ x: rect.x, y: rect.y, width: rect.w, height: rect.h }, stageSize.value);
+});
 
 function paintBase() {
   const canvas = baseEl.value;
@@ -688,7 +701,7 @@ watch(
     @dragleave="dropActive = false"
     @contextmenu.prevent
   >
-    <canvas ref="baseEl" class="stage-canvas" />
+    <canvas ref="baseEl" class="stage-canvas" :style="alphaClip ? { clipPath: alphaClip } : null" />
     <canvas ref="overlayEl" class="stage-canvas is-overlay" />
 
     <!-- 前后对比分隔条：拖动它就改 split，不触发涂抹 -->

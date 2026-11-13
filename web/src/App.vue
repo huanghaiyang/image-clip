@@ -394,7 +394,10 @@ watch(
   min-height: 0;
 }
 
-/* 画布查看滤镜：只滤镜图片画布本身，不动工具栏、叠加层与坐标读数 */
+/* 画布查看滤镜：只滤镜图片画布本身，不动工具栏、叠加层与坐标读数。
+   注意 canvas.base / canvas.playback 只有图片那么大；canvas.stage-canvas 是铺满舞台的，
+   所以透明通道视图由组件自己用 alphaViewClip() 把滤镜结果裁到图片矩形（见 useImageView.js），
+   否则整块画布会被染黑。 */
 .app-body.is-view-filter :deep(canvas.base),
 .app-body.is-view-filter :deep(canvas.playback),
 .app-body.is-view-filter :deep(canvas.stage-canvas:not(.is-overlay)) {

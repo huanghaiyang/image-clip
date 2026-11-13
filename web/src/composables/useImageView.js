@@ -57,9 +57,12 @@ function clampGain(value) {
 
 /**
  * 生成 feColorMatrix 的 4×5 矩阵：
- *  - 透明通道视图：R=G=B=alpha×增益，输出 alpha 固定 1（整块画布不透明，黑底最干净）；
+ *  - 透明通道视图：R=G=B=alpha×增益，输出 alpha 固定 1（不透明，黑 = 全透明最直观）；
  *  - 灰度查看：输出 = 原色 × (1 - s) + 亮度 × 颜色 × s。
  * 与灰度着色工具使用的 sRGB 亮度权重保持一致。
+ *
+ * 注意：透明通道视图的输出不透明，所以铺满舞台的画布（StageCanvas / WatermarkStage）
+ * 必须再用 alphaViewClip() 把滤镜结果裁到图片矩形，否则整块画布会被盖成黑色。
  */
 const filterMatrix = computed(() => {
   if (state.alpha) {
@@ -87,6 +90,46 @@ const filterMatrix = computed(() => {
   ];
   return rows.map((row) => row.map((n) => Number(n.toFixed(4))).join(' ')).join('  ');
 });
+
+/**
+ * 透明通道视图的「只作用于图片」裁剪框（CSS clip-path inset）。
+ *
+ * 透明通道视图的输出是不透明的（黑 = 全透明），而 StageCanvas / WatermarkStage 的
+ * `<canvas>` 是铺满整个舞台的，图片只占其中一块。不裁剪的话滤镜会把整块画布
+ * 连同棋盘格背景一起盖成黑色 —— 看起来就像“透明通道影响到了整个画布”。
+ * 把滤镜结果裁到图片矩形后：图片内仍是黑底 alpha 灰度，图片外照常露出画布背景。
+ *
+ * @param {{x:number,y:number,width:number,height:number}} rect 图片在画布里的显示矩形（CSS px）
+ * @param {{w:number,h:number}} stage 舞台尺寸，与画布元素的 CSS 尺寸一致
+ * @returns {string} 可直接用于 style.clipPath 的 inset()；矩形无效/完全在舞台外时返回空裁剪
+ */
+export function alphaViewClip(rect, stage) {
+  const stageW = Number(stage?.w);
+  const stageH = Number(stage?.h);
+  const x = Number(rect?.x);
+  const y = Number(rect?.y);
+  const width = Number(rect?.width);
+  const height = Number(rect?.height);
+
+  if (!(stageW > 0) || !(stageH > 0) || !(width > 0) || !(height > 0) || !Number.isFinite(x) || !Number.isFinite(y)) {
+    return 'inset(0 100% 0 0)';
+  }
+
+  // 先与舞台求交：图片可能被平移出可视区，inset 的四个值必须落在舞台内才安全
+  const x1 = Math.min(Math.max(0, x), stageW);
+  const y1 = Math.min(Math.max(0, y), stageH);
+  const x2 = Math.min(Math.max(0, x + width), stageW);
+  const y2 = Math.min(Math.max(0, y + height), stageH);
+  const clipW = Math.max(0, Math.round(x2 - x1));
+  const clipH = Math.max(0, Math.round(y2 - y1));
+  if (!clipW || !clipH) return 'inset(0 100% 0 0)';
+
+  const left = Math.round(x1);
+  const top = Math.round(y1);
+  const right = Math.max(0, Math.round(stageW) - left - clipW);
+  const bottom = Math.max(0, Math.round(stageH) - top - clipH);
+  return `inset(${top}px ${right}px ${bottom}px ${left}px)`;
+}
 
 export function setGrayscale(value) {
   state.grayscale = clamp(value);

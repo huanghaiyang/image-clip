@@ -57,7 +57,7 @@ const ROOT = path.resolve(__dirname, '../..');
 const SAMPLES_DIR = path.join(ROOT, 'samples');
 const WEB_DIST = path.join(ROOT, 'web/dist');
 
-const PORT = Number(process.env.PORT ?? 8787);
+const PORT = Number(process.env.PORT ?? 8786);
 const HOST = process.env.HOST ?? '127.0.0.1';
 const SAMPLE_EXT = new Set(['.png', '.webp', '.jpg', '.jpeg', '.avif', '.gif']);
 
