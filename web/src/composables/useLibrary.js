@@ -35,7 +35,8 @@ import { mapLimit } from '../lib/async.js';
 const EMPTY_STATS = { files: 0, folders: 0, images: 0, videos: 0, audios: 0, bytes: 0, truncated: false };
 
 const BROWSE_MODE_KEY = 'image-clip:library-browse-mode';
-const BROWSE_MODE_MIGRATED_KEY = 'image-clip:library-browse-mode-migrated';
+// 迁移标记带版本号：每次调整默认值时换一个，保证老用户也会落到新默认（只清一次）
+const BROWSE_MODE_MIGRATED_KEY = 'image-clip:library-browse-mode-migrated-v2';
 
 /**
  * 资源库主列表的展示方式。

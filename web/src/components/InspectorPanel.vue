@@ -46,23 +46,78 @@ const atlasSummary = computed(() => {
   ).toFixed(1)}%`;
 });
 
-// 图集透明裁剪预览：全部勾选素材，按当前并集取景框**裁切后**的结果渐进展示
+// 图集透明裁剪预览：全部勾选素材，按当前并集取景框裁切、缩放到统一尺寸后渐进展示
 const atlasPreview = ref(null);
 const atlasPreviewBusy = ref(false);
 const atlasPreviewRows = computed(() =>
   [...(atlasPreview.value?.results ?? [])].sort((a, b) => a.index - b.index),
 );
+const atlasOutputSize = computed(() => atlasPreview.value?.outSize ?? null);
+const atlasFrameIndex = computed(() => {
+  const total = atlasPreviewRows.value.length;
+  if (!total) return 0;
+  return Math.min(Math.max(0, atlasPlayback.index), total - 1);
+});
+const currentAtlasFrame = computed(() => atlasPreviewRows.value[atlasFrameIndex.value] ?? null);
+
+/** GIF 式播放：按选定帧率循环播放裁切后的帧。 */
+const ATLAS_FPS_OPTIONS = [6, 12, 24];
+const atlasPlayback = reactive({ playing: false, index: 0, fps: 12 });
+let atlasTimer = 0;
+
+function stopAtlasTimer() {
+  if (atlasTimer) {
+    window.clearInterval(atlasTimer);
+    atlasTimer = 0;
+  }
+}
+
+function startAtlasTimer() {
+  stopAtlasTimer();
+  const interval = Math.max(30, Math.round(1000 / Math.max(1, atlasPlayback.fps)));
+  atlasTimer = window.setInterval(() => {
+    const total = atlasPreviewRows.value.length;
+    if (!total) return;
+    atlasPlayback.index = (atlasPlayback.index + 1) % total;
+  }, interval);
+}
+
+function toggleAtlasPlay() {
+  if (atlasPreviewRows.value.length < 2) return;
+  atlasPlayback.playing = !atlasPlayback.playing;
+  if (atlasPlayback.playing) startAtlasTimer();
+  else stopAtlasTimer();
+}
+
+function stepAtlasFrame(delta) {
+  const total = atlasPreviewRows.value.length;
+  if (!total) return;
+  atlasPlayback.index = (atlasFrameIndex.value + delta + total) % total;
+}
+
+function selectAtlasFrame(index) {
+  atlasPlayback.index = Math.max(0, Math.min(index, atlasPreviewRows.value.length - 1));
+}
+
+/** 播放中改帧率：重建定时器，立即生效。 */
+function restartAtlasTimerIfPlaying() {
+  if (atlasPlayback.playing) startAtlasTimer();
+}
 
 async function openAtlasPreview() {
   if (atlasPreviewBusy.value || !trimAtlas.value) return;
   closeAtlasPreview();
   atlasPreviewBusy.value = true;
+  stopAtlasTimer();
+  atlasPlayback.playing = false;
+  atlasPlayback.index = 0;
   const session = reactive({
     count: trimAtlas.value.count,
     total: trimAtlas.value.items.length,
     done: 0,
     results: [],
     cancelled: false,
+    outSize: trimAtlas.value.outSize ? { ...trimAtlas.value.outSize } : null,
   });
   atlasPreview.value = session;
   window.addEventListener('keydown', onAtlasPreviewKey);
@@ -91,6 +146,8 @@ async function openAtlasPreview() {
 
 function closeAtlasPreview() {
   window.removeEventListener('keydown', onAtlasPreviewKey);
+  stopAtlasTimer();
+  atlasPlayback.playing = false;
   const session = atlasPreview.value;
   if (session) {
     session.cancelled = true;
@@ -100,7 +157,22 @@ function closeAtlasPreview() {
 }
 
 function onAtlasPreviewKey(event) {
-  if (event.key === 'Escape') closeAtlasPreview();
+  if (event.key === 'Escape') {
+    closeAtlasPreview();
+    return;
+  }
+  if (!atlasPreview.value) return;
+  if (event.code === 'Space') {
+    event.preventDefault();
+    toggleAtlasPlay();
+    return;
+  }
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+    event.preventDefault();
+    stopAtlasTimer();
+    atlasPlayback.playing = false;
+    stepAtlasFrame(event.key === 'ArrowLeft' ? -1 : 1);
+  }
 }
 
 onBeforeUnmount(closeAtlasPreview);
@@ -301,6 +373,10 @@ const spritePlan = computed(() => {
               <dt>相对取景</dt>
               <dd class="mono accent">{{ atlasSummary }}</dd>
             </div>
+            <div v-if="trimAtlas.outSize" class="kv-row">
+              <dt>统一输出</dt>
+              <dd class="mono">{{ trimAtlas.outSize.width }} × {{ trimAtlas.outSize.height }}</dd>
+            </div>
           </dl>
         </template>
         <p v-else class="muted empty">还没有勾选可裁剪的素材（勾选 {{ checkedItems.length }} 张）。</p>
@@ -435,8 +511,9 @@ const spritePlan = computed(() => {
           <div>
             <h2>图集透明裁剪预览</h2>
             <p class="atlas-sub">
-              {{ atlasPreview.count }} 张共用同一取景框 · 已生成 {{ atlasPreviewRows.length }} / {{ atlasPreview.total }} 张 ·
-              以下都是裁切后的实际效果（PNG，保留透明通道）
+              {{ atlasPreview.count }} 张共用同一取景框
+              <template v-if="atlasOutputSize">· 统一输出 {{ atlasOutputSize.width }}×{{ atlasOutputSize.height }}</template>
+              · 已生成 {{ atlasPreviewRows.length }} / {{ atlasPreview.total }} 张
             </p>
           </div>
           <button class="atlas-close" type="button" title="关闭 (Esc)" @click="closeAtlasPreview">×</button>
@@ -449,16 +526,52 @@ const spritePlan = computed(() => {
           <span class="mono">正在裁切 {{ atlasPreview.done }} / {{ atlasPreview.total }}</span>
         </div>
 
-        <div v-if="atlasPreviewRows.length" class="atlas-grid">
-          <figure v-for="row in atlasPreviewRows" :key="row.id" class="atlas-item">
-            <div class="atlas-thumb">
-              <img :src="row.url" :alt="row.name" loading="lazy" />
-            </div>
-            <figcaption>
-              <span class="atlas-name" :title="row.name">{{ row.name }}</span>
-              <span class="atlas-size mono">{{ row.sourceWidth }}×{{ row.sourceHeight }} → {{ row.width }}×{{ row.height }}</span>
-            </figcaption>
-          </figure>
+        <div class="atlas-player">
+          <img v-if="currentAtlasFrame" :src="currentAtlasFrame.url" :alt="currentAtlasFrame.name" />
+          <span v-else class="atlas-player-hint muted">正在裁切第一帧…</span>
+          <span v-if="currentAtlasFrame" class="atlas-player-badge mono">
+            第 {{ atlasFrameIndex + 1 }} / {{ atlasPreviewRows.length }} 帧
+            <template v-if="atlasOutputSize"> · {{ atlasOutputSize.width }}×{{ atlasOutputSize.height }}</template>
+          </span>
+        </div>
+
+        <div class="atlas-playbar">
+          <button
+            class="btn is-mini is-primary"
+            type="button"
+            :disabled="atlasPreviewRows.length < 2"
+            :title="atlasPreviewRows.length < 2 ? '至少需要两帧才能播放' : '空格也可以播放/暂停'"
+            @click="toggleAtlasPlay"
+          >
+            {{ atlasPlayback.playing ? '⏸ 暂停' : '▶ 播放' }}
+          </button>
+          <button class="btn is-mini" type="button" :disabled="!atlasPreviewRows.length" @click="stepAtlasFrame(-1)">◀ 帧</button>
+          <button class="btn is-mini" type="button" :disabled="!atlasPreviewRows.length" @click="stepAtlasFrame(1)">帧 ▶</button>
+          <label class="atlas-fps">
+            <span class="muted">帧率</span>
+            <select v-model.number="atlasPlayback.fps" @change="restartAtlasTimerIfPlaying">
+              <option v-for="fps in ATLAS_FPS_OPTIONS" :key="fps" :value="fps">{{ fps }} fps</option>
+            </select>
+          </label>
+          <span class="atlas-playbar-info muted mono">
+            {{ atlasPreviewRows.length }} / {{ atlasPreview.total }} 帧<template v-if="atlasOutputSize"> · 统一 {{ atlasOutputSize.width }}×{{ atlasOutputSize.height }}</template>
+          </span>
+          <span class="atlas-playbar-hint muted">空格播放/暂停 · ←/→ 逐帧</span>
+        </div>
+
+        <div v-if="atlasPreviewRows.length" class="atlas-strip">
+          <button
+            v-for="(row, index) in atlasPreviewRows"
+            :key="row.id"
+            class="atlas-strip-item"
+            :class="{ 'is-active': index === atlasFrameIndex }"
+            type="button"
+            :title="`${row.name} · 源 ${row.sourceWidth}×${row.sourceHeight} → 统一 ${row.width}×${row.height}`"
+            @click="selectAtlasFrame(index)"
+          >
+            <img :src="row.url" :alt="row.name" loading="lazy" />
+            <span class="atlas-strip-index mono">{{ index + 1 }}</span>
+          </button>
         </div>
         <p v-else-if="atlasPreview.done >= atlasPreview.total" class="atlas-empty">预览生成失败，请重新勾选素材后重试。</p>
 
@@ -715,62 +828,126 @@ const spritePlan = computed(() => {
   transition: width 0.15s linear;
 }
 
-.atlas-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 12px;
-  padding: 14px 16px;
-  overflow: auto;
-}
-
-.atlas-item {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0;
-  min-width: 0;
-}
-
-.atlas-thumb {
+.atlas-player {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 120px;
-  padding: 4px;
+  flex: 1;
+  min-height: 180px;
+  margin: 12px 16px 0;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  /* 棋盘格底：便于确认透明区域是否保留 */
+  border-radius: var(--radius);
+  /* 棋盘格底：透明区域直接能看出来 */
   background-color: var(--panel-2);
   background-image: repeating-conic-gradient(rgba(255, 255, 255, 0.08) 0% 25%, transparent 0% 50%);
   background-size: 12px 12px;
   overflow: hidden;
 }
 
-.atlas-thumb img {
+.atlas-player img {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
   display: block;
 }
 
-.atlas-item figcaption {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.atlas-name {
+.atlas-player-hint {
   font-size: 11px;
-  color: var(--text);
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
 }
 
-.atlas-size {
+.atlas-player-badge {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
   font-size: 10px;
-  color: var(--text-muted);
+}
+
+.atlas-playbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 16px 0;
+}
+
+.atlas-fps {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+}
+
+.atlas-fps select {
+  height: 22px;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 10px;
+}
+
+.atlas-playbar-info {
+  font-size: 10px;
+}
+
+.atlas-playbar-hint {
+  margin-left: auto;
+  font-size: 10px;
+}
+
+.atlas-strip {
+  display: flex;
+  gap: 6px;
+  padding: 10px 16px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.atlas-strip-item {
+  position: relative;
+  flex: none;
+  width: 84px;
+  height: 64px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  opacity: 0.7;
+  transition: opacity 0.12s ease, border-color 0.12s ease;
+}
+
+.atlas-strip-item:hover {
+  opacity: 1;
+}
+
+.atlas-strip-item.is-active {
+  opacity: 1;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.atlas-strip-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.atlas-strip-index {
+  position: absolute;
+  right: 3px;
+  bottom: 2px;
+  padding: 0 3px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 9px;
 }
 
 .atlas-empty {

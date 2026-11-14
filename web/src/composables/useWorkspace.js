@@ -21,6 +21,7 @@ import { blobToBytes, createZip } from '../lib/zip.js';
 import { onLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
 import { canvasToBlob, createCanvas, cropToBlob, stripExtension } from '../lib/imageops.js';
 import { mapLimit } from '../lib/async.js';
+import { computeAtlasOutputSize, fitInto } from '../lib/atlas.js';
 
 let uid = 0;
 
@@ -116,7 +117,11 @@ const trimAtlas = computed(() => {
     width: Math.min(1, right) - Math.max(0, left),
     height: Math.min(1, bottom) - Math.max(0, top),
   };
-  return { count: list.length, skipped: usable.length - list.length, items: list.map((row) => row.item), norm };
+  const items = list.map((row) => row.item);
+  // 各帧按同一个相对框裁出来以后，像素尺寸可能不同（源图尺寸不一致时）。
+  // 统一尺寸取「最大裁剪宽高」，预览与批量裁剪都输出这个尺寸，帧与帧才能对齐播放/拼图。
+  const outSize = computeAtlasOutputSize(items.map((item) => normRect(item, norm)));
+  return { count: list.length, skipped: usable.length - list.length, items, norm, outSize };
 });
 /**
  * 精灵图导出的帧组：勾选素材中尺寸完全一致、数量最多的那一组。
@@ -747,6 +752,23 @@ async function cropByNorm(item, norm) {
 }
 
 /**
+ * 图集统一尺寸裁帧：按并集取景框裁出这一帧，再按比例居中放进统一尺寸。
+ *
+ * 比例一致时正好铺满（等比缩放）；源图比例不同时留透明边，不做拉伸。
+ * 预览与真正的「图集透明裁剪」都走这里，保证看到的尺寸就是最终输出尺寸。
+ */
+async function cropAtlasFrame(item, norm, outSize) {
+  const rect = normRect(item, norm);
+  const canvas = createCanvas(outSize.width, outSize.height);
+  const ctx = canvas.getContext('2d');
+  const fit = fitInto(rect, outSize);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(item.bitmap, rect.x, rect.y, rect.width, rect.height, fit.dx, fit.dy, fit.dw, fit.dh);
+  return canvasToBlob(canvas, 'image/png');
+}
+
+/**
  * 图集透明裁剪预览：按当前并集取景框把**全部**勾选素材裁出来。
  *
  * 和真正的「图集透明裁剪」走同一个 cropByNorm，所以预览看到的就是裁切后的效果
@@ -763,12 +785,13 @@ export async function previewAtlasCrop({ onResult, onProgress } = {}) {
     return null;
   }
   const items = atlas.items;
+  const outSize = atlas.outSize;
   const rows = new Array(items.length);
   let done = 0;
   await mapLimit(items, 3, async (item, index) => {
     try {
       const rect = normRect(item, atlas.norm);
-      const blob = await cropByNorm(item, atlas.norm);
+      const blob = await cropAtlasFrame(item, atlas.norm, outSize);
       const row = {
         id: item.id,
         index,
@@ -776,8 +799,10 @@ export async function previewAtlasCrop({ onResult, onProgress } = {}) {
         url: URL.createObjectURL(blob),
         sourceWidth: item.width,
         sourceHeight: item.height,
-        width: rect.width,
-        height: rect.height,
+        width: outSize.width,
+        height: outSize.height,
+        cropWidth: rect.width,
+        cropHeight: rect.height,
       };
       rows[index] = row;
       onResult?.(row);
@@ -787,7 +812,13 @@ export async function previewAtlasCrop({ onResult, onProgress } = {}) {
     done += 1;
     onProgress?.({ done, total: items.length });
   });
-  return { count: atlas.count, total: items.length, norm: { ...atlas.norm }, results: rows.filter(Boolean) };
+  return {
+    count: atlas.count,
+    total: items.length,
+    norm: { ...atlas.norm },
+    outSize: { ...outSize },
+    results: rows.filter(Boolean),
+  };
 }
 
 /** 图集透明裁剪：所有勾选素材共用最大 AABB，结果写回素材列表，可选存入资源库。 */
@@ -802,9 +833,10 @@ export async function trimAtlasBatch({ saveToLibrary = true } = {}) {
   let failed = 0;
   try {
     const { saveBlobToLibrary } = await import('./useLibrary.js');
+    const outSize = atlas.outSize;
     for (const item of atlas.items) {
       try {
-        const blob = await cropByNorm(item, atlas.norm);
+        const blob = await cropAtlasFrame(item, atlas.norm, outSize);
         const filename = `${stripExtension(item.name)}-透明裁剪.png`;
         await addImageBlob(blob, filename);
         if (saveToLibrary) await saveBlobToLibrary(blob, filename, '裁剪结果');
@@ -816,9 +848,9 @@ export async function trimAtlasBatch({ saveToLibrary = true } = {}) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     setStatus(
-      `图集透明裁剪完成：${done}/${atlas.count} 张${saveToLibrary ? '，已存入资源库/裁剪结果' : ''}${
-        failed ? `，失败 ${failed} 张` : ''
-      }`,
+      `图集透明裁剪完成：${done}/${atlas.count} 张 · 统一 ${outSize.width}×${outSize.height}${
+        saveToLibrary ? '，已存入资源库/裁剪结果' : ''
+      }${failed ? `，失败 ${failed} 张` : ''}`,
     );
   } finally {
     state.busy = false;
