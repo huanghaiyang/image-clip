@@ -747,34 +747,47 @@ async function cropByNorm(item, norm) {
 }
 
 /**
- * 图集透明裁剪预览：按当前并集取景框裁出前 limit 张，返回可直接展示的 object URL。
- * 只读操作，不写入素材列表 / 资源库；调用方负责 revokeObjectURL 释放。
+ * 图集透明裁剪预览：按当前并集取景框把**全部**勾选素材裁出来。
+ *
+ * 和真正的「图集透明裁剪」走同一个 cropByNorm，所以预览看到的就是裁切后的效果
+ * （不是原图 + 取景框）。张数可能很多，所以：
+ *  - 并发 3 张边裁边回调（onResult / onProgress），面板可以渐进显示；
+ *  - 只读，不写入素材列表 / 资源库；调用方负责 revokeObjectURL 释放。
+ *
+ * @param {{onResult?:(row:object)=>void, onProgress?:(info:{done:number,total:number})=>void}} [options]
  */
-export async function previewAtlasCrop({ limit = 12 } = {}) {
+export async function previewAtlasCrop({ onResult, onProgress } = {}) {
   const atlas = trimAtlas.value;
   if (!atlas) {
     setError('请先在左侧「当前素材」勾选要图集透明裁剪的图片');
     return null;
   }
-  const results = [];
-  for (const item of atlas.items.slice(0, limit)) {
+  const items = atlas.items;
+  const rows = new Array(items.length);
+  let done = 0;
+  await mapLimit(items, 3, async (item, index) => {
     try {
       const rect = normRect(item, atlas.norm);
       const blob = await cropByNorm(item, atlas.norm);
-      results.push({
+      const row = {
         id: item.id,
+        index,
         name: item.name,
         url: URL.createObjectURL(blob),
         sourceWidth: item.width,
         sourceHeight: item.height,
         width: rect.width,
         height: rect.height,
-      });
+      };
+      rows[index] = row;
+      onResult?.(row);
     } catch (err) {
       console.warn('[workspace] 图集裁剪预览失败:', item.name, err.message);
     }
-  }
-  return { count: atlas.count, norm: { ...atlas.norm }, results };
+    done += 1;
+    onProgress?.({ done, total: items.length });
+  });
+  return { count: atlas.count, total: items.length, norm: { ...atlas.norm }, results: rows.filter(Boolean) };
 }
 
 /** 图集透明裁剪：所有勾选素材共用最大 AABB，结果写回素材列表，可选存入资源库。 */

@@ -16,6 +16,7 @@ import { useAudio } from '../composables/useAudio.js';
 import { setMode } from '../composables/useAppMode.js';
 import { formatDuration, formatSize, fetchLibraryVersions } from '../lib/library.js';
 import VersionCompareDialog from './VersionCompareDialog.vue';
+import VersionPreviewDialog from './VersionPreviewDialog.vue';
 
 const { state, folders, selectedEntries, selectedFolders, selectedSummary, actions } = useLibrary();
 const { confirm } = useConfirm();
@@ -48,6 +49,10 @@ const versionInput = ref(null);
 const compareOpen = ref(false);
 const compareEntry = ref(null);
 const compareVersionId = ref('');
+/** 版本预览面板：在应用内看这一版（棋盘背景 / 透明通道 / 软边高亮 / 缩放），不再开新标签页。 */
+const previewOpen = ref(false);
+const previewEntry = ref(null);
+const previewVersion = ref(null);
 
 const config = ref({
   mode: 'sequence',
@@ -191,8 +196,35 @@ function versionTime(value) {
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
 }
 
+/**
+ * 「预览」历史版本：图片在应用内的预览面板里看（支持透明度检查）；
+ * 视频 / 音频用对比面板更合适（逐帧 / 波形），直接打开对比。
+ */
 function openVersion(version) {
-  window.open(version.url, '_blank', 'noopener');
+  if (!single.value || !version) return;
+  if (single.value.kind === 'image') {
+    previewEntry.value = single.value;
+    previewVersion.value = version;
+    previewOpen.value = true;
+    return;
+  }
+  openCompare(version);
+}
+
+function closePreview() {
+  previewOpen.value = false;
+}
+
+/** 预览面板里点「恢复这一版」：关面板，走现有的恢复确认流程。 */
+function restoreFromPreview(version) {
+  previewOpen.value = false;
+  void restoreVersion(version);
+}
+
+/** 预览面板里点「与当前对比」：切到对比对话框。 */
+function compareFromPreview(version) {
+  previewOpen.value = false;
+  openCompare(version);
 }
 
 /** 打开对比：图片走滑块/差异图，视频逐帧，音频波形。 */
@@ -382,7 +414,7 @@ function fileInfo(entry) {
             <span class="version-time mono" :title="versionTime(version.at)">{{ versionTime(version.at) }}</span>
             <span class="version-size mono">{{ formatSize(version.bytes) }}</span>
             <button class="link-action is-compare" type="button" title="与当前文件对比" @click="openCompare(version)">对比</button>
-            <button class="link-action" type="button" title="在新标签页预览这一版" @click="openVersion(version)">预览</button>
+            <button class="link-action" type="button" title="在本应用中预览这一版（含透明通道检查）" @click="openVersion(version)">预览</button>
             <button class="link-action" type="button" :disabled="state.busy" @click="restoreVersion(version)">恢复</button>
           </div>
         </div>
@@ -604,6 +636,15 @@ function fileInfo(entry) {
     :versions="versions"
     :initial-version-id="compareVersionId"
     @close="closeCompare"
+  />
+
+  <VersionPreviewDialog
+    :open="previewOpen"
+    :entry="previewEntry"
+    :version="previewVersion"
+    @close="closePreview"
+    @restore="restoreFromPreview"
+    @compare="compareFromPreview"
   />
 </template>
 

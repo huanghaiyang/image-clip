@@ -1,6 +1,6 @@
 <script setup>
 /** 右侧检查器：检测参数 / 当前结果 / 导出（对应 Figma 的右侧属性面板）。 */
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import RangeField from './ui/RangeField.vue';
 import SwitchField from './ui/SwitchField.vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
@@ -46,18 +46,44 @@ const atlasSummary = computed(() => {
   ).toFixed(1)}%`;
 });
 
-// 图集透明裁剪预览：按当前并集取景框裁出前 12 张，只读展示
-const ATLAS_PREVIEW_LIMIT = 12;
+// 图集透明裁剪预览：全部勾选素材，按当前并集取景框**裁切后**的结果渐进展示
 const atlasPreview = ref(null);
 const atlasPreviewBusy = ref(false);
+const atlasPreviewRows = computed(() =>
+  [...(atlasPreview.value?.results ?? [])].sort((a, b) => a.index - b.index),
+);
 
 async function openAtlasPreview() {
   if (atlasPreviewBusy.value || !trimAtlas.value) return;
+  closeAtlasPreview();
   atlasPreviewBusy.value = true;
+  const session = reactive({
+    count: trimAtlas.value.count,
+    total: trimAtlas.value.items.length,
+    done: 0,
+    results: [],
+    cancelled: false,
+  });
+  atlasPreview.value = session;
+  window.addEventListener('keydown', onAtlasPreviewKey);
   try {
-    closeAtlasPreview();
-    atlasPreview.value = await actions.previewAtlasCrop({ limit: ATLAS_PREVIEW_LIMIT });
-    if (atlasPreview.value) window.addEventListener('keydown', onAtlasPreviewKey);
+    await actions.previewAtlasCrop({
+      onResult: (row) => {
+        // 生成过程中用户可能已经关掉面板：把已经建好的 object URL 立刻回收
+        if (session.cancelled) {
+          URL.revokeObjectURL(row.url);
+          return;
+        }
+        session.results.push(row);
+      },
+      onProgress: ({ done, total }) => {
+        if (session.cancelled) return;
+        session.done = done;
+        session.total = total;
+      },
+    });
+  } catch (err) {
+    console.warn('[atlas] 预览生成失败:', err.message);
   } finally {
     atlasPreviewBusy.value = false;
   }
@@ -65,7 +91,11 @@ async function openAtlasPreview() {
 
 function closeAtlasPreview() {
   window.removeEventListener('keydown', onAtlasPreviewKey);
-  for (const row of atlasPreview.value?.results ?? []) URL.revokeObjectURL(row.url);
+  const session = atlasPreview.value;
+  if (session) {
+    session.cancelled = true;
+    for (const row of session.results ?? []) URL.revokeObjectURL(row.url);
+  }
   atlasPreview.value = null;
 }
 
@@ -405,16 +435,24 @@ const spritePlan = computed(() => {
           <div>
             <h2>图集透明裁剪预览</h2>
             <p class="atlas-sub">
-              {{ atlasPreview.count }} 张共用同一取景框 · 预览前 {{ atlasPreview.results.length }} 张 · 实际裁切尺寸与预览一致
+              {{ atlasPreview.count }} 张共用同一取景框 · 已生成 {{ atlasPreviewRows.length }} / {{ atlasPreview.total }} 张 ·
+              以下都是裁切后的实际效果（PNG，保留透明通道）
             </p>
           </div>
           <button class="atlas-close" type="button" title="关闭 (Esc)" @click="closeAtlasPreview">×</button>
         </header>
 
-        <div v-if="atlasPreview.results.length" class="atlas-grid">
-          <figure v-for="row in atlasPreview.results" :key="row.id" class="atlas-item">
+        <div v-if="atlasPreview.done < atlasPreview.total" class="atlas-progress">
+          <span class="atlas-progress-bar">
+            <span class="atlas-progress-fill" :style="{ width: `${(atlasPreview.done / Math.max(1, atlasPreview.total)) * 100}%` }"></span>
+          </span>
+          <span class="mono">正在裁切 {{ atlasPreview.done }} / {{ atlasPreview.total }}</span>
+        </div>
+
+        <div v-if="atlasPreviewRows.length" class="atlas-grid">
+          <figure v-for="row in atlasPreviewRows" :key="row.id" class="atlas-item">
             <div class="atlas-thumb">
-              <img :src="row.url" :alt="row.name" />
+              <img :src="row.url" :alt="row.name" loading="lazy" />
             </div>
             <figcaption>
               <span class="atlas-name" :title="row.name">{{ row.name }}</span>
@@ -422,10 +460,10 @@ const spritePlan = computed(() => {
             </figcaption>
           </figure>
         </div>
-        <p v-else class="atlas-empty">预览生成失败，请重新勾选素材后重试。</p>
+        <p v-else-if="atlasPreview.done >= atlasPreview.total" class="atlas-empty">预览生成失败，请重新勾选素材后重试。</p>
 
         <footer class="atlas-foot">
-          <span class="muted">预览不会改动素材，也不会写入资源库。</span>
+          <span class="muted">预览按当前并集取景框实际裁切，不会改动素材，也不会写入资源库。</span>
           <button class="btn is-mini" type="button" @click="closeAtlasPreview">关闭</button>
         </footer>
       </div>
@@ -651,6 +689,30 @@ const spritePlan = computed(() => {
 .atlas-close:hover {
   background: var(--panel-2);
   color: var(--text);
+}
+
+.atlas-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px 0;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.atlas-progress-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.atlas-progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s linear;
 }
 
 .atlas-grid {

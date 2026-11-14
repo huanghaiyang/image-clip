@@ -584,7 +584,13 @@ onBeforeUnmount(() => {
           @click="select($event, entry)"
           @dblclick="openEntry(entry)"
         >
-          <span class="thumb">
+          <span class="thumb" :class="{ 'is-video': entry.kind === 'video' }">
+            <!-- 视频封面按原比例完整显示；空隙用同一张封面的模糊铺底填满，避免“黑条”或裁切 -->
+            <span
+              v-if="entry.kind === 'video' && thumbOf(entry, 160)"
+              class="thumb-backdrop"
+              :style="{ backgroundImage: `url(${thumbOf(entry, 160)})` }"
+            ></span>
             <img
               v-if="thumbOf(entry, 320)"
               :src="thumbOf(entry, 320)"
@@ -1112,9 +1118,10 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   min-height: 0;
-  object-fit: cover;
+  /* 完整显示（视频封面尤其明显）：小图里也不裁掉画面 */
+  object-fit: contain;
   border-radius: 2px;
-  background: var(--panel);
+  background: #0b0b0d;
 }
 
 /* 平铺视图下文件夹名称完整显示：允许换行，不再省略 */
@@ -1138,10 +1145,27 @@ onBeforeUnmount(() => {
 }
 
 .thumb img {
+  position: relative;
+  z-index: 1;
   width: 100%;
   height: 100%;
-  /* 完整显示缩略图，不裁切上下/左右 */
+  /* 完整显示缩略图，不裁切上下/左右，也不拉伸 */
   object-fit: contain;
+}
+
+/* 视频：封面保持 16:9 完整可见，余下空间用模糊封面铺底 */
+.thumb.is-video {
+  background: #0b0b0d;
+}
+
+.thumb-backdrop {
+  position: absolute;
+  inset: -12%;
+  background-position: center;
+  background-size: cover;
+  filter: blur(14px) brightness(0.42) saturate(0.9);
+  opacity: 0.85;
+  pointer-events: none;
 }
 
 .thumb-icon {

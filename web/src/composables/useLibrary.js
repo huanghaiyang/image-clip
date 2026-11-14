@@ -35,13 +35,27 @@ import { mapLimit } from '../lib/async.js';
 const EMPTY_STATS = { files: 0, folders: 0, images: 0, videos: 0, audios: 0, bytes: 0, truncated: false };
 
 const BROWSE_MODE_KEY = 'image-clip:library-browse-mode';
+const BROWSE_MODE_MIGRATED_KEY = 'image-clip:library-browse-mode-migrated';
 
-/** 资源库主列表的展示方式；刷新后保留用户上次的选择。 */
+/**
+ * 资源库主列表的展示方式。
+ *
+ * 默认树形（目录层级一眼看清，大图库更像资源管理器）；用户手动切成平铺后记住选择。
+ * 旧版本的默认值是平铺，而且会话恢复会把当时的 'flat' 写进 localStorage，所以做一次
+ * 一次性迁移：没有迁移标记时清掉遗留的 'flat'，直接落到新的默认树形。之后用户再手动
+ * 切成平铺就会被正常记住。
+ */
 function initialBrowseMode() {
   try {
-    return localStorage.getItem(BROWSE_MODE_KEY) === 'tree' ? 'tree' : 'flat';
+    const stored = localStorage.getItem(BROWSE_MODE_KEY);
+    if (!localStorage.getItem(BROWSE_MODE_MIGRATED_KEY)) {
+      localStorage.setItem(BROWSE_MODE_MIGRATED_KEY, '1');
+      if (stored === 'flat') localStorage.removeItem(BROWSE_MODE_KEY);
+      return 'tree';
+    }
+    return stored === 'flat' ? 'flat' : 'tree';
   } catch {
-    return 'flat';
+    return 'tree';
   }
 }
 

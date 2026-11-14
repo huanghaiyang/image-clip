@@ -24,7 +24,8 @@ const HISTORY_LIMIT = 20;
 
 const DEFAULT_BRUSH = {
   size: 48, // 直径（原图像素）
-  hardness: 65, // 0=全羽化 100=硬边
+  // 默认硬边：擦除边缘干净利落，需要柔和过渡时再手动降低硬度
+  hardness: 100, // 0=全羽化 100=硬边
   opacity: 100, // 单次笔刷强度（%）
   mode: 'erase', // erase | restore
   showOriginal: false, // 按住对比：显示原图而不是编辑结果
@@ -161,7 +162,16 @@ function stampFor(entry) {
 }
 
 function fillRadial(ctx, x, y, radius, alpha) {
-  const inner = radius * (Math.max(0, Math.min(100, state.brush.hardness)) / 100);
+  const hardness = Math.max(0, Math.min(100, state.brush.hardness));
+  // 100% 硬度时不要走渐变：同心渐变在 inner==radius 时会退化成羽化，边缘反而糊
+  if (hardness >= 99) {
+    ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+  const inner = radius * (hardness / 100);
   const gradient = ctx.createRadialGradient(x, y, inner, x, y, radius);
   gradient.addColorStop(0, `rgba(0,0,0,${alpha})`);
   gradient.addColorStop(1, 'rgba(0,0,0,0)');
@@ -445,7 +455,11 @@ export async function exportSession() {
 export async function importSession(doc, blobs = {}) {
   for (const id of Object.keys(entries)) delete entries[id];
   if (!doc || typeof doc !== 'object') return;
-  Object.assign(state.brush, DEFAULT_BRUSH, doc.brush ?? {});
+  const savedBrush = { ...(doc.brush ?? {}) };
+  // 旧版默认硬度是 65（擦除边缘偏糊），新版默认 100（硬边、干净）。
+  // 老会话里存着 65 的话在这里迁到新默认，否则更新后看到的还是“糊边”。
+  if (Number(savedBrush.hardness) === 65) savedBrush.hardness = DEFAULT_BRUSH.hardness;
+  Object.assign(state.brush, DEFAULT_BRUSH, savedBrush);
 
   for (const [id, meta] of Object.entries(doc.items ?? {})) {
     const item = workspace.state.items.find((entry) => entry.id === id);

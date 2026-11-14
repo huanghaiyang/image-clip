@@ -673,7 +673,9 @@ onBeforeUnmount(() => {
 .file-thumb img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  /* 完整显示上传预览，不裁切 */
+  object-fit: contain;
+  background: #0b0b0d;
 }
 
 .file-thumb.is-audio {

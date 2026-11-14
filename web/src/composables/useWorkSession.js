@@ -345,7 +345,9 @@ function restoreLibrary(doc) {
   library.actions.setSort(doc.sort ?? 'name');
   library.actions.setKindFilter(doc.kindFilter ?? 'all');
   library.actions.setSearch(doc.search ?? '');
-  library.actions.setBrowseMode(doc.browseMode ?? library.state.browseMode);
+  // 展示方式（平铺 / 树形）不再从会话恢复：
+  // 它由 localStorage 里的「用户显式选择」决定，默认树形。
+  // 旧会话里可能存着默认值 'flat'，恢复回来会把新的默认值改掉。
 
   const dir = doc.currentDir ?? '';
   const dirExists = dir && library.folders.value.some((folder) => folder.path === dir);

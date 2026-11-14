@@ -13,6 +13,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect
 import { useWorkspace } from '../composables/useWorkspace.js';
 import { useEraser } from '../composables/useEraser.js';
 import { useStageViewport } from '../composables/useStageViewport.js';
+import { lastPointerPosition } from '../lib/pointerTracker.js';
 
 const { selected } = useWorkspace();
 const { state, activeEntry, actions } = useEraser();
@@ -47,6 +48,9 @@ let overlayFrame = 0;
 let painting = false;
 /** 光标位置（覆盖层容器坐标），null 表示移出画面。 */
 const cursor = ref(null);
+/** 是否正按着左键涂擦：按下时圆圈高亮，反馈“正在生效”。 */
+const pressing = ref(false);
+
 
 function pointFromEvent(event) {
   const point = toImage(event);
@@ -64,6 +68,7 @@ function onPointerDown(event) {
   if (!point) return;
   event.currentTarget.setPointerCapture?.(event.pointerId);
   painting = actions.beginStroke(point);
+  pressing.value = painting;
   updateCursor(event);
 }
 
@@ -83,6 +88,8 @@ function onPointerUp(event) {
   event.currentTarget.releasePointerCapture?.(event.pointerId);
   actions.endStroke();
   painting = false;
+  pressing.value = false;
+  scheduleOverlay();
 }
 
 // --------------------------------------------------------------- 画布平移
@@ -116,6 +123,8 @@ function onPointerLeave() {
     actions.endStroke();
     painting = false;
   }
+  pressing.value = false;
+  // 只在指针真的离开“图片区域”时隐藏；离开舞台容器（进入面板）也在这里收尾
   cursor.value = null;
   scheduleOverlay();
 }
@@ -128,6 +137,26 @@ function updateCursor(event) {
   }
   const host = container.value.getBoundingClientRect();
   cursor.value = { x: event.clientX - host.left, y: event.clientY - host.top };
+  // 关键：悬停也要重绘覆盖层，否则圆圈会等到“按下产生笔迹”时才第一次出现
+  scheduleOverlay();
+}
+
+/** 用最近一次指针位置刷新圆圈（进场 / 切换素材后调用）。 */
+function syncCursorToPointer() {
+  const pointer = lastPointerPosition();
+  if (panning.value || !pointer) return;
+  const host = container.value?.getBoundingClientRect();
+  const base = baseEl.value?.getBoundingClientRect();
+  if (!host || !base) return;
+  const x = pointer.x - host.left;
+  const y = pointer.y - host.top;
+  if (x < base.left - host.left || x > base.right - host.left || y < base.top - host.top || y > base.bottom - host.top) {
+    cursor.value = null;
+    scheduleOverlay();
+    return;
+  }
+  cursor.value = { x, y };
+  scheduleOverlay();
 }
 
 // --------------------------------------------------------------- 绘制
@@ -174,28 +203,43 @@ function drawOverlay() {
 
   if (!cursor.value) return;
   const radius = Math.max(1.5, (state.brush.size / 2) * (displayWidth.value / Math.max(1, item.value?.width ?? 1)));
+  const accent = state.brush.mode === 'restore' ? '#14ae5c' : '#0d99ff';
+  const { x, y } = cursor.value;
 
-  // 黑白双圈：无论背景明暗都能看清笔刷范围
+  // 按下时先铺一层淡淡的高亮：明确告诉用户“这一下会擦掉这个范围”
+  if (pressing.value) {
+    ctx.fillStyle = state.brush.mode === 'restore' ? 'rgba(20,174,92,0.18)' : 'rgba(13,153,255,0.18)';
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // 黑白双圈：无论背景明暗都能看清笔刷范围；按下时外圈加粗+描边色强调
   ctx.strokeStyle = 'rgba(0,0,0,0.75)';
-  ctx.lineWidth = 2.5;
+  ctx.lineWidth = pressing.value ? 3 : 2.5;
   ctx.beginPath();
-  ctx.arc(cursor.value.x, cursor.value.y, radius, 0, Math.PI * 2);
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
   ctx.stroke();
 
-  ctx.strokeStyle = state.brush.mode === 'restore' ? 'rgba(20,174,92,0.95)' : 'rgba(255,255,255,0.95)';
-  ctx.lineWidth = 1.2;
+  if (pressing.value) {
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2.4;
+  } else {
+    ctx.strokeStyle = state.brush.mode === 'restore' ? 'rgba(20,174,92,0.95)' : 'rgba(255,255,255,0.95)';
+    ctx.lineWidth = 1.2;
+  }
   ctx.beginPath();
-  ctx.arc(cursor.value.x, cursor.value.y, radius, 0, Math.PI * 2);
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
   ctx.stroke();
 
   // 十字中心点，方便精修细节
-  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.strokeStyle = pressing.value ? accent : 'rgba(255,255,255,0.85)';
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(cursor.value.x - 4, cursor.value.y);
-  ctx.lineTo(cursor.value.x + 4, cursor.value.y);
-  ctx.moveTo(cursor.value.x, cursor.value.y - 4);
-  ctx.lineTo(cursor.value.x, cursor.value.y + 4);
+  ctx.moveTo(x - 4, y);
+  ctx.lineTo(x + 4, y);
+  ctx.moveTo(x, y - 4);
+  ctx.lineTo(x, y + 4);
   ctx.stroke();
 }
 
@@ -213,6 +257,7 @@ watch(
     setImage(current.width, current.height);
     await nextTick();
     drawBase();
+    syncCursorToPointer();
     scheduleOverlay();
   },
   { immediate: true },
@@ -246,6 +291,8 @@ watchEffect(() => {
 
 onMounted(() => {
   window.addEventListener('resize', scheduleOverlay);
+  // 很多情况下切进橡皮擦时鼠标已经停在画面上了：这时不该等用户再动一下才看到圆圈
+  requestAnimationFrame(() => syncCursorToPointer());
 });
 
 onBeforeUnmount(() => {
@@ -286,7 +333,7 @@ function onWheel(event) {
         @pointercancel="onPointerUp"
         @pointerleave="onPointerLeave"
       >
-        <canvas ref="baseEl" class="base" :width="item.width" :height="item.height" />
+        <canvas ref="baseEl" class="base" :class="{ 'is-pixelated': zoomPercent >= 200 }" :width="item.width" :height="item.height" />
       </div>
 
       <canvas ref="overlayEl" class="overlay" />
@@ -301,7 +348,9 @@ function onWheel(event) {
       <div class="stage-hint muted">
         <template v-if="state.brush.showOriginal">正在对比原图（关闭开关后继续编辑）</template>
         <template v-else-if="state.brush.mode === 'restore'">还原笔刷：把原图像素画回去 · 空格 / 中键拖动平移</template>
-        <template v-else>擦除笔刷：拖动擦成透明 · [ / ] 调整笔刷大小 · 空格 / 中键拖动平移</template>
+        <template v-else>
+          擦除笔刷：拖动擦成透明 · [ / ] 调整笔刷大小 · 空格 / 中键拖动平移 · 导出为原分辨率 PNG（无损）
+        </template>
         <template v-if="entry?.dirty"> · 有未导出的修改</template>
       </div>
     </template>
@@ -357,6 +406,11 @@ function onWheel(event) {
   display: block;
   width: 100%;
   height: 100%;
+}
+
+/* 放大到 200% 以上时按最近邻显示：看到的是真实像素，而不是插值后的模糊 */
+.base.is-pixelated {
+  image-rendering: pixelated;
 }
 
 .overlay {
