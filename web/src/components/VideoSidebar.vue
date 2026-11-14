@@ -190,8 +190,8 @@ onMounted(() => {
         >
           <span class="video-thumb">
             <img
-              v-if="libraryThumbUrl(entry) && !failedThumbs.includes(entry.path)"
-              :src="libraryThumbUrl(entry)"
+              v-if="libraryThumbUrl(entry, 160) && !failedThumbs.includes(entry.path)"
+              :src="libraryThumbUrl(entry, 160)"
               :alt="entry.name"
               loading="lazy"
               @error="onThumbError(entry.path)"
@@ -242,8 +242,8 @@ onMounted(() => {
           >
             <span class="video-thumb">
               <img
-                v-if="libraryThumbUrl(row.entry) && !failedThumbs.includes(row.path)"
-                :src="libraryThumbUrl(row.entry)"
+                v-if="libraryThumbUrl(row.entry, 160) && !failedThumbs.includes(row.path)"
+                :src="libraryThumbUrl(row.entry, 160)"
                 :alt="row.name"
                 loading="lazy"
                 @error="onThumbError(row.path)"

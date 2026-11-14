@@ -365,8 +365,10 @@ function restoreLibrary(doc) {
 async function restoreFromDoc(doc) {
   const blobs = await readSessionBlobs(doc.blobKeys ?? []);
 
-  // 资源库目录/选择依赖最新的磁盘列表，先刷新
-  await library.actions.refresh({ quiet: true });
+  // 资源库刷新（列目录 + 全库索引）与素材恢复互不依赖：
+  // 并行发起，别让网络/扫盘的等待挡住素材出现在列表里。
+  // 注意 restoreLibrary 依赖刷新结果，那里再 await。
+  const libraryRefresh = library.actions.refresh({ quiet: true }).catch(() => {});
 
   // 素材必须先恢复：所有工具 entries 都以素材 id 为键
   await workspace.actions.importSession(doc.workspace, blobs);
@@ -378,6 +380,7 @@ async function restoreFromDoc(doc) {
   restoreCrop(doc.crop);
   // 恢复写入的是“当前现场”，不该变成可撤销步骤
   crop.actions.resetCropHistory();
+  await libraryRefresh;
   restoreLibrary(doc.library);
 
   chat.actions.restoreSession(doc.chat);

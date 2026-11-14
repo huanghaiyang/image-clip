@@ -40,20 +40,31 @@ async function requestJson(url, options = {}) {
 /**
  * 资源库索引。light=true 时服务端只读目录/stat，不解析图片尺寸与视频时长，
  * 用于首屏统计与跨目录搜索；具体文件的元数据走 fetchLibraryEntryMeta 懒加载。
+ * force=true 带 refresh=1，跳过服务端的扫描短缓存（「刷新」按钮用）。
+ *
+ * 列表接口统一用 `no-cache`：浏览器存一份，但每次使用前用 ETag 重验证；
+ * 内容没变时服务端回 304（空 body），大图库反复刷新/切目录时不再重复传输整份索引。
  */
-export function fetchLibraryTree({ light = false } = {}) {
-  return requestJson(`/api/library/tree${light ? '?light=1' : ''}`, { cache: 'no-store' });
+export function fetchLibraryTree({ light = false, force = false } = {}) {
+  const params = new URLSearchParams();
+  if (light) params.set('light', '1');
+  if (force) params.set('refresh', '1');
+  const query = params.toString();
+  return requestJson(`/api/library/tree${query ? `?${query}` : ''}`, { cache: 'no-cache' });
 }
 
 /** 只列一个目录的直接子项（懒加载）。 */
-export function fetchLibraryDirectory(dir = '') {
-  const query = dir ? `?dir=${encodeURIComponent(dir)}` : '';
-  return requestJson(`/api/library/list${query}`, { cache: 'no-store' });
+export function fetchLibraryDirectory(dir = '', { force = false } = {}) {
+  const params = new URLSearchParams();
+  if (dir) params.set('dir', dir);
+  if (force) params.set('refresh', '1');
+  const query = params.toString();
+  return requestJson(`/api/library/list${query ? `?${query}` : ''}`, { cache: 'no-cache' });
 }
 
 /** 单个文件的尺寸 / 时长等元数据。 */
 export function fetchLibraryEntryMeta(path) {
-  return requestJson(`/api/library/meta?path=${encodeURIComponent(path)}`, { cache: 'no-store' });
+  return requestJson(`/api/library/meta?path=${encodeURIComponent(path)}`, { cache: 'no-cache' });
 }
 
 /** 在系统文件资源管理器中打开目录 / 定位并选中文件。 */
@@ -301,8 +312,23 @@ export function libraryFileUrl(entry) {
   return entry?.url ?? (entry?.path ? `/api/library/file?path=${encodeURIComponent(entry.path)}` : '');
 }
 
-export function libraryThumbUrl(entry) {
-  if (entry?.thumbUrl) return entry.thumbUrl;
+/**
+ * 缩略图 URL。
+ * @param {object} entry 资源库条目（服务端也会带 thumbUrl，但宽度固定）
+ * @param {number} [width] 期望宽度（64–480）。不传则用服务端默认（320）；
+ *   网格卡片用 320、树/文件夹小图用 160，避免为了 32px 的图标解码 480px 的图。
+ */
+export function libraryThumbUrl(entry, width) {
+  const w = Number(width);
+  const hasWidth = Number.isFinite(w) && w > 0;
+  if (entry?.path && hasWidth) {
+    return `/api/library/thumb?path=${encodeURIComponent(entry.path)}&v=${entry.mtime ?? 0}&w=${Math.round(w)}`;
+  }
+  if (entry?.thumbUrl) {
+    if (!hasWidth) return entry.thumbUrl;
+    // 回收站 / 历史版本的条目只有服务端拼好的 thumbUrl，直接补一个 w 参数
+    return `${entry.thumbUrl}${entry.thumbUrl.includes('?') ? '&' : '?'}w=${Math.round(w)}`;
+  }
   if (!entry?.path) return '';
   return `/api/library/thumb?path=${encodeURIComponent(entry.path)}&v=${entry.mtime ?? 0}`;
 }

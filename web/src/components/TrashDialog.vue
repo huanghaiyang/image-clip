@@ -16,6 +16,7 @@ import {
   fetchLibraryTrashContents,
   formatDuration,
   formatSize,
+  libraryThumbUrl,
   purgeLibraryTrash,
   restoreLibraryTrash,
 } from '../lib/library.js';
@@ -262,7 +263,7 @@ onBeforeUnmount(() => {
                 >
                   <button class="trash-card" type="button" :title="`预览 ${item.name}`" @click="previewId = item.id">
                     <span class="trash-thumb">
-                      <img v-if="item.thumbUrl" :src="item.thumbUrl" :alt="item.name" loading="lazy" draggable="false" />
+                      <img v-if="item.thumbUrl" :src="libraryThumbUrl(item, 160)" :alt="item.name" loading="lazy" draggable="false" />
                       <span v-else class="trash-thumb-label">{{ KIND_LABEL[item.kind] || '文件' }}</span>
                     </span>
                     <span class="trash-meta">

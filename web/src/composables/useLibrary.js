@@ -30,6 +30,7 @@ import {
 import { useWorkspace } from './useWorkspace.js';
 import { setMode } from './useAppMode.js';
 import { movesFromResults, notifyLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
+import { mapLimit } from '../lib/async.js';
 
 const EMPTY_STATS = { files: 0, folders: 0, images: 0, videos: 0, audios: 0, bytes: 0, truncated: false };
 
@@ -285,7 +286,7 @@ export async function loadDir(dir = '', { force = false } = {}) {
   if (!force && dirCache.value.has(key)) return dirCache.value.get(key);
   if (dirRequests.has(key)) return dirRequests.get(key);
   state.dirLoading = true;
-  const request = fetchLibraryDirectory(key)
+  const request = fetchLibraryDirectory(key, { force })
     .then((data) => {
       const next = new Map(dirCache.value);
       next.set(key, { folders: data.folders ?? [], entries: data.entries ?? [] });
@@ -310,7 +311,7 @@ export function loadLibraryIndex({ force = false } = {}) {
   if (!force && libraryIndex.value.ready) return Promise.resolve(libraryIndex.value);
   if (indexRequest) return indexRequest;
   state.indexLoading = true;
-  indexRequest = fetchLibraryTree({ light: true })
+  indexRequest = fetchLibraryTree({ light: true, force })
     .then((data) => {
       libraryIndex.value = {
         folders: data.folders ?? [],
@@ -970,13 +971,25 @@ export async function openInEditor(entryOrPath, options = {}) {
     const pending = images.filter(
       (entry) => !workspace.state.items.some((item) => item.libraryPath === entry.path),
     );
+    // 下载限并发 4：多选转入编辑时不必一张一张等
+    const fetched = await mapLimit(pending, 4, async (entry) => {
+      try {
+        const blob = await fetchLibraryBlob(entry);
+        return new File([blob], entry.name, { type: blob.type || 'image/png' });
+      } catch (err) {
+        console.warn('[library] 读取文件失败:', entry.path, err.message);
+        return null;
+      }
+    });
     const files = [];
-    for (const entry of pending) {
-      const blob = await fetchLibraryBlob(entry);
-      files.push(new File([blob], entry.name, { type: blob.type || 'image/png' }));
-    }
+    const paths = [];
+    fetched.forEach((file, index) => {
+      if (!file) return;
+      files.push(file);
+      paths.push(pending[index].path);
+    });
     if (files.length) {
-      await workspace.actions.addFiles(files, { libraryPaths: pending.map((entry) => entry.path) });
+      await workspace.actions.addFiles(files, { libraryPaths: paths });
     } else {
       const existing = workspace.state.items.find((item) => item.libraryPath === images[0].path);
       if (existing) workspace.actions.selectItem(existing.id);

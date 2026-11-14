@@ -633,6 +633,20 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
   列表里不会出现半截文件。文件名和目录放在 `X-File-Name` / `X-File-Dir` 头里
   （前端已 `encodeURIComponent`，所以中文名不会乱码）。默认上限 2GB
   （`IMAGE_CLIP_MAX_UPLOAD_BYTES`）。
+* **扫描**：`light` 索引只为每个文件做 `stat`，Windows 上串行 stat 是主瓶颈，
+  因此文件 stat 走并发池（`STAT_CONCURRENCY = 16`）。整轮扫描结果还会缓存
+  `SCAN_TTL_MS = 1500ms`：启动、切工作区、连续刷新都直接复用；任何写操作
+  （上传 / 改名 / 移动 / 删除 / 回收站 / 历史版本恢复）调用 `invalidateScan()` 立即失效，
+  用户点「刷新」带 `?refresh=1` 强制重扫，外部拷进目录的文件最多滞后 1.5s。
+* **列表接口缓存**：`/tree`、`/list`、`/meta` 返回 `Cache-Control: private, max-age=0,
+  must-revalidate`，配合 Express 自动生成的 ETag；前端用 `cache: 'no-cache'` 请求，
+  内容没变时服务端直接回 304（空 body），大图库反复刷新不用再传/解析整份索引。
+  注意别用 `no-cache` 响应头：Express 的 `fresh` 判断遇到它会永远判“不新鲜”，拿不到 304。
+* **缩略图**：`GET /api/library/thumb?path=&v=&w=` 支持 `w`（64–480，默认 320）。
+  宽度参与缓存键，网格卡片请求 320、树/文件夹预览/回收站等小图请求 160，
+  避免为 32px 图标解码 480px 的图。视频封面按「路径+mtime+size」单独缓存一张 JPEG，
+  再按需要的宽度转 webp，同一视频不会为不同宽度重复跑 ffmpeg。
+  生成并发限制 4、同一张图并发请求合并，响应带 `immutable` 长缓存（URL 里已有 mtime 版本号）。
 * **路径安全**：所有相对路径都在服务端 `resolve()` 里校验，拒绝 `..`、绝对路径和越界，
   前端拿到的永远是相对资源库根目录的 POSIX 路径。
 * **批量改名**：`buildBatchNames(list, config)` 是纯函数，支持编号（起始值/步长/补零）、
@@ -733,7 +747,7 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 | POST | `/api/video/frames` | 截帧（`mode`+`interval`/`count`/`times`、`format`、`width`、`prefix`、`dir`） |
 | POST | `/api/video/audio` | 提取音轨（`format`、`name`、`dir`） |
 
-### 10.8 就地保存（覆盖当前素材）
+### 10.9 就地保存（覆盖当前素材）
 
 各图片工具除了「生成新素材」之外都提供「保存到当前素材」：
 
@@ -748,12 +762,30 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
   是否需要重新导出；橡皮擦 / 像素笔绘 / 水印去除的编辑层用 `item.bitmap` / `item.imageData.data`
   的引用做基线，换了像素就重建；各舞台的 `pixelVersion` watch 触发重绘。
 
-### 10.9 测试
+### 10.10 资源加载提速
+
+资源都在本机，瓶颈不是带宽而是 **IO 次数 / 主线程解码 / 启动时的模块编译**：
+
+* **大图库列表**：见 §10.2 的并发扫描、扫描短缓存、ETag 304 与缩略图尺寸参数。
+* **多张素材导入**（`useWorkspace.addFiles`）：解码（`createImageBitmap` + `getImageData`）
+  是 CPU 密集操作，改成 `mapLimit(..., 3, ...)` 并行解码，再按原顺序入列（`libraryPaths`
+  与列表顺序仍一一对应）；AABB 检测同样并发跑，素材先出现、裁剪框随后补齐。
+  `useLibrary.openInEditor` 下载资源库文件也限并发 4，不再一张一张排队。
+* **临时会话恢复**（`useWorkSession.restoreFromDoc`）：素材解码并发 3 按快照顺序入列；
+  资源库刷新与素材恢复并行发起（`restoreLibrary` 之前才 await），
+  不再让列目录/全库索引挡住素材出现在列表里。
+* **开发模式首屏**（`web/vite.config.js`）：`server.warmup.clientFiles` 让 Vite 在启动时
+  预转换 `App.vue` 依赖图里的组件 / composables / lib 模块，首次打开不再逐个等 esbuild
+  编译（冷启动实测 DCL 约 3.5s → 0.6s 量级；代价是 dev server 启动多花 1~2s）。
+  改这个配置需要重启 `npm run dev` 才生效。
+
+### 10.11 测试
 
 `npm test` 里新增了几组共享算法与前端纯逻辑单测：
 
 * `shared/selection.test.js`：比例矩形、归一化往返、套索栅格化、选区模式、预览缩放换算；
 * `shared/bgremove.test.js`：边框主色识别（含双色渐变）、连通漫水、套索限制、羽化/收缩、反混合；
 * `web/test/image-view.test.js`：画布查看「透明通道」的裁剪框（图片矩形 / 平移出界 / 空状态）；
-* `web/test/library-inplace.test.js`：就地保存的目标路径归一（.png 改名、根目录新建、兜底命名）。
+* `web/test/library-inplace.test.js`：就地保存的目标路径归一（.png 改名、根目录新建、兜底命名）；
+* `web/test/async.test.js`：`mapLimit` 的顺序、并发上限、空列表与错误冒泡。
 

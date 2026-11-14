@@ -281,8 +281,8 @@ async function removeFolder(folder) {
   if (ok) void actions.deleteFolder(folder);
 }
 
-function thumbOf(entry) {
-  return failedThumbs.value.has(entry.path) ? '' : libraryThumbUrl(entry);
+function thumbOf(entry, width) {
+  return failedThumbs.value.has(entry.path) ? '' : libraryThumbUrl(entry, width);
 }
 
 const FOLDER_PREVIEW_LIMIT = 4;
@@ -526,7 +526,7 @@ onBeforeUnmount(() => {
                 v-for="preview in folderPreviews(folder)"
                 :key="preview.path"
                 class="folder-preview"
-                :src="preview.thumbUrl"
+                :src="libraryThumbUrl(preview, 160)"
                 :alt="preview.name"
                 :title="preview.name"
                 loading="lazy"
@@ -586,8 +586,8 @@ onBeforeUnmount(() => {
         >
           <span class="thumb">
             <img
-              v-if="thumbOf(entry)"
-              :src="thumbOf(entry)"
+              v-if="thumbOf(entry, 320)"
+              :src="thumbOf(entry, 320)"
               alt=""
               loading="lazy"
               @error="onThumbError(entry.path)"
@@ -688,8 +688,8 @@ onBeforeUnmount(() => {
           >
             <span class="tree-thumb">
               <img
-                v-if="thumbOf(row.entry)"
-                :src="thumbOf(row.entry)"
+                v-if="thumbOf(row.entry, 160)"
+                :src="thumbOf(row.entry, 160)"
                 alt=""
                 loading="lazy"
                 @error="onThumbError(row.entry.path)"

@@ -462,7 +462,7 @@ onBeforeUnmount(() => {
             :title="entry.name"
             @click="jump(entry.path)"
           >
-            <img :src="libraryThumbUrl(entry)" alt="" loading="lazy" draggable="false" />
+            <img :src="libraryThumbUrl(entry, 160)" alt="" loading="lazy" draggable="false" />
             <span class="thumb-index mono">{{ i + 1 }}</span>
           </button>
         </div>

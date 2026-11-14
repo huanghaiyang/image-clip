@@ -41,6 +41,21 @@ export default defineConfig({
     port: 5174,
     host: '127.0.0.1',
     fs: { allow: [repoRoot] },
+    /**
+     * 冷启动预热：开发模式下浏览器是「边跑边请求模块」的，首次打开时
+     * App.vue 的依赖图有 100+ 个模块要逐个走 esbuild 转换，实测冷启动 DCL 能到 3.5s。
+     * 这里让 Vite 在服务启动时就把首屏与各工作区用到的模块预转换好，
+     * 首次打开只需要传输、不再等编译（代价是 dev server 启动慢 1~2s）。
+     */
+    warmup: {
+      clientFiles: [
+        './src/main.js',
+        './src/App.vue',
+        './src/components/**/*.vue',
+        './src/composables/**/*.js',
+        './src/lib/**/*.js',
+      ],
+    },
     proxy: {
       '/api': { target: 'http://127.0.0.1:8786', changeOrigin: false },
     },

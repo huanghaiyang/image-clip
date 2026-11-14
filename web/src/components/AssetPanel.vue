@@ -610,7 +610,7 @@ watch(
             <span class="asset-thumb">
               <img
                 v-if="!failedThumbs.has(row.entry.path)"
-                :src="libraryThumbUrl(row.entry)"
+                :src="libraryThumbUrl(row.entry, 160)"
                 :alt="row.entry.name"
                 @error="onThumbError(row.entry.path)"
               />

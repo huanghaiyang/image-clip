@@ -59,6 +59,19 @@ export function createLibrary(options = {}) {
   let metaTimer = null;
   let sharpModule = null;
   const scanPromises = { light: null, full: null };
+  /**
+   * 扫描结果短缓存。
+   *
+   * 资源库是本地目录，一次 light 扫描要为每个文件做 stat（Windows 上 1000+ 文件要几百毫秒），
+   * 而前端在启动、切换工作区、保存后刷新时会连续请求 tree/list。这里把整轮扫描结果缓存
+   * 一小段时间（TTL 内直接复用），并在任何写操作后立刻失效，避免重复扫盘。
+   * 外部直接往目录里拷文件时最多滞后 SCAN_TTL_MS；前端「刷新」会带 refresh=1 强制重扫。
+   */
+  const scanCache = { light: null, full: null };
+  const SCAN_TTL_MS = 1500;
+  let scanVersion = 0;
+  /** 扫描时 fs.stat 的并发度：Windows 上单线程串行 stat 是主瓶颈。 */
+  const STAT_CONCURRENCY = 16;
   let initPromise = null;
 
   async function init() {
@@ -175,39 +188,56 @@ export function createLibrary(options = {}) {
    * 返回扁平的 entries + folders，由前端拼成树（这样搜索、跨目录批量操作都简单）。
    * light=true 时只读目录与 stat，不解析图片尺寸/视频时长，用于首屏索引与统计；
    * 单个文件的尺寸等元数据由 describePath 按需补齐。
+   * @param {{light?:boolean, force?:boolean}} [options]
+   *   force=true 时跳过短缓存，强制重新扫盘（用户点「刷新」时用）。
    */
-  async function scan({ light = false } = {}) {
+  async function scan({ light = false, force = false } = {}) {
     const cacheKey = light ? 'light' : 'full';
+    const cached = scanCache[cacheKey];
+    if (!force && cached && cached.version === scanVersion && Date.now() - cached.at < SCAN_TTL_MS) {
+      return cached.data;
+    }
     if (scanPromises[cacheKey]) return scanPromises[cacheKey];
+
+    // 记下开始时的版本号：扫描过程中若发生写操作，结果不会被当成新数据缓存
+    const versionAtStart = scanVersion;
     scanPromises[cacheKey] = (async () => {
       await loadMeta();
       const folders = [];
-      const fileRecords = [];
+      const fileQueue = [];
       let truncated = false;
 
+      /** 先只收集文件清单（readdir 的 dirent 不带 size/mtime），stat 统一并发做。 */
       async function walk(dirAbs, depth) {
         const dirents = await fs.readdir(dirAbs, { withFileTypes: true }).catch(() => []);
         dirents.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+        const subdirs = [];
         for (const dirent of dirents) {
           if (dirent.name.startsWith('.')) continue;
           const abs = path.join(dirAbs, dirent.name);
           if (dirent.isDirectory()) {
-            const rel = toRel(abs);
-            folders.push({ path: rel, name: dirent.name, parent: toRel(dirAbs), depth });
-            await walk(abs, depth + 1);
+            folders.push({ path: toRel(abs), name: dirent.name, parent: toRel(dirAbs), depth });
+            subdirs.push(abs);
           } else if (dirent.isFile()) {
-            if (fileRecords.length >= MAX_FILES) {
+            if (fileQueue.length >= MAX_FILES) {
               truncated = true;
               continue;
             }
-            const rel = toRel(abs);
-            const stat = await fs.stat(abs).catch(() => null);
-            if (stat) fileRecords.push({ abs, rel, name: dirent.name, stat });
+            fileQueue.push({ abs, name: dirent.name });
           }
         }
+        // 目录递归保持顺序（结构简单），文件 stat 的并发留给下一步
+        for (const abs of subdirs) await walk(abs, depth + 1);
       }
 
       await walk(root, 0);
+
+      const statList = await mapLimit(fileQueue, STAT_CONCURRENCY, async (record) => {
+        const stat = await fs.stat(record.abs).catch(() => null);
+        return stat ? { abs: record.abs, rel: toRel(record.abs), name: record.name, stat } : null;
+      });
+      const fileRecords = statList.filter(Boolean);
+
       const entries = light
         ? fileRecords.map((record) => basicEntry(record))
         : await mapLimit(fileRecords, 6, (record) => describeEntry(record));
@@ -221,7 +251,14 @@ export function createLibrary(options = {}) {
         truncated,
       };
 
-      return { root: '', folders: folders.sort((a, b) => a.path.localeCompare(b.path, 'zh-Hans-CN')), entries, stats };
+      const data = {
+        root: '',
+        folders: folders.sort((a, b) => a.path.localeCompare(b.path, 'zh-Hans-CN')),
+        entries,
+        stats,
+      };
+      scanCache[cacheKey] = { at: Date.now(), version: versionAtStart, data };
+      return data;
     })()
       .catch((err) => {
         throw err;
@@ -230,6 +267,13 @@ export function createLibrary(options = {}) {
         scanPromises[cacheKey] = null;
       });
     return scanPromises[cacheKey];
+  }
+
+  /** 任何写操作后调用：让下一次扫描（以及 HTTP 304 判断）立刻反映磁盘现状。 */
+  function invalidateScan() {
+    scanVersion += 1;
+    scanCache.light = null;
+    scanCache.full = null;
   }
 
   /** 只含 stat 信息的条目：不读图片/视频内容，供目录列表与轻量索引使用。 */
@@ -355,17 +399,24 @@ export function createLibrary(options = {}) {
     const dirents = await fs.readdir(dirAbs, { withFileTypes: true }).catch(() => []);
     dirents.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
     const folderRecords = [];
-    const entries = [];
+    const fileRecords = [];
     for (const dirent of dirents) {
       if (dirent.name.startsWith('.')) continue;
       const abs = path.join(dirAbs, dirent.name);
       if (dirent.isDirectory()) {
         folderRecords.push({ abs, rel: toRel(abs), name: dirent.name });
       } else if (dirent.isFile()) {
-        const fileStat = await fs.stat(abs).catch(() => null);
-        if (fileStat) entries.push(basicEntry({ rel: toRel(abs), name: dirent.name, stat: fileStat }));
+        fileRecords.push({ abs, name: dirent.name });
       }
     }
+
+    // stat 并发做：目录里几百个文件时，串行 stat 会把列表拖到几百毫秒
+    const fileEntries = await mapLimit(fileRecords, STAT_CONCURRENCY, async (record) => {
+      const fileStat = await fs.stat(record.abs).catch(() => null);
+      return fileStat ? basicEntry({ rel: toRel(record.abs), name: record.name, stat: fileStat }) : null;
+    });
+    const entries = [];
+    for (const entry of fileEntries) if (entry) entries.push(entry);
     const folders = await mapLimit(folderRecords, 8, async (folder) => ({
       path: folder.rel,
       name: folder.name,
@@ -432,6 +483,7 @@ export function createLibrary(options = {}) {
   }
 
   async function mkdir(dirRel, name) {
+    invalidateScan();
     const base = resolve(dirRel || '').abs;
     const clean = sanitizeName(name);
     const abs = path.join(base, clean);
@@ -449,53 +501,127 @@ export function createLibrary(options = {}) {
     return describeEntry({ abs, rel: relPath, name: path.basename(abs), stat });
   }
 
-  async function thumbnail(rel) {
+  /**
+   * 缩略图：按「路径 + mtime + 尺寸 + 宽度」缓存成 webp。
+   *
+   * 前端不同位置需要的尺寸差很多（网格卡片 ~132px、树/文件夹小图 ~32px），
+   * 统一按 480px 生成既慢又费流量，所以支持 `w` 参数：
+   *  - 宽度夹到 [64, 480]，默认 320（卡片在 2× 屏上也够清晰）；
+   *  - 宽度参与缓存键，换尺寸不会串图；
+   *  - 同一张图并发请求会复用同一个生成任务，生成并发限制在 4 个以内。
+   */
+  const THUMB_CONCURRENCY = 4;
+  const THUMB_DEFAULT_WIDTH = 320;
+  let thumbActive = 0;
+  const thumbWaiters = [];
+  const thumbInflight = new Map();
+  /** 视频封面生成任务（与宽度无关），避免同一视频并发跑多次 ffmpeg。 */
+  const posterInflight = new Map();
+
+  async function withThumbSlot(task) {
+    if (thumbActive >= THUMB_CONCURRENCY) {
+      // 等到有槽位；释放时直接把计数移交给等待者，避免新请求插队导致瞬时超限
+      await new Promise((resolve) => thumbWaiters.push(resolve));
+    } else {
+      thumbActive += 1;
+    }
+    try {
+      return await task();
+    } finally {
+      const next = thumbWaiters.shift();
+      if (next) next();
+      else thumbActive -= 1;
+    }
+  }
+
+  async function thumbnail(rel, { width = THUMB_DEFAULT_WIDTH } = {}) {
     const { abs, rel: relPath } = resolve(rel, { allowRoot: false });
     const stat = await fs.stat(abs).catch(() => null);
     if (!stat?.isFile()) throw new LibraryError('文件不存在', 'NOT_FOUND', 404);
 
+    const w = Math.min(480, Math.max(64, Math.round(Number(width) || THUMB_DEFAULT_WIDTH)));
     const { kind } = classify(abs);
     const hash = crypto
       .createHash('sha1')
-      .update(`${relPath}|${stat.mtimeMs}|${stat.size}`)
+      .update(`${relPath}|${stat.mtimeMs}|${stat.size}|w${w}`)
       .digest('hex')
       .slice(0, 24);
     const out = path.join(thumbnailRoot, `${hash}.webp`);
     if (await exists(out)) return out;
+    // 同一张缩略图被多点触发（例如网格 + 文件夹预览）时只生成一次
+    if (thumbInflight.has(out)) return thumbInflight.get(out);
 
     const sharp = await getSharp();
     if (!sharp) throw new VideoError('服务端缺少 sharp，无法生成缩略图', 'SHARP_MISSING', 503);
 
-    try {
-      if (kind === 'image') {
-        // 与 describeEntry 同样的原因：读 Buffer 而不是把路径交给 libvips，
-        // 否则生成过缩略图的图片会被锁住，后续改名/删除报 EBUSY。
-        const buffer = await fs.readFile(abs);
-        await sharp(buffer, { animated: false })
-          .rotate()
-          .resize({ width: 480, height: 360, fit: 'inside', withoutEnlargement: true })
-          .webp({ quality: 82 })
-          .toFile(out);
-      } else if (kind === 'video') {
-        const tmpDir = path.join(cacheRoot, 'posters');
-        await fs.mkdir(tmpDir, { recursive: true });
-        const tmp = path.join(tmpDir, `${hash}.jpg`);
-        const info = await probeVideo(abs).catch(() => null);
-        await makeVideoPoster(abs, tmp, info);
-        await sharp(await fs.readFile(tmp))
-          .resize({ width: 480, height: 360, fit: 'inside', withoutEnlargement: true })
-          .webp({ quality: 82 })
-          .toFile(out);
-        await fs.rm(tmp, { force: true }).catch(() => {});
-      } else {
-        throw new LibraryError('该类型暂不支持缩略图', 'NO_THUMB', 404);
+    const task = withThumbSlot(async () => {
+      if (await exists(out)) return out;
+      try {
+        if (kind === 'image') {
+          // 与 describeEntry 同样的原因：读 Buffer 而不是把路径交给 libvips，
+          // 否则生成过缩略图的图片会被锁住，后续改名/删除报 EBUSY。
+          const buffer = await fs.readFile(abs);
+          await sharp(buffer, { animated: false })
+            .rotate()
+            .resize({ width: w, height: Math.round(w * 0.75), fit: 'inside', withoutEnlargement: true })
+            .webp({ quality: 82 })
+            .toFile(out);
+        } else if (kind === 'video') {
+          // 视频封面与目标宽度无关：先按「路径+mtime+size」缓存一张 JPEG，
+          // 再按需要的宽度缩成 webp —— 否则同一个视频在文件夹预览（160）和
+          // 卡片（320）里会各跑一次 ffmpeg，抽帧又慢又费 CPU。
+          const posterDir = path.join(cacheRoot, 'posters');
+          await fs.mkdir(posterDir, { recursive: true });
+          const posterHash = crypto
+            .createHash('sha1')
+            .update(`${relPath}|${stat.mtimeMs}|${stat.size}`)
+            .digest('hex')
+            .slice(0, 24);
+          const poster = path.join(posterDir, `${posterHash}.jpg`);
+          if (!(await exists(poster))) {
+            const generating = posterInflight.get(poster);
+            if (generating) {
+              // 同一个视频的其他宽度请求正在抽帧，等它完成即可
+              await generating;
+            } else {
+              const task = (async () => {
+                const info = await probeVideo(abs).catch(() => null);
+                // 临时文件必须以 .jpg 结尾：ffmpeg 靠扩展名推断输出格式
+                const tmp = path.join(posterDir, `${posterHash}.${process.pid}-${crypto.randomBytes(3).toString('hex')}.part.jpg`);
+                try {
+                  await makeVideoPoster(abs, tmp, info);
+                  await fs.rename(tmp, poster);
+                } finally {
+                  await fs.rm(tmp, { force: true }).catch(() => {});
+                }
+              })();
+              posterInflight.set(poster, task);
+              try {
+                await task;
+              } finally {
+                posterInflight.delete(poster);
+              }
+            }
+          }
+          await sharp(await fs.readFile(poster))
+            .resize({ width: w, height: Math.round(w * 0.75), fit: 'inside', withoutEnlargement: true })
+            .webp({ quality: 82 })
+            .toFile(out);
+        } else {
+          throw new LibraryError('该类型暂不支持缩略图', 'NO_THUMB', 404);
+        }
+      } catch (err) {
+        await fs.rm(out, { force: true }).catch(() => {});
+        if (err instanceof VideoError || err instanceof LibraryError) throw err;
+        throw new VideoError(`生成缩略图失败：${err.message}`, 'THUMB_FAILED', 422);
       }
-    } catch (err) {
-      await fs.rm(out, { force: true }).catch(() => {});
-      if (err instanceof VideoError || err instanceof LibraryError) throw err;
-      throw new VideoError(`生成缩略图失败：${err.message}`, 'THUMB_FAILED', 422);
-    }
-    return out;
+      return out;
+    }).finally(() => {
+      thumbInflight.delete(out);
+    });
+
+    thumbInflight.set(out, task);
+    return task;
   }
 
   /**
@@ -504,6 +630,7 @@ export function createLibrary(options = {}) {
    * 这样 `a.png ↔ b.png` 的互换、`1.jpg → 2.jpg`（2 已存在但也要改名）都不会互相覆盖。
    */
   async function renameItems(items) {
+    invalidateScan();
     if (!Array.isArray(items) || !items.length) throw new LibraryError('没有需要重命名的项目', 'BAD_INPUT', 400);
     if (items.length > 1000) throw new LibraryError('单次最多重命名 1000 项', 'TOO_MANY', 413);
 
@@ -674,6 +801,7 @@ export function createLibrary(options = {}) {
 
   /** 移动文件/文件夹到目标目录；跨盘时自动退回“复制 + 删除”。 */
   async function movePaths(paths, targetDirRel) {
+    invalidateScan();
     if (!Array.isArray(paths) || !paths.length) throw new LibraryError('没有需要移动的项目', 'BAD_INPUT', 400);
     const { abs: targetDir, rel: targetRel } = resolve(targetDirRel || '');
     await fs.mkdir(targetDir, { recursive: true });
@@ -717,6 +845,7 @@ export function createLibrary(options = {}) {
    * 文件夹递归复制；重名自动加序号，复制到自身子目录会被拒绝。
    */
   async function copyPaths(paths, targetDirRel) {
+    invalidateScan();
     if (!Array.isArray(paths) || !paths.length) throw new LibraryError('没有需要复制的项目', 'BAD_INPUT', 400);
     const { abs: targetDir } = resolve(targetDirRel || '');
     await fs.mkdir(targetDir, { recursive: true });
@@ -768,6 +897,7 @@ export function createLibrary(options = {}) {
    * `meta.json` 记录原始路径与删除时间，恢复时按原路径搬回去。
    */
   async function trashPaths(paths) {
+    invalidateScan();
     if (!Array.isArray(paths) || !paths.length) throw new LibraryError('没有需要删除的项目', 'BAD_INPUT', 400);
     if (paths.length > 2000) throw new LibraryError('单次最多删除 2000 项', 'TOO_MANY', 413);
     const results = [];
@@ -916,6 +1046,7 @@ export function createLibrary(options = {}) {
 
   /** 恢复回收站项目；原位置已有同名文件时自动加序号。 */
   async function restoreTrash(ids) {
+    invalidateScan();
     if (!Array.isArray(ids) || !ids.length) throw new LibraryError('没有需要恢复的项目', 'BAD_INPUT', 400);
     const results = [];
     for (const id of ids) {
@@ -946,6 +1077,7 @@ export function createLibrary(options = {}) {
 
   /** 彻底删除（不可恢复）。all=true 清空整个回收站。 */
   async function purgeTrash(ids = [], { all = false } = {}) {
+    invalidateScan();
     if (all) {
       const current = await listTrash().catch(() => ({ items: [] }));
       await fs.rm(path.join(root, TRASH_DIR), { recursive: true, force: true }).catch(() => {});
@@ -1042,6 +1174,7 @@ export function createLibrary(options = {}) {
 
   /** 恢复某个历史版本：先把当前内容也存成一版，再覆盖回去。 */
   async function restoreVersion(rel, versionId) {
+    invalidateScan();
     await loadVersions();
     const { rel: relPath } = resolve(rel, { allowRoot: false });
     const version = (versionsIndex[relPath] ?? []).find((item) => item.id === versionId);
@@ -1249,6 +1382,7 @@ export function createLibrary(options = {}) {
     cacheRoot,
     init,
     scan,
+    invalidateScan,
     listDirectory,
     describePath,
     reveal,
@@ -1277,6 +1411,7 @@ export function createLibrary(options = {}) {
     invalidate() {
       meta = null;
       versionsIndex = null;
+      invalidateScan();
     },
   };
 
@@ -1324,10 +1459,27 @@ export function createLibraryRouter(library) {
     library.init().then(() => next(), next);
   });
 
+  /**
+   * 列表类 JSON 统一加 `no-cache`：允许浏览器存一份但每次用之前必须重验证。
+   * Express 自动生成 ETag，内容没变时返回 304（无 body），
+   * 大资源库反复刷新/切目录时不用再传整份索引。
+   */
+  const sendListJson = (res, payload) => {
+    // 注意别写 no-cache：Express 的 fresh 判断遇到 no-cache 会直接判定“不新鲜”，
+    // 永远回 200 而拿不到 304。max-age=0 + must-revalidate 才是“可存、每次重验证”。
+    res.set('Cache-Control', 'private, max-age=0, must-revalidate');
+    res.json(payload);
+  };
+
   router.get(
     '/tree',
     wrap(async (req, res) => {
-      res.json(await library.scan({ light: String(req.query.light ?? '') === '1' }));
+      const data = await library.scan({
+        light: String(req.query.light ?? '') === '1',
+        // 「刷新」按钮带 refresh=1：绕过短缓存，强制重扫磁盘
+        force: String(req.query.refresh ?? '') === '1',
+      });
+      sendListJson(res, data);
     }),
   );
 
@@ -1335,7 +1487,7 @@ export function createLibraryRouter(library) {
   router.get(
     '/list',
     wrap(async (req, res) => {
-      res.json(await library.listDirectory(req.query.dir ?? ''));
+      sendListJson(res, await library.listDirectory(req.query.dir ?? ''));
     }),
   );
 
@@ -1343,7 +1495,7 @@ export function createLibraryRouter(library) {
   router.get(
     '/meta',
     wrap(async (req, res) => {
-      res.json(await library.describePath(req.query.path ?? ''));
+      sendListJson(res, await library.describePath(req.query.path ?? ''));
     }),
   );
 
@@ -1379,8 +1531,10 @@ export function createLibraryRouter(library) {
   router.get(
     '/thumb',
     wrap(async (req, res) => {
-      const file = await library.thumbnail(req.query.path);
-      res.set('Cache-Control', 'private, max-age=3600');
+      // w：期望宽度（64–480，默认 320）。URL 里带 v=mtime，内容变了 URL 就变，
+      // 所以可以直接长缓存，滚动列表时不再重复回源。
+      const file = await library.thumbnail(req.query.path, { width: req.query.w });
+      res.set('Cache-Control', 'private, max-age=31536000, immutable');
       res.type('image/webp').sendFile(file);
     }),
   );
@@ -1453,6 +1607,8 @@ export function createLibraryRouter(library) {
       // 覆盖上传：旧内容先留一版历史，再写入新文件
       if (target.existing) await library.snapshotVersion(target.rel);
       await fs.rename(temp, target.abs);
+      // 落盘后立刻让扫描缓存失效，刷新时能看到新文件
+      library.invalidateScan();
       const entry = await library.entryByRel(target.rel);
       await library.rememberChecksum(target.rel, checksum);
       res.status(201).json({
