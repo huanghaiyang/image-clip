@@ -835,6 +835,9 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
   是 CPU 密集操作，改成 `mapLimit(..., 3, ...)` 并行解码，再按原顺序入列（`libraryPaths`
   与列表顺序仍一一对应）；AABB 检测同样并发跑，素材先出现、裁剪框随后补齐。
   `useLibrary.openInEditor` 下载资源库文件也限并发 4，不再一张一张排队。
+* **临时会话记住现场**：工作区文档额外保存 `checkedIds`（当前素材的勾选，图集/批量/合并精灵图都依赖它），
+  素材面板的界面现场（`useAssetView`：当前素材/资源库 tab、资源库搜索词、两个列表各自的滚动位置）也进会话；
+  恢复后回到上次的选中项、勾选、tab、搜索与滚动位置（`describeSession` 会提示「勾选 N 张」）。
 * **临时会话恢复**（`useWorkSession.restoreFromDoc`）：素材解码并发 3 按快照顺序入列；
   资源库刷新与素材恢复并行发起（`restoreLibrary` 之前才 await），
   不再让列目录/全库索引挡住素材出现在列表里。
@@ -853,6 +856,7 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 * `web/test/library-inplace.test.js`：就地保存的目标路径归一（.png 改名、根目录新建、兜底命名）；
 * `web/test/atlas.test.js`：图集统一输出尺寸（同尺寸 / 混合尺寸 / 空输入）与居中适配（等比铺满、留边不拉伸）；
 * `web/test/sprite-merge.test.js`：多图合并精灵图的排版（混合尺寸取最大单元格、自动列数、列数钳制、间距、行优先原点）；
+* `web/test/asset-view.test.js`：素材面板界面现场的导入/导出归一化（非法 tab、脏滚动值、往返一致性）；
 * `web/test/async.test.js`：`mapLimit` 的顺序、并发上限、空列表与错误冒泡；
 * `web/test/version-compare.test.js`：逐像素差异（透明像素 / 单通道偏色 / 阈值 / 长度不足）、
   波形降采样与列比较（列数不一致）、帧号 ⇄ 秒数换算与时间码格式化。

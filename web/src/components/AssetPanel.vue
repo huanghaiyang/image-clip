@@ -7,12 +7,13 @@
  *  - 资源库：直接浏览资源库中的图片，点击即载入当前工作区。
  * 上传与拖拽现在统一写入资源库，保证所有模块共用同一份素材。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useAppMode } from '../composables/useAppMode.js';
 import { useLibrary } from '../composables/useLibrary.js';
 import { useWorkspace } from '../composables/useWorkspace.js';
 import { pickLibraryImages } from '../composables/useLibraryImport.js';
 import { useResourceViewMode } from '../composables/useResourceViewMode.js';
+import { useAssetView } from '../composables/useAssetView.js';
 import { libraryThumbUrl, uploadBlobToLibrary } from '../lib/library.js';
 import { buildResourceTree, collectFolderPaths, flattenResourceTree } from '../lib/resourceTree.js';
 import { formatBytes, formatRatio } from '../lib/imaging.js';
@@ -29,9 +30,25 @@ const {
 const { state: appMode } = useAppMode();
 
 const items = computed(() => state.items);
+/** 素材面板的界面现场（tab / 搜索 / 滚动）跟着临时会话一起保存，重开回到原处。 */
+const { state: assetView } = useAssetView();
 /** 当前素材非空时先看工作区，否则直接展示资源库，减少空面板。 */
-const tab = ref(items.value.length ? 'workspace' : 'library');
-const keyword = ref('');
+const tab = computed({
+  get: () => assetView.tab ?? (items.value.length ? 'workspace' : 'library'),
+  set: (value) => {
+    assetView.tab = value;
+  },
+});
+const keyword = computed({
+  get: () => assetView.keyword,
+  set: (value) => {
+    assetView.keyword = value;
+  },
+});
+/** 首次挂载时把自动推断出来的 tab 记下来，避免下次会话又被推断覆盖。 */
+watch(tab, (value) => {
+  if (assetView.tab !== value) assetView.tab = value;
+}, { immediate: true });
 const failedThumbs = ref(new Set());
 
 // --------------------------------------------------------------- 当前素材拖拽排序
@@ -72,6 +89,33 @@ const libraryImages = computed(() => {
     .filter((entry) => entry.kind === 'image')
     .filter((entry) => !kw || entry.name.toLowerCase().includes(kw) || entry.path.toLowerCase().includes(kw))
     .sort((a, b) => a.path.localeCompare(b.path, 'zh-Hans-CN'));
+});
+
+// --------------------------------------------------------------- 列表滚动位置
+const listEl = ref(null);
+
+function onListScroll() {
+  const el = listEl.value;
+  if (!el) return;
+  assetView.scrollTop[tab.value] = el.scrollTop;
+}
+
+/** 恢复当前 tab 的滚动位置（等列表行渲染出来之后）。 */
+async function restoreListScroll() {
+  await nextTick();
+  requestAnimationFrame(() => {
+    const el = listEl.value;
+    if (!el) return;
+    const target = Math.max(0, Math.round(Number(assetView.scrollTop[tab.value]) || 0));
+    el.scrollTop = target;
+  });
+}
+
+watch(tab, () => {
+  void restoreListScroll();
+});
+onMounted(() => {
+  void restoreListScroll();
 });
 
 // --------------------------------------------------------------- 平铺 / 树形
@@ -406,7 +450,7 @@ watch(
       </button>
     </div>
 
-    <div class="assets-list">
+    <div ref="listEl" class="assets-list" @scroll.passive="onListScroll">
       <!-- 当前工作区素材 -->
       <template v-if="tab === 'workspace'">
         <p v-if="items.length === 0" class="assets-empty muted">

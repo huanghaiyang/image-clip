@@ -25,6 +25,7 @@ import { useVideo } from './useVideo.js';
 import { useAudio } from './useAudio.js';
 import { useLlmChat } from './useLlmChat.js';
 import { useAppMode } from './useAppMode.js';
+import { exportAssetView, importAssetView, resetAssetView, useAssetView } from './useAssetView.js';
 import { onSessionDirty } from '../lib/sessionSignals.js';
 import {
   clearSessionBlobs,
@@ -231,6 +232,7 @@ async function flush() {
         }
       }
 
+      if (scopes.has('assets')) docs.assets = exportAssetView();
       if (scopes.has('crop')) docs.crop = cropDoc();
       if (scopes.has('library')) docs.library = libraryDoc();
       if (scopes.has('video')) docs.video = videoDoc();
@@ -379,6 +381,8 @@ async function restoreFromDoc(doc) {
   await pixel.actions.importSession(doc.pixel, blobs);
   await watermark.actions.importSession(doc.watermark, blobs);
 
+  // 左侧素材面板的现场（当前素材/资源库 tab、搜索词、滚动位置）
+  importAssetView(doc.assets);
   restoreCrop(doc.crop);
   // 恢复写入的是“当前现场”，不该变成可撤销步骤
   crop.actions.resetCropHistory();
@@ -414,6 +418,8 @@ function describeSession(doc) {
   const parts = [];
   const items = doc.workspace?.items?.length ?? 0;
   if (items) parts.push(`${items} 个素材`);
+  const checked = doc.workspace?.checkedIds?.length ?? 0;
+  if (checked) parts.push(`勾选 ${checked} 张`);
   const dir = doc.library?.currentDir;
   if (dir) parts.push(`资源库 / ${dir}`);
   const selected = doc.library?.selected?.length ?? 0;
@@ -435,6 +441,7 @@ function registerWatchers() {
   watch(
     () => [
       workspace.state.selectedId,
+      workspace.state.checkedIds,
       workspace.state.engine,
       workspace.state.output,
       workspace.state.options,
@@ -457,6 +464,13 @@ function registerWatchers() {
       crop.state.atlasNorm,
     ],
     () => schedule('crop'),
+    { deep: true },
+  );
+
+  const { state: assetView } = useAssetView();
+  watch(
+    () => [assetView.tab, assetView.keyword, assetView.scrollTop.workspace, assetView.scrollTop.library],
+    () => schedule('assets'),
     { deep: true },
   );
 
@@ -627,6 +641,7 @@ export async function discardSession() {
     pixel.actions.clearSession();
     watermark.actions.clearSession();
     resetCrop();
+    resetAssetView();
     library.actions.setDir('');
     library.actions.setSearch('');
     library.actions.closePreview();

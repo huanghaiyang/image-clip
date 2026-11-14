@@ -1005,6 +1005,8 @@ export async function exportItemBlob(id) {
 export async function exportSession({ withBlobs = true } = {}) {
   const doc = {
     selectedId: state.selectedId,
+    // 勾选状态也要进会话：图集裁剪 / 批量处理 / 合并精灵图都按勾选来
+    checkedIds: [...state.checkedIds],
     engine: state.engine,
     output: { ...state.output },
     options: { ...state.options },
@@ -1092,6 +1094,10 @@ export async function importSession(snapshot, blobs = {}) {
 
   const exists = state.items.some((item) => item.id === snapshot.selectedId);
   state.selectedId = exists ? snapshot.selectedId : state.items[state.items.length - 1]?.id ?? null;
+
+  // 勾选状态：只保留确实恢复出来的素材，避免恢复半截时留下悬空 id
+  const wanted = new Set(Array.isArray(snapshot.checkedIds) ? snapshot.checkedIds : []);
+  state.checkedIds = state.items.filter((item) => wanted.has(item.id)).map((item) => item.id);
   return state.items;
 }
 
