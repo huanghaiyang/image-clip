@@ -14,6 +14,8 @@ const state = reactive({
   name: '',
   width: 0,
   height: 0,
+  /** 工作区的两个方向：split 拆分已有 sprite / merge 多图合并成 sprite */
+  pane: 'split',
   /** auto：按透明分隔线切；grid：按列数 × 行数等分 */
   mode: 'auto',
   /** 自动分隔的检测结果；没有任何分隔线时为 false */
@@ -161,6 +163,12 @@ function setMode(mode) {
   state.mode = mode === 'grid' ? 'grid' : 'auto';
 }
 
+/** 切换「拆分 / 合并」：合并模式没有播放概念，顺手把动画停掉。 */
+function setPane(pane) {
+  state.pane = pane === 'merge' ? 'merge' : 'split';
+  if (state.pane === 'merge') pause();
+}
+
 function setColumns(value) {
   state.columns = Math.max(1, Math.min(SPRITE_MAX_GRID, Math.round(Number(value) || 1)));
 }
@@ -194,6 +202,7 @@ export function useSprite() {
       loadItem: loadSpriteItem,
       redetect: redetectSpriteGrid,
       setMode,
+      setPane,
       setColumns,
       setRows,
       setFps,

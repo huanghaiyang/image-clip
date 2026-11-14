@@ -13,12 +13,22 @@ import { openImportPicker } from '../composables/useUploadPicker.js';
 import RangeField from './ui/RangeField.vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import SwitchField from './ui/SwitchField.vue';
+import SpriteMergeBlock from './SpriteMergeBlock.vue';
+import { useSpriteMerge } from '../composables/useSpriteMerge.js';
 
 const { selected } = useWorkspace();
 const { state, frames, currentFrame, actions } = useSprite();
+const { mergeSource } = useSpriteMerge();
+const mergeCount = computed(() => mergeSource.value?.count ?? 0);
 
 const item = computed(() => selected.value ?? null);
 const total = computed(() => frames.value.length);
+/** 精灵图工作区的两个方向：拆分已有 sprite / 多图合并成 sprite */
+const pane = computed(() => state.pane ?? 'split');
+const paneOptions = [
+  { value: 'split', label: '拆分', hint: '把一张 sprite 图切成帧，预览并播放' },
+  { value: 'merge', label: '合并', hint: '把勾选的多张图片拼成一张 sprite 图（尺寸可不同）' },
+];
 
 const modeOptions = [
   { value: 'auto', label: '自动分隔', hint: '按透明分隔线切帧，适合带帧间距的 sprite 图' },
@@ -42,11 +52,26 @@ function importSprite() {
   <aside class="panel sprite-panel">
     <div class="panel-title">
       <span>精灵图</span>
-      <span class="chip">{{ total }} 帧</span>
+      <span class="chip">{{ pane === 'merge' ? `${mergeCount} 张待合并` : `${total} 帧` }}</span>
     </div>
 
     <div class="panel-body">
-      <p v-if="!item" class="empty muted">请先在左侧选择一张 sprite 图。</p>
+      <section class="section">
+        <SegmentedControl
+          :model-value="pane"
+          :options="paneOptions"
+          block
+          @update:model-value="actions.setPane($event)"
+        />
+      </section>
+
+      <!-- 合并：把「当前素材」里勾选的多张图拼成一张 sprite -->
+      <template v-if="pane === 'merge'">
+        <SpriteMergeBlock />
+      </template>
+
+      <!-- 拆分：把当前 sprite 图切成帧 -->
+      <p v-else-if="!item" class="empty muted">请先在左侧选择一张 sprite 图。</p>
 
       <template v-else>
         <section class="section">

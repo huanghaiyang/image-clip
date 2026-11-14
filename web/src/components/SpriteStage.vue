@@ -12,9 +12,11 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 
 import { useWorkspace } from '../composables/useWorkspace.js';
 import { useSprite } from '../composables/useSprite.js';
+import { useSpriteMerge } from '../composables/useSpriteMerge.js';
 
 const { selected } = useWorkspace();
 const { state, source, frames, currentFrame, actions } = useSprite();
+const { mergeSource, plan, columns, gap, fit, buildPreview } = useSpriteMerge();
 
 const playbackEl = ref(null);
 const sheetBody = ref(null);
@@ -23,6 +25,51 @@ const box = ref({ width: 0, height: 0 });
 let observer = null;
 
 const item = computed(() => selected.value ?? null);
+/** 精灵图工作区：split 拆分 / merge 合并。 */
+const pane = computed(() => state.pane ?? 'split');
+
+// --------------------------------------------------------------- 合并预览
+const mergeBody = ref(null);
+const mergeCanvas = ref(null);
+let mergeObserver = null;
+let mergeSeq = 0;
+
+/** 按容器大小生成合并结果预览（长边上限 1600，避免每次改参数都拼整张大图）。 */
+async function drawMerge() {
+  const body = mergeBody.value;
+  const canvas = mergeCanvas.value;
+  if (!body || !canvas) return;
+  const seq = ++mergeSeq;
+  const side = Math.max(body.clientWidth, body.clientHeight, 320);
+  const maxSide = Math.min(1600, Math.round(side - 40));
+  const built = await buildPreview({ maxSide });
+  if (seq !== mergeSeq || !built) return;
+  canvas.width = built.width;
+  canvas.height = built.height;
+  canvas.getContext('2d').drawImage(built.canvas, 0, 0);
+}
+
+function observeMerge() {
+  mergeObserver?.disconnect();
+  mergeObserver = null;
+  const body = mergeBody.value;
+  if (!body || typeof ResizeObserver !== 'function') return;
+  mergeObserver = new ResizeObserver(() => {
+    if (pane.value === 'merge') void drawMerge();
+  });
+  mergeObserver.observe(body);
+}
+
+watch(
+  [pane, () => plan.value?.width, () => plan.value?.height, columns, gap, fit, () => mergeSource.value?.count],
+  async () => {
+    if (pane.value !== 'merge') return;
+    await nextTick();
+    observeMerge();
+    void drawMerge();
+  },
+  { immediate: true },
+);
 
 /** 整图按容器等比缩放后的显示尺寸（帧框用百分比叠加，必须和显示尺寸一致）。 */
 const display = computed(() => {
@@ -100,13 +147,33 @@ function cellStyle(frame) {
 onBeforeUnmount(() => {
   actions.pause();
   observer?.disconnect();
+  mergeObserver?.disconnect();
   if (sheetUrl.value) URL.revokeObjectURL(sheetUrl.value);
 });
 </script>
 
 <template>
   <section class="stage sprite-stage">
-    <div v-if="!source" class="stage-empty">
+    <template v-if="pane === 'merge'">
+      <div class="pane merge-pane">
+        <div class="pane-head">
+          <span>合并预览</span>
+          <span class="pane-meta mono">
+            <template v-if="plan">
+              {{ mergeSource.count }} 帧 · {{ plan.width }} × {{ plan.height }}（{{ plan.cols }} 列 × {{ plan.rows }} 行）
+            </template>
+            <template v-else>等待勾选素材</template>
+          </span>
+        </div>
+        <div ref="mergeBody" class="merge-body">
+          <canvas v-show="plan" ref="mergeCanvas" class="merge-canvas"></canvas>
+          <p v-if="!plan" class="merge-empty muted">在左侧「当前素材」勾选要合并的图片（尺寸可以不同）</p>
+        </div>
+      </div>
+      <div class="stage-hint muted">列数 / 间距 / 缩放口径在右侧设置 · 合并结果是新图，不改动原图</div>
+    </template>
+
+    <div v-else-if="!source" class="stage-empty">
       <p>还没有载入 sprite 图</p>
       <p class="muted">从左侧选择一张图片，或在右侧面板点「导入 sprite 图」</p>
     </div>
@@ -186,6 +253,37 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+.merge-pane {
+  flex: 1;
+}
+
+.merge-body {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.merge-canvas {
+  max-width: calc(100% - 40px);
+  max-height: calc(100% - 40px);
+  object-fit: contain;
+  display: block;
+  /* 棋盘格底：合并结果保留透明通道 */
+  background-color: var(--panel-2);
+  background-image: repeating-conic-gradient(rgba(255, 255, 255, 0.08) 0% 25%, transparent 0% 50%);
+  background-size: 12px 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+}
+
+.merge-empty {
+  margin: 0;
+  font-size: 12px;
 }
 
 .anim-pane {

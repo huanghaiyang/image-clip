@@ -64,7 +64,7 @@ const { state: videoState, actions: videoActions } = useVideo();
 const { state: audioState, actions: audioActions } = useAudio();
 const { state: eraserState, actions: eraserActions } = useEraser();
 const { state: pixelState, actions: pixelActions } = usePixelPaint();
-const { actions: spriteActions } = useSprite();
+const { state: spriteState, actions: spriteActions } = useSprite();
 const { state: uploadState } = useUploadPicker();
 const { state: sessionState, actions: sessionActions } = useWorkSession();
 const { actions: undoActions } = useUndo();
@@ -225,6 +225,8 @@ function onKeydown(event) {
   }
 
   if (tool === 'sprite') {
+    // 合并子模式没有播放/逐帧的概念，别拦空格和方向键
+    if (spriteState.pane === 'merge') return;
     // 精灵图：空格播放/暂停，←/→ 逐帧
     if (event.key === ' ') {
       event.preventDefault();

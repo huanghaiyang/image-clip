@@ -92,3 +92,50 @@ export function buildGridFrames(width, height, columns, rows) {
 }
 
 export const SPRITE_MAX_GRID = MAX_GRID;
+
+/**
+ * 多图合并为精灵图的布局
+ * ----------------------
+ * 合并时每张图的尺寸可能不同（白底帧、留白不同、分辨率混合都很常见）。
+ * 规则：单元格 = 各帧最大宽/高；每帧等比缩放后居中放进自己的单元格（不拉伸，空白透明）。
+ * 导出与面板预览共用这个纯函数，保证看到的排版就是导出的排版。
+ *
+ * @param {{sizes: Array<{width:number,height:number}>, columns?: number, gap?: number}} options
+ * @returns {{count:number, cell:{width:number,height:number}, cols:number, rows:number, spacing:number, width:number, height:number}|null}
+ */
+export function planSpriteSheet({ sizes = [], columns = 0, gap = 0 } = {}) {
+  const list = (sizes ?? []).filter((size) => Number(size?.width) > 0 && Number(size?.height) > 0);
+  const count = list.length;
+  if (!count) return null;
+
+  const cell = {
+    width: Math.max(...list.map((size) => Math.round(Number(size.width)))),
+    height: Math.max(...list.map((size) => Math.round(Number(size.height)))),
+  };
+  const auto = Math.ceil(Math.sqrt(count));
+  const requested = Math.round(Number(columns) || 0);
+  const cols = Math.max(1, Math.min(count, requested > 0 ? requested : auto));
+  const rows = Math.ceil(count / cols);
+  const spacing = Math.max(0, Math.round(Number(gap) || 0));
+  return {
+    count,
+    cell,
+    cols,
+    rows,
+    spacing,
+    width: cols * cell.width + (cols - 1) * spacing,
+    height: rows * cell.height + (rows - 1) * spacing,
+  };
+}
+
+/** 第 index 帧所在单元格的左上角坐标（像素）。 */
+export function spriteCellOrigin(plan, index) {
+  const cols = Math.max(1, plan?.cols ?? 1);
+  const cellWidth = Math.max(1, plan?.cell?.width ?? 1);
+  const cellHeight = Math.max(1, plan?.cell?.height ?? 1);
+  const spacing = Math.max(0, plan?.spacing ?? 0);
+  return {
+    x: (index % cols) * (cellWidth + spacing),
+    y: Math.floor(index / cols) * (cellHeight + spacing),
+  };
+}
