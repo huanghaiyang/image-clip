@@ -36,6 +36,9 @@ const singleItem = computed(() => single.value ?? singleFolder.value);
 const firstSelected = computed(() => selectedEntries.value[0] ?? selectedFolders.value[0] ?? null);
 /** 批量改名同时支持文件与文件夹；顺序与原列表一致。 */
 const batchList = computed(() => [...selectedEntries.value, ...selectedFolders.value]);
+/** 多选里能进图片编辑的（只有图片）；其余文件会被跳过并在下方提示。 */
+const selectedImages = computed(() => selectedEntries.value.filter((entry) => entry.kind === 'image'));
+const selectedNonImages = computed(() => selectedEntries.value.length - selectedImages.value.length);
 
 const renameName = ref('');
 const renaming = ref(false);
@@ -271,6 +274,13 @@ function mtimeText(value) {
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
 }
 
+/** 把多选里的图片一起转入图片编辑（openInEditor 支持数组，内部并发读取）。 */
+async function sendBatchToEditor() {
+  const images = selectedImages.value;
+  if (!images.length) return;
+  await actions.openInEditor(images);
+}
+
 async function submitRename() {
   const entry = singleItem.value;
   if (!entry) return;
@@ -481,7 +491,28 @@ function fileInfo(entry) {
       </section>
 
       <section v-else-if="firstSelected" class="block">
-        <div class="hint">多选时可以在下方批量改名 / 移动 / 删除。</div>
+        <div class="hint">多选时可以在下方批量改名 / 移动 / 删除，或把图片一起转入编辑。</div>
+      </section>
+
+      <!-- 多选图片 → 批量转入图片编辑 -->
+      <section v-if="selectedImages.length > 1" class="block">
+        <div class="block-title">转入编辑 · {{ selectedImages.length }} 张</div>
+        <p class="hint">
+          一起加入图片工作区的「当前素材」，可以直接批量透明裁剪 / 批量处理；
+          已在素材列表里的图片不会重复载入。
+        </p>
+        <button
+          class="btn is-primary is-block"
+          type="button"
+          :disabled="state.busy"
+          :title="`把选中的 ${selectedImages.length} 张图片一起转入图片编辑`"
+          @click="sendBatchToEditor"
+        >
+          批量转入图片编辑（{{ selectedImages.length }} 张）
+        </button>
+        <p v-if="selectedNonImages" class="hint">
+          另有 {{ selectedNonImages }} 个非图片文件会被跳过（视频 / 音频有自己的工作区）。
+        </p>
       </section>
 
       <!-- 批量改名：文件和文件夹都可以 -->

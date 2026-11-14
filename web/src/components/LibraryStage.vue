@@ -116,6 +116,16 @@ const treeRoot = computed(() => {
 const treeRows = computed(() => flattenResourceTree(treeRoot.value, collapsed.value));
 
 /** 选中的图片，按当前列表的可见顺序排列（树形视图包含子树里的图片）。 */
+/**
+ * 批量转入图片编辑：把选中的图片一起加入图片工作区的「当前素材」。
+ * openInEditor 支持数组，已在素材列表里的图片不会重复下载。
+ */
+async function sendSelectionToEditor() {
+  const images = selectedImages.value;
+  if (!images.length) return;
+  await actions.openInEditor(images);
+}
+
 const selectedImages = computed(() => {
   const selected = selectedSet.value;
   if (state.browseMode === 'tree') {
@@ -454,6 +464,16 @@ onBeforeUnmount(() => {
       <button
         v-if="selectedImages.length >= 2"
         class="btn is-mini is-primary"
+        type="button"
+        :disabled="state.busy"
+        :title="`把选中的 ${selectedImages.length} 张图片一起转入图片编辑（已在素材列表里的不会重复载入）`"
+        @click="sendSelectionToEditor"
+      >
+        转入编辑 ({{ selectedImages.length }})
+      </button>
+      <button
+        v-if="selectedImages.length >= 2"
+        class="btn is-mini is-ghost"
         type="button"
         :title="`用幻灯片播放选中的 ${selectedImages.length} 张图片`"
         @click="openSlideshow"
