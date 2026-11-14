@@ -17,8 +17,10 @@ import { setMode } from '../composables/useAppMode.js';
 import { formatDuration, formatSize, fetchLibraryVersions } from '../lib/library.js';
 import VersionCompareDialog from './VersionCompareDialog.vue';
 import VersionPreviewDialog from './VersionPreviewDialog.vue';
+import { useSimilarSearch } from '../composables/useSimilarSearch.js';
 
 const { state, folders, selectedEntries, selectedFolders, selectedSummary, actions } = useLibrary();
+const { actions: similarActions } = useSimilarSearch();
 const { confirm } = useConfirm();
 const { actions: videoActions } = useVideo();
 const { actions: audioActions } = useAudio();
@@ -404,6 +406,15 @@ function fileInfo(entry) {
           </button>
           <button v-if="single.kind === 'image'" class="btn is-block" type="button" @click="actions.openInEditor(single)">
             转入图片编辑
+          </button>
+          <button
+            v-if="single.kind === 'image'"
+            class="btn is-block is-ghost"
+            type="button"
+            title="按图片内容指纹在资源库里找相似图片（智能识图）"
+            @click="similarActions.openWith(single)"
+          >
+            查找相似
           </button>
           <button v-else-if="single.kind === 'video'" class="btn is-block" type="button" @click="openVideo(single)">
             在视频工作区打开

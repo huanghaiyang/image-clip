@@ -773,6 +773,10 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 | POST | `/api/library/rename` | 批量改名（逐条返回成功/失败） |
 | POST | `/api/library/move` | 批量移动（文件与目录） |
 | POST | `/api/library/delete` | 批量删除 |
+| GET | `/api/library/similar?path=&limit=` | 相似资源检索：以资源库里的图片为查询（dHash，见 §10.9） |
+| POST | `/api/library/similar?limit=` | 智能识图：body 为图片字节，按内容找相似图片 |
+| GET | `/api/library/similar/index` | 指纹索引状态（running/queued/indexed/totalImages/done/failed） |
+| POST | `/api/library/similar/index` | 为存量图片补建指纹（`{force:true}` 整库重算，后台执行） |
 | GET | `/api/video/health` | FFmpeg 可用性、版本、搜索过的路径 |
 | GET | `/api/video/probe?path=` | ffprobe 元信息（时长/帧率/编码/音轨） |
 | GET | `/api/video/frame?path=&t=&w=` | 取指定时刻的单帧 JPEG（逐帧比对 / 封面；`t` 秒、`w` 64–1280） |
@@ -780,7 +784,46 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 | POST | `/api/video/frames` | 截帧（`mode`+`interval`/`count`/`times`、`format`、`width`、`prefix`、`dir`） |
 | POST | `/api/video/audio` | 提取音轨（`format`、`name`、`dir`） |
 
-### 10.9 就地保存（覆盖当前素材）
+### 10.9 智能识图 / 相似资源检索（`phash.js` + `useSimilarSearch`）
+
+不依赖模型、纯本地的「以图搜图」：
+
+* **指纹（v2）**：`server/src/phash.js` 的 `computeSignature()` 一次解码同时算三部分：
+  * **结构**：灰度缩到 9×8 比较相邻像素 → 64 位 dHash（对缩放/再压缩不敏感）；
+  * **颜色**：64×64 采样，按 YCbCr 的色度 (Cb,Cr) 做 8×8 直方图 + 8 档明度直方图，透明像素跳过、
+    并按 alpha·色度加权 —— 深色背景不主导，抠图比较的是主体颜色；
+  * **构图**：覆盖率（不透明像素占比）与宽高比。
+  采样前先按 alpha / 纯色边 `trim()`，同一张图加透明留边、白底留边后仍然几乎一致。
+  只用结构哈希时“居中的花”和“居中的蝴蝶”会被误判（轮廓都是中间一坨）；加颜色后蓝蝴蝶 vs 绿/红花立刻分开。
+* **综合相似度**：`0.55 × 结构 + 0.35 × 颜色 + 0.05 × 宽高比 + 0.05 × 覆盖率`（`signatureSimilarity()`），
+  结果同时返回分项，面板上显示「结构 68% · 颜色 91%」。默认 `minScore=0.55` 过滤噪声：
+  实测石蒜花查相似 40 个结果里 0 张蝴蝶（蝴蝶最高只有 0.48），蝴蝶查相似只回蝴蝶（花最高 0.48）。
+* **索引格式**：`phash-index.json` 带 `version: 2`，旧版（只有 hash）的索引会被丢弃并自动在后台上重建。
+* **索引**：指纹按 `路径 + mtime + size` 缓存在 `data/cache/phash-index.json`（首次检索时为整库建索引，
+  实测 142 张约 6s，之后命中缓存约 0.2s）；文件被覆盖/改名后 mtime 变化会自动重算。
+* **指纹全自动维护**（`ensurePhashIndex` / `phashTouch` / `phashSchedule`）：
+  * 服务启动 1.5s 后后台为**存量图片**补指纹（`IMAGE_CLIP_PHASH_AUTO=0` 可关掉）；
+  * 每次磁盘扫描（列表刷新、检索）都会发现「缺指纹 / 指纹过期」的图片并自动排队补；
+  * 写操作后**即时**入队：上传 / 覆盖上传、复制、移动改名（指纹跟着路径迁移，不重算）、
+    回收站恢复、历史版本恢复、视频截帧写盘；
+  * 删除（含目录）时同步清掉指纹；
+  * 队列按并发 2 在后台跑，一轮结束立刻落盘；`GET /api/library/similar/index` 查状态，
+    `POST /api/library/similar/index`（`force=1` 整库重算，实测 142 张约 8s）触发补建。
+  * 资源库工具栏按钮会显示 `指纹 142` / `生成指纹 120/142` / `重建 9/142` 并自适应轮询（建索引时 0.8s 一次）。
+* **分档**：综合分 ≥97% 几乎相同 / ≥85% 高度相似 / ≥70% 相似 / ≥55% 有点像（`web/src/lib/similar.js`）。
+* **接口**：
+  * `GET /api/library/similar?path=&limit=&minScore=` —— 以资源库里的图片为查询（limit 默认 60，minScore 默认 0.55，传 0 可看全部）；
+  * `POST /api/library/similar?limit=` —— body 为图片字节，做「智能识图」（拖入 / 粘贴 / 选文件都可）。
+* **界面**：资源库工具栏「智能识图」、检查器单图「查找相似」打开同一个面板：
+  左侧是查询图（可随时换图），右侧按综合相似度排序列出结果（最多 60 条，滚动查看），
+  单击在资源库定位并选中（会自动清掉搜索词，否则目标可能被过滤掉），双击打开预览。
+  指纹只在本机计算，不上传任何外部服务。
+* **图片展示**：结果卡片用 4:3 比例盒子 + `object-fit: contain`，并请求 480px 缩略图（2× DPR，不糊）；
+  图片区用纯色深底而不是棋盘格 —— 半透明/抠图素材不会“透出格子”，整张图看起来是完整的。
+  已巡检：服务端缩略图对全部 142 张图都保持原宽高比（无裁切），其他页面（资源库、图片处理、视频、音频、
+  回收站、版本对比、上传、幻灯片）的 `<img>` 全部是 `contain`，不存在同样的裁切问题。
+
+### 10.10 就地保存（覆盖当前素材）
 
 各图片工具除了「生成新素材」之外都提供「保存到当前素材」：
 
@@ -795,7 +838,7 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
   是否需要重新导出；橡皮擦 / 像素笔绘 / 水印去除的编辑层用 `item.bitmap` / `item.imageData.data`
   的引用做基线，换了像素就重建；各舞台的 `pixelVersion` watch 触发重绘。
 
-### 10.10 历史版本对比
+### 10.11 历史版本对比
 
 资源库检查器的「历史版本」每行除了预览 / 恢复，还有 **对比**：把选中的历史版本和当前文件并排放在同一个
 对话框里比。服务端在覆盖上传、恢复版本、就地保存前都会 `snapshotVersion`，版本文件存在
@@ -826,7 +869,7 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 底部可直接「恢复这一版」或「与当前对比」。视频 / 音频版本没有单帧图片，点「预览」会直接进对比面板
 （逐帧 / 波形）。
 
-### 10.11 资源加载提速
+### 10.12 资源加载提速
 
 资源都在本机，瓶颈不是带宽而是 **IO 次数 / 主线程解码 / 启动时的模块编译**：
 
@@ -846,7 +889,7 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
   编译（冷启动实测 DCL 约 3.5s → 0.6s 量级；代价是 dev server 启动多花 1~2s）。
   改这个配置需要重启 `npm run dev` 才生效。
 
-### 10.12 测试
+### 10.13 测试
 
 `npm test` 里新增了几组共享算法与前端纯逻辑单测：
 
@@ -857,6 +900,11 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 * `web/test/atlas.test.js`：图集统一输出尺寸（同尺寸 / 混合尺寸 / 空输入）与居中适配（等比铺满、留边不拉伸）；
 * `web/test/sprite-merge.test.js`：多图合并精灵图的排版（混合尺寸取最大单元格、自动列数、列数钳制、间距、行优先原点）；
 * `web/test/asset-view.test.js`：素材面板界面现场的导入/导出归一化（非法 tab、脏滚动值、往返一致性）；
+* `server/test/phash.test.js`：dHash 指纹（同图一致、缩放/重编码/透明留边仍近似、不同构图距离更大）、
+  综合指纹（同图 score=1、缩放后 ≥0.85、同形状不同颜色被颜色拉低、旧版 hash-only 条目判为过期）；
+* `server/test/phash-index.test.js`：指纹索引维护（存量全量补建、二次调用幂等、扫描发现新图自动补、
+  写操作 phashTouch 立即排队、改名迁移/删除清理/force 重算、索引落盘）；
+* `web/test/similar.test.js`：相似度文案分档、百分比/距离格式化、结果排序与 minScore 过滤、汇总文案；
 * `web/test/async.test.js`：`mapLimit` 的顺序、并发上限、空列表与错误冒泡；
 * `web/test/version-compare.test.js`：逐像素差异（透明像素 / 单通道偏色 / 阈值 / 长度不足）、
   波形降采样与列比较（列数不一致）、帧号 ⇄ 秒数换算与时间码格式化。

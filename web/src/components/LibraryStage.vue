@@ -8,7 +8,7 @@
  *  - 改名入口：卡片 / 树形行上的 ✎ 打开全局重命名弹窗，右侧检查器也可改名；
  *  - 右键不处理，批量操作都在右侧检查器里。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 
 import { useLibrary } from '../composables/useLibrary.js';
 import { useWorkspace } from '../composables/useWorkspace.js';
@@ -18,11 +18,13 @@ import { useRenamePrompt } from '../composables/useRenamePrompt.js';
 import { useConfirm } from '../composables/useConfirm.js';
 import { useSlideshowPrefs } from '../composables/useSlideshowPrefs.js';
 import { setMode } from '../composables/useAppMode.js';
-import { formatDuration, formatSize, libraryFileUrl, libraryThumbUrl } from '../lib/library.js';
+import { fetchPhashStatus, formatDuration, formatSize, libraryFileUrl, libraryThumbUrl, startPhashIndex } from '../lib/library.js';
 import { buildResourceTree, flattenResourceTree } from '../lib/resourceTree.js';
 import LibrarySlideshow from './LibrarySlideshow.vue';
 import TrashDialog from './TrashDialog.vue';
 import ViewToggle from './ui/ViewToggle.vue';
+import SimilarSearchDialog from './SimilarSearchDialog.vue';
+import { useSimilarSearch } from '../composables/useSimilarSearch.js';
 
 const {
   state,
@@ -116,6 +118,102 @@ const treeRoot = computed(() => {
 const treeRows = computed(() => flattenResourceTree(treeRoot.value, collapsed.value));
 
 /** 选中的图片，按当前列表的可见顺序排列（树形视图包含子树里的图片）。 */
+const { actions: similarActions } = useSimilarSearch();
+
+// --------------------------------------------------------------- 指纹索引（相似检索用）
+// 服务端会在启动 / 扫描发现新图时自动补指纹，这里只是把进度亮出来 + 提供手动补建入口。
+const phashIndex = reactive({ running: false, queued: 0, indexed: 0, totalImages: 0, done: 0, failed: 0 });
+let phashTimer = 0;
+
+const phashLabel = computed(() => {
+  const status = phashIndex;
+  const total = status.totalImages || 0;
+  const indexed = status.indexed || 0;
+  if (status.running || status.queued) {
+    // 整库重建时 indexed 一直是满的（旧指纹还在），进度要看本轮 done；
+    // 补建缺失时 indexed 会随计算增长，用 indexed 更直观。
+    const rebuilding = total > 0 && indexed >= total && (status.done > 0 || status.queued > 0);
+    const shown = rebuilding ? Math.min(status.done, total) : total ? Math.min(indexed, total) : indexed;
+    const prefix = rebuilding ? '重建' : '建指纹';
+    return `${prefix} ${shown}${total ? `/${total}` : ''}`;
+  }
+  if (total && indexed < total) return `生成指纹 ${indexed}/${total}`;
+  if (indexed) return `指纹 ${indexed}`;
+  return '生成指纹';
+});
+
+const phashTitle = computed(() => {
+  const status = phashIndex;
+  if (status.running || status.queued) {
+    return `正在后台为图片生成内容指纹（已入队 ${status.queued} 张）—— 相似检索会自动用上`;
+  }
+  if (status.totalImages && status.indexed >= status.totalImages) {
+    return '全部图片都已生成指纹；点击可重建全部（图片多时需要一段时间）';
+  }
+  if (status.totalImages) {
+    return `还有 ${Math.max(0, status.totalImages - status.indexed)} 张没有指纹，点击立即补建`;
+  }
+  return '为资源库里的图片生成内容指纹（相似检索 / 智能识图用）';
+});
+
+async function refreshPhashStatus() {
+  try {
+    const status = await fetchPhashStatus();
+    Object.assign(phashIndex, status);
+  } catch {
+    // 状态读取失败不影响资源库本身
+  }
+}
+
+/** 自适应轮询：建指纹时 0.8s 一次看进度，空闲时 5s 一次（新资源可能随时进来）。 */
+function schedulePhashPoll(delay) {
+  if (phashTimer) window.clearTimeout(phashTimer);
+  phashTimer = window.setTimeout(async () => {
+    phashTimer = 0;
+    await refreshPhashStatus();
+    schedulePhashPoll(phashIndex.running || phashIndex.queued ? 800 : 5000);
+  }, delay);
+}
+
+async function generatePhash({ force = false } = {}) {
+  try {
+    const status = await startPhashIndex({ force });
+    Object.assign(phashIndex, status);
+    // 刚启动：马上进入快轮询，进度条能跟着走
+    schedulePhashPoll(400);
+  } catch (err) {
+    state.error = `指纹索引启动失败：${err.message}`;
+  }
+}
+
+async function onPhashClick() {
+  if (phashIndex.running) return;
+  if (phashIndex.totalImages && phashIndex.indexed >= phashIndex.totalImages) {
+    const ok = await confirm({
+      title: '重建全部指纹',
+      message: '重新为资源库里的全部图片计算指纹？图片很多时会占用一点时间。',
+      confirmText: '重建',
+    });
+    if (ok) await generatePhash({ force: true });
+    return;
+  }
+  await generatePhash();
+}
+
+/**
+ * 智能识图：选中一张图片时以它为查询；否则打开空面板，支持拖入 / 粘贴 / 选择一张图。
+ */
+function openSimilarSearch() {
+  if (state.selected.length === 1) {
+    const entry = actions.entryByPath(state.selected[0]);
+    if (entry?.kind === 'image') {
+      similarActions.openWith(entry);
+      return;
+    }
+  }
+  similarActions.openBlank();
+}
+
 /**
  * 批量转入图片编辑：把选中的图片一起加入图片工作区的「当前素材」。
  * openInEditor 支持数组，已在素材列表里的图片不会重复下载。
@@ -375,6 +473,8 @@ watch(
 );
 
 onMounted(() => {
+  void refreshPhashStatus();
+  schedulePhashPoll(5000);
   window.addEventListener('keydown', onPreviewKey);
   sentinelObserver = new IntersectionObserver(
     (records) => {
@@ -391,6 +491,8 @@ watch(listSentinel, (el, prev) => {
 });
 
 onBeforeUnmount(() => {
+  if (phashTimer) window.clearTimeout(phashTimer);
+  phashTimer = 0;
   window.removeEventListener('keydown', onPreviewKey);
   sentinelObserver?.disconnect();
   sentinelObserver = null;
@@ -499,6 +601,23 @@ onBeforeUnmount(() => {
         资源管理器
       </button>
       <button class="btn is-mini is-ghost" type="button" :disabled="state.refreshing" @click="actions.refresh()">刷新</button>
+      <button
+        class="btn is-mini"
+        type="button"
+        title="智能识图：按图片内容指纹找相似资源（选中一张图时以它为查询，也可以拖入/粘贴一张图搜）"
+        @click="openSimilarSearch"
+      >
+        智能识图
+      </button>
+      <button
+        class="btn is-mini is-ghost"
+        type="button"
+        :disabled="phashIndex.running"
+        :title="phashTitle"
+        @click="onPhashClick"
+      >
+        {{ phashLabel }}
+      </button>
       <button
         class="btn is-mini is-ghost"
         type="button"
@@ -798,6 +917,8 @@ onBeforeUnmount(() => {
     />
     <!-- 回收站：删除的资源先放这里，可预览、恢复或彻底删除 -->
     <TrashDialog v-if="trashOpen" :open="trashOpen" @close="trashOpen = false" />
+    <!-- 智能识图：以图搜图 / 找相似资源（指纹本地计算） -->
+    <SimilarSearchDialog />
   </section>
 </template>
 
@@ -861,13 +982,27 @@ onBeforeUnmount(() => {
 
 .subbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 6px 10px;
   padding: 6px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--panel-2);
   font-size: 10px;
   color: var(--text-muted);
+}
+
+/* 资源库的操作按钮比较多：固定住筛选/排序的宽度，放不下时整排换行，
+   而不是把「全部/图片/视频」挤成竖排文字。 */
+.subbar .segmented,
+.subbar .sort,
+.subbar .count {
+  flex: none;
+}
+
+.subbar .seg,
+.subbar .btn {
+  white-space: nowrap;
 }
 
 .segmented {
@@ -1181,6 +1316,7 @@ onBeforeUnmount(() => {
 .thumb-backdrop {
   position: absolute;
   inset: -12%;
+  z-index: 0;
   background-position: center;
   background-size: cover;
   filter: blur(14px) brightness(0.42) saturate(0.9);
@@ -1189,12 +1325,17 @@ onBeforeUnmount(() => {
 }
 
 .thumb-icon {
+  position: relative;
+  z-index: 2;
   font-size: 22px;
   color: var(--text-muted);
 }
 
+/* 徽标都画在缩略图之上：.thumb img 是 z-index:1（视频模糊铺底之后），
+   徽标若停留在 auto 会被图片盖住，只透过 object-fit:contain 的透明留边露出一半。 */
 .badge-size {
   position: absolute;
+  z-index: 2;
   left: 4px;
   top: 4px;
   padding: 0 4px;
@@ -1207,6 +1348,7 @@ onBeforeUnmount(() => {
 
 .badge-video {
   position: absolute;
+  z-index: 2;
   right: 4px;
   bottom: 4px;
   padding: 0 4px;
@@ -1219,6 +1361,7 @@ onBeforeUnmount(() => {
 /* 正在编辑：卡片/树形行上的蓝色徽标，区别于多选高亮 */
 .badge-editing {
   position: absolute;
+  z-index: 2;
   left: 4px;
   bottom: 4px;
   padding: 0 4px;
@@ -1241,6 +1384,7 @@ onBeforeUnmount(() => {
 
 .badge-dup {
   position: absolute;
+  z-index: 2;
   right: 4px;
   top: 4px;
   padding: 0 4px;
@@ -1351,6 +1495,7 @@ onBeforeUnmount(() => {
 
 .thumb-rename {
   position: absolute;
+  z-index: 2;
   top: 4px;
   right: 4px;
   display: grid;

@@ -28,6 +28,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { VideoError, makeVideoPoster, probeVideo } from './ffmpeg.js';
+import { SIGNATURE_VERSION, computeSignature, isValidSignature, signatureSimilarity } from './phash.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '../..');
@@ -80,6 +81,8 @@ export function createLibrary(options = {}) {
         await fs.mkdir(root, { recursive: true });
         await fs.mkdir(thumbnailRoot, { recursive: true });
         await loadMeta();
+        // 启动后自动为资源库里已有的图片补指纹（后台跑，不挡首个请求）
+        scheduleWarmPhashIndex();
         return api;
       })();
     }
@@ -258,6 +261,8 @@ export function createLibrary(options = {}) {
         stats,
       };
       scanCache[cacheKey] = { at: Date.now(), version: versionAtStart, data };
+      // 扫描结果里发现没指纹 / 指纹过期的图片 → 后台补，保证“新增资源自动生成指纹”
+      void phashNoteScan(entries);
       return data;
     })()
       .catch((err) => {
@@ -771,6 +776,7 @@ export function createLibrary(options = {}) {
     // 整批改名完成后再迁移关联索引（文件夹会连子文件一起迁移）
     await moveVersions(moved);
     await moveMeta(moved);
+    movePhash(moved);
 
     const failures = prepared.filter((p) => p.ok === false && !p.fromRel);
     for (const failure of failures) results.push({ from: failure.from, ok: false, error: failure.error });
@@ -837,6 +843,7 @@ export function createLibrary(options = {}) {
     // 移动完成后统一迁移历史版本索引与元数据缓存（文件夹会连子文件一起迁移）
     await moveVersions(moved);
     await moveMeta(moved);
+    movePhash(moved);
     return results;
   }
 
@@ -863,6 +870,8 @@ export function createLibrary(options = {}) {
         const { abs: dest, name: finalName } = await uniqueTarget(targetDir, path.basename(abs));
         await fs.cp(abs, dest, { recursive: true });
         results.push({ from: rel, ok: true, to: toRel(dest), name: finalName });
+        // 复制出来的是新文件：立刻排队补指纹（目录递归）
+        void phashTouchTree(toRel(dest));
       } catch (err) {
         results.push({ from: rel, ok: false, error: err.message });
       }
@@ -928,6 +937,7 @@ export function createLibrary(options = {}) {
           await fs.cp(abs, path.join(itemDir, payload), { recursive: true });
           await fs.rm(abs, { recursive: true, force: true });
         }
+        phashForgetTree(rel);
         results.push({ path: rel, ok: true, id });
       } catch (err) {
         if (itemDir) await fs.rm(itemDir, { recursive: true, force: true }).catch(() => {});
@@ -1067,6 +1077,7 @@ export function createLibrary(options = {}) {
         const restoredRel = toRel(dest);
         await moveVersions([{ from: record.path, to: restoredRel }]);
         await moveMeta([{ from: record.path, to: restoredRel }]);
+        void phashTouchTree(restoredRel);
         results.push({ id, ok: true, path: restoredRel, name: finalName });
       } catch (err) {
         results.push({ id, ok: false, error: err.message });
@@ -1189,6 +1200,8 @@ export function createLibrary(options = {}) {
     const { abs } = resolve(relPath, { allowRoot: false });
     await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.copyFile(source, abs);
+    // 内容是历史版本的：重新生成指纹
+    phashTouch(relPath);
     return entryByRel(relPath);
   }
 
@@ -1380,6 +1393,469 @@ export function createLibrary(options = {}) {
     };
   }
 
+  // ------------------------------------------------------------- 相似资源检索（智能识图）
+  //
+  // 用 dHash 指纹做「以图搜图」：指纹按 路径 + mtime + size 缓存在
+  // `data/cache/phash-index.json`，文件被覆盖 / 改名后会自然失效重算。
+  // 搜索只在本地比较 64 位指纹，不联网、不依赖模型。
+  const PHASH_FILE = 'phash-index.json';
+  let phashIndex = null;
+  let phashLoading = null;
+  let phashSaveTimer = null;
+
+  async function loadPhashIndex() {
+    if (phashIndex) return phashIndex;
+    if (phashLoading) return phashLoading;
+    phashLoading = (async () => {
+      const index = new Map();
+      try {
+        const raw = await fs.readFile(path.join(cacheRoot, PHASH_FILE), 'utf8');
+        const data = JSON.parse(raw);
+        // 指纹格式升级（v2 加了颜色直方图）：旧索引直接丢弃，走后台重算
+        if (Number(data?.version) === SIGNATURE_VERSION) {
+          for (const [key, value] of Object.entries(data?.entries ?? {})) {
+            if (!isValidSignature(value)) continue;
+            index.set(key, {
+              mtime: Number(value.mtime) || 0,
+              size: Number(value.size) || 0,
+              hash: String(value.hash).toLowerCase(),
+              chroma: value.chroma.map(Number),
+              luma: value.luma.map(Number),
+              coverage: Number(value.coverage),
+              aspect: Number(value.aspect),
+            });
+          }
+        }
+      } catch {
+        // 首次运行 / 缓存损坏：当作空索引
+      }
+      phashIndex = index;
+      return index;
+    })().finally(() => {
+      phashLoading = null;
+    });
+    return phashLoading;
+  }
+
+  /** 立刻把指纹索引写到磁盘（一轮队列跑完时会调用，保证进程退出也不丢）。 */
+  async function writePhashIndex() {
+    try {
+      await fs.mkdir(cacheRoot, { recursive: true });
+      const entries = {};
+      for (const [key, value] of phashIndex ?? []) entries[key] = value;
+      await fs.writeFile(path.join(cacheRoot, PHASH_FILE), JSON.stringify({ version: SIGNATURE_VERSION, entries }));
+    } catch (err) {
+      console.warn('[library] 指纹索引写入失败:', err.message);
+    }
+  }
+
+  /** 指纹索引落盘（防抖 1.5s，避免批量计算时反复写盘）。 */
+  function schedulePhashSave() {
+    if (phashSaveTimer) return;
+    phashSaveTimer = setTimeout(async () => {
+      phashSaveTimer = null;
+      await writePhashIndex();
+    }, 1500);
+    phashSaveTimer.unref?.();
+  }
+
+  // ---- 指纹队列：存量补建 + 新增资源即时补 ----
+
+  /** 待计算指纹的相对路径 → 是否强制重算（Map 去重，worker 消费）。 */
+  const phashPending = new Map();
+  let phashWorker = null;
+  let phashDraining = false;
+  let phashWarmed = false;
+  let phashRun = { running: false, startedAt: 0, finishedAt: 0, done: 0, failed: 0, total: 0, lastError: '' };
+
+  /** 指纹索引状态：前端画进度、判断是否还有漏网的图。 */
+  function phashStatus() {
+    return {
+      running: phashDraining,
+      queued: phashPending.size,
+      indexed: phashIndex?.size ?? 0,
+      totalImages: phashRun.total,
+      done: phashRun.done,
+      failed: phashRun.failed,
+      startedAt: phashRun.startedAt,
+      finishedAt: phashRun.finishedAt,
+      lastError: phashRun.lastError,
+    };
+  }
+
+  function markPhashRunRunning() {
+    if (!phashRun.running) {
+      // 新的一轮：计数量重新开始（indexed 是累计值，不受影响）
+      phashRun = {
+        ...phashRun,
+        running: true,
+        startedAt: Date.now(),
+        finishedAt: 0,
+        done: 0,
+        failed: 0,
+        lastError: '',
+      };
+    }
+  }
+
+  /**
+   * 把若干路径加入指纹队列；worker 会在后台按并发 2 慢慢算。
+   * @param {Iterable<string>} rels 相对路径
+   * @param {boolean} [force] true = 即使缓存命中也要重算（整库重建时用）
+   */
+  function phashSchedule(rels, force = false) {
+    let added = 0;
+    for (const rel of rels ?? []) {
+      const clean = String(rel ?? '').replace(/\\/g, '/');
+      if (!clean) continue;
+      if (!phashPending.has(clean)) {
+        phashPending.set(clean, Boolean(force));
+        added += 1;
+      } else if (force && !phashPending.get(clean)) {
+        phashPending.set(clean, true);
+      }
+    }
+    if (added) {
+      markPhashRunRunning();
+      schedulePhashWorker();
+    }
+    return added;
+  }
+
+  /** 单个新资源写入后立刻排队（上传 / 复制 / 截帧 / 恢复等）。 */
+  function phashTouch(rel) {
+    // 新文件已落盘：让扫描缓存失效，下一次列表/检索就能看到它，不会被旧缓存挡掉
+    invalidateScan();
+    return phashSchedule([rel]);
+  }
+
+  /** 删除文件后从索引里移除，避免索引里留幽灵条目。 */
+  function phashForget(rel) {
+    const index = phashIndex;
+    const clean = String(rel ?? '').replace(/\\/g, '/');
+    if (!index || !clean || !index.delete(clean)) return false;
+    schedulePhashSave();
+    return true;
+  }
+
+  /** 改名 / 移动：指纹跟着路径走（mtime 不变，不需要重算）。 */
+  function phashTransfer(fromRel, toRel) {
+    const index = phashIndex;
+    const from = String(fromRel ?? '').replace(/\\/g, '/');
+    const to = String(toRel ?? '').replace(/\\/g, '/');
+    if (!index || !from || !to) return;
+    const record = index.get(from);
+    if (!record) {
+      phashTouch(to);
+      return;
+    }
+    index.set(to, record);
+    index.delete(from);
+    schedulePhashSave();
+  }
+
+  function schedulePhashWorker() {
+    if (phashWorker) return;
+    phashWorker = setTimeout(() => {
+      phashWorker = null;
+      void drainPhashQueue();
+    }, 80);
+    phashWorker.unref?.();
+  }
+
+  /** 文件夹/文件改名或移动后批量迁移指纹（含子路径）。 */
+  function movePhash(moved) {
+    if (!Array.isArray(moved) || !moved.length) return;
+    const index = phashIndex;
+    if (!index) {
+      for (const item of moved) phashTouch(item.to);
+      return;
+    }
+    let changed = 0;
+    for (const item of moved) {
+      const fromRel = String(item?.from ?? '').replace(/\\/g, '/');
+      const targetRel = String(item?.to ?? '').replace(/\\/g, '/');
+      if (!fromRel || !targetRel || fromRel === targetRel) continue;
+      const prefix = `${fromRel}/`;
+      const targetPrefix = `${targetRel}/`;
+      for (const [key, value] of [...index]) {
+        if (key === fromRel) {
+          index.delete(key);
+          index.set(targetRel, value);
+          changed += 1;
+        } else if (key.startsWith(prefix)) {
+          index.delete(key);
+          index.set(`${targetPrefix}${key.slice(prefix.length)}`, value);
+          changed += 1;
+        }
+      }
+    }
+    if (changed) schedulePhashSave();
+  }
+
+  /** 删除（含目录）时把指纹一并移除。 */
+  function phashForgetTree(rel) {
+    const index = phashIndex;
+    const clean = String(rel ?? '').replace(/\\/g, '/');
+    if (!index || !clean) return;
+    const prefix = `${clean}/`;
+    let changed = 0;
+    for (const key of [...index.keys()]) {
+      if (key === clean || key.startsWith(prefix)) {
+        index.delete(key);
+        changed += 1;
+      }
+    }
+    if (changed) schedulePhashSave();
+  }
+
+  /**
+   * 新写入的路径（文件或目录）补指纹：目录会递归列出图片逐个排队。
+   * 上传 / 复制 / 恢复 / 截帧写入后调用，新资源不用等下一次整库扫描。
+   */
+  async function phashTouchTree(rel) {
+    const { abs } = resolve(rel, { allowRoot: false });
+    const stat = await fs.stat(abs).catch(() => null);
+    if (!stat) return 0;
+    if (stat.isFile()) {
+      if (classify(abs).kind !== 'image') return 0;
+      phashTouch(toRel(abs));
+      return 1;
+    }
+    const stack = [abs];
+    const pending = [];
+    while (stack.length) {
+      const dir = stack.pop();
+      const dirents = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const dirent of dirents) {
+        if (dirent.name.startsWith('.')) continue;
+        const childAbs = path.join(dir, dirent.name);
+        if (dirent.isDirectory()) stack.push(childAbs);
+        else if (dirent.isFile() && classify(childAbs).kind === 'image') pending.push(toRel(childAbs));
+      }
+    }
+    phashSchedule(pending);
+    return pending.length;
+  }
+
+  /**
+   * 取某个文件路径的指纹（命中缓存时几乎零成本）。
+   * 内部会 stat 一次确认 mtime/size 没变；不是图片或文件已消失会返回 null / 清索引。
+   */
+  async function phashCompute(rel, { force = false } = {}) {
+    const { abs, rel: relPath } = resolve(rel, { allowRoot: false });
+    const { kind } = classify(relPath);
+    if (kind !== 'image') return null;
+    const stat = await fs.stat(abs).catch(() => null);
+    if (!stat?.isFile()) {
+      phashForget(relPath);
+      return null;
+    }
+    const mtime = Math.round(stat.mtimeMs);
+    const size = stat.size;
+    const index = await loadPhashIndex();
+    const cached = index.get(relPath);
+    if (!force && cached && cached.mtime === mtime && cached.size === size) return cached.hash;
+
+    const sharp = await getSharp();
+    if (!sharp) throw new LibraryError('服务端缺少 sharp，无法计算图片指纹', 'NO_SHARP', 500);
+    const buffer = await fs.readFile(abs);
+    const signature = await computeSignature(sharp, buffer);
+    const record = {
+      mtime,
+      size,
+      hash: signature.hash,
+      chroma: signature.chroma,
+      luma: signature.luma,
+      coverage: signature.coverage,
+      aspect: signature.aspect,
+    };
+    index.set(relPath, record);
+    schedulePhashSave();
+    return record;
+  }
+
+  /** 取某个图片条目完整的指纹（相似检索用；命中缓存时几乎零成本）。 */
+  async function signatureFor(entry, { force = false } = {}) {
+    const index = await loadPhashIndex();
+    const cached = index.get(entry.path);
+    if (!force && cached && cached.mtime === entry.mtime && cached.size === entry.bytes) return cached;
+    return phashCompute(entry.path, { force });
+  }
+
+  /** 只要结构哈希时（兼容旧调用）。 */
+  async function phashFor(entry, { force = false } = {}) {
+    const record = await signatureFor(entry, { force });
+    return record?.hash ?? null;
+  }
+
+  async function drainPhashQueue() {
+    if (phashDraining) return;
+    phashDraining = true;
+    markPhashRunRunning();
+    try {
+      while (phashPending.size) {
+        const batch = [...phashPending.entries()].slice(0, 6);
+        for (const [rel] of batch) phashPending.delete(rel);
+        await mapLimit(batch, 2, async ([rel, force]) => {
+          try {
+            await phashCompute(rel, { force });
+            phashRun.done += 1;
+          } catch (err) {
+            phashRun.failed += 1;
+            phashRun.lastError = err?.message ?? String(err);
+          }
+        });
+        const indexed = phashIndex?.size ?? 0;
+        if (phashRun.total < indexed) phashRun.total = indexed;
+      }
+    } finally {
+      if (!phashPending.size) {
+        phashRun.running = false;
+        phashRun.finishedAt = Date.now();
+        // 一轮跑完立刻落盘：不用等 1.5s 防抖，进程/测试随时关掉也不丢索引
+        await writePhashIndex();
+      }
+      phashDraining = false;
+      if (phashPending.size) schedulePhashWorker();
+    }
+  }
+
+  /**
+   * 为资源库里「所有缺指纹的图片」建索引（幂等）。
+   * @param {{force?:boolean, wait?:boolean}} [options] force=重算全部；wait=true 等全部算完再返回
+   */
+  async function ensurePhashIndex({ force = false, wait = true } = {}) {
+    const { entries: all } = await scan({ light: true });
+    const images = all.filter((entry) => entry.kind === 'image');
+    const index = await loadPhashIndex();
+    // 每次显式补建都按“新一轮”计数；已经在跑的后台任务不受影响
+    phashRun = { ...phashRun, done: 0, failed: 0, total: images.length, lastError: '' };
+    const stale = [];
+    for (const entry of images) {
+      const hit = index.get(entry.path);
+      if (force || !hit || hit.mtime !== entry.mtime || hit.size !== entry.bytes) stale.push(entry.path);
+    }
+    if (!stale.length) {
+      phashRun.running = false;
+      phashRun.finishedAt = Date.now();
+      return phashStatus();
+    }
+    phashSchedule(stale, force);
+    if (wait) {
+      // worker 是后台循环；这里等它把队列吃完再返回（建库/手动重建时用）
+      while (phashDraining || phashPending.size) {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+    }
+    return phashStatus();
+  }
+
+  /**
+   * 磁盘扫描后顺手补新文件的指纹：外部拷进来的、别的进程生成的资源也能自动补上。
+   * 做了 800ms 防抖，避免列表刷新时重复排队。
+   */
+  async function phashNoteScan(entries) {
+    try {
+      const index = await loadPhashIndex();
+      const stale = [];
+      for (const entry of entries) {
+        if (entry.kind !== 'image') continue;
+        const hit = index.get(entry.path);
+        if (!hit || hit.mtime !== entry.mtime || hit.size !== entry.bytes) stale.push(entry.path);
+      }
+      if (stale.length) {
+        if (phashRun.total < entries.length) phashRun.total = entries.filter((entry) => entry.kind === 'image').length;
+        phashSchedule(stale);
+      }
+    } catch {
+      // 补索引失败不影响列表返回
+    }
+  }
+
+  /** 服务启动后预热：给存量图片补指纹（可用 IMAGE_CLIP_PHASH_AUTO=0 关掉） */
+  function scheduleWarmPhashIndex() {
+    if (phashWarmed) return;
+    phashWarmed = true;
+    if (String(process.env.IMAGE_CLIP_PHASH_AUTO ?? '1') === '0') return;
+    const timer = setTimeout(() => {
+      void ensurePhashIndex().catch((err) => console.warn('[library] 指纹预热失败:', err.message));
+    }, 1500);
+    timer.unref?.();
+  }
+
+  /**
+   * 以图搜图：给定指纹（或资源库里的某个路径 / 一段图片字节），按汉明距离返回最像的图片。
+   * @param {{hash?:string, path?:string, buffer?:Buffer, limit?:number, minScore?:number, excludePath?:string}} options
+   */
+  async function findSimilar({ path: queryPath = '', buffer = null, limit = 60, minScore = 0.55 } = {}) {
+    const max = Math.max(1, Math.min(200, Math.round(Number(limit) || 60)));
+    const threshold = Math.max(0, Math.min(1, Number(minScore) || 0));
+    const { entries: allEntries } = await scan({ light: true });
+    const images = allEntries.filter((entry) => entry.kind === 'image');
+    if (!images.length) {
+      return { query: { path: '', hash: '', width: 0, height: 0 }, totalImages: 0, indexed: 0, indexing: false, queued: 0, results: [] };
+    }
+
+    const sharp = await getSharp();
+    if (!sharp) throw new LibraryError('服务端缺少 sharp，无法计算图片指纹', 'NO_SHARP', 500);
+
+    let querySignature = null;
+    let queryEntry = null;
+    if (buffer?.length) {
+      querySignature = await computeSignature(sharp, buffer);
+    } else if (queryPath) {
+      queryEntry = images.find((item) => item.path === queryPath);
+      if (!queryEntry) throw new LibraryError('没有找到这张图片', 'NOT_FOUND', 404);
+      querySignature = await signatureFor(queryEntry);
+    }
+    if (!querySignature) throw new LibraryError('需要一张图片（path 或上传字节）', 'NO_QUERY', 400);
+
+    const results = [];
+    await mapLimit(images, 6, async (entry) => {
+      try {
+        const signature = await signatureFor(entry);
+        const similarity = signatureSimilarity(querySignature, signature);
+        if (!similarity || similarity.score < threshold) return;
+        if (entry.path === (queryEntry?.path ?? '')) return;
+        results.push({
+          path: entry.path,
+          name: entry.name,
+          dir: entry.dir,
+          bytes: entry.bytes,
+          // mtime 让前端缩略图 URL 带上版本号，覆盖过的文件不会拿到旧缩略图
+          mtime: entry.mtime,
+          thumbUrl: entry.thumbUrl,
+          url: entry.url,
+          score: similarity.score,
+          structure: similarity.structure,
+          color: similarity.color,
+          distance: similarity.distance,
+        });
+      } catch {
+        // 单张读失败（文件被删/格式怪）不影响其它结果
+      }
+    });
+
+    results.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path, 'zh-Hans-CN'));
+    const index = await loadPhashIndex();
+    return {
+      query: {
+        path: queryEntry?.path ?? '',
+        hash: querySignature.hash,
+        width: queryEntry?.width ?? querySignature.width ?? 0,
+        height: queryEntry?.height ?? querySignature.height ?? 0,
+      },
+      totalImages: images.length,
+      indexed: index.size,
+      // 索引还在后台补建时，前端可以提示“结果可能暂不完整”
+      indexing: phashDraining || phashPending.size > 0,
+      queued: phashPending.size,
+      minScore: threshold,
+      results: results.slice(0, max),
+    };
+  }
+
   const api = {
     root,
     thumbnailRoot,
@@ -1412,6 +1888,15 @@ export function createLibrary(options = {}) {
     rememberChecksum,
     findDuplicateByChecksum,
     findDuplicates,
+    phashFor,
+    signatureFor,
+    phashStatus,
+    phashTouch,
+    phashTouchTree,
+    phashForget,
+    phashForgetTree,
+    ensurePhashIndex,
+    findSimilar,
     invalidate() {
       meta = null;
       versionsIndex = null;
@@ -1452,6 +1937,10 @@ export class LibraryError extends Error {
  *   POST /api/library/trash/purge          { ids } 或 { all:true }
  *   GET  /api/library/versions?path=       历史版本列表
  *   POST /api/library/versions/restore     { path, id }
+ *   GET  /api/library/similar?path=&limit= 相似资源检索（按 dHash 指纹，资源库内的图片）
+ *   POST /api/library/similar?limit=       上传一张图片做智能识图（以图搜图）
+ *   GET  /api/library/similar/index        指纹索引状态（已建 / 总数 / 队列 / 是否在跑）
+ *   POST /api/library/similar/index        为存量图片补建指纹（force=1 整库重算，后台执行）
  */
 export function createLibraryRouter(library) {
   const router = express.Router();
@@ -1516,6 +2005,73 @@ export function createLibraryRouter(library) {
     '/duplicates',
     wrap(async (req, res) => {
       res.json(await library.findDuplicates(req.query.dir ?? ''));
+    }),
+  );
+
+  /**
+   * 相似资源检索：按 dHash 指纹找资源库里最像的图片。
+   *  - GET  ?path=&limit=&minScore=  以资源库里的某张图为查询
+   *  - POST ?limit=&minScore=        直接上传一张图（智能识图 / 以图搜图），body 为图片字节
+   * 结果按汉明距离升序；score = 1 - distance/64（1 = 完全一致）。
+   */
+  /** 解析 limit/minScore：minScore=0 是合法值，不能用 `||` 兜底。 */
+  const parseLimit = (value, fallback = 60) => {
+    const num = Number(value);
+    return Number.isFinite(num) && num > 0 ? num : fallback;
+  };
+  const parseMinScore = (value, fallback = 0.55) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? Math.max(0, Math.min(1, num)) : fallback;
+  };
+
+  router.get(
+    '/similar',
+    wrap(async (req, res) => {
+      sendListJson(
+        res,
+        await library.findSimilar({
+          path: String(req.query.path ?? ''),
+          limit: parseLimit(req.query.limit),
+          minScore: parseMinScore(req.query.minScore),
+        }),
+      );
+    }),
+  );
+
+  router.post(
+    '/similar',
+    express.raw({ type: '*/*', limit: '48mb' }),
+    wrap(async (req, res) => {
+      const buffer = Buffer.isBuffer(req.body) ? req.body : null;
+      if (!buffer?.length) throw new LibraryError('请提供一张图片', 'EMPTY_BODY', 400);
+      res.json(
+        await library.findSimilar({
+          buffer,
+          limit: parseLimit(req.query.limit),
+          minScore: parseMinScore(req.query.minScore),
+        }),
+      );
+    }),
+  );
+
+  /** 指纹索引状态：已建 / 总数 / 队列 / 是否在跑。 */
+  router.get(
+    '/similar/index',
+    wrap(async (req, res) => {
+      res.json(library.phashStatus());
+    }),
+  );
+
+  /**
+   * 为存量资源补建指纹索引（幂等：只算缺失或过期的）。
+   * `?force=1` 或 body `{force:true}` 时整库重算；接口立即返回当前状态，实际计算在后台。
+   */
+  router.post(
+    '/similar/index',
+    jsonBody,
+    wrap(async (req, res) => {
+      const force = Boolean(req.body?.force) || String(req.query.force ?? '') === '1';
+      res.json(await library.ensurePhashIndex({ force, wait: false }));
     }),
   );
 
@@ -1613,6 +2169,8 @@ export function createLibraryRouter(library) {
       await fs.rename(temp, target.abs);
       // 落盘后立刻让扫描缓存失效，刷新时能看到新文件
       library.invalidateScan();
+      // 新增/覆盖的资源立刻生成指纹，相似检索不用等
+      library.phashTouch(target.rel);
       const entry = await library.entryByRel(target.rel);
       await library.rememberChecksum(target.rel, checksum);
       res.status(201).json({

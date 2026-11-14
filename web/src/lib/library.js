@@ -387,3 +387,60 @@ export function formatSize(bytes) {
   }
   return `${size >= 100 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`;
 }
+
+// --------------------------------------------------------------- 指纹索引（相似检索用）
+
+/** 指纹索引状态：{ running, queued, indexed, totalImages, done, failed, ... }。 */
+export async function fetchPhashStatus() {
+  const res = await fetch('/api/library/similar/index');
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || body.message || `读取指纹索引状态失败（HTTP ${res.status}）`);
+  return body;
+}
+
+/**
+ * 为资源库里缺指纹的图片补建索引（幂等）。
+ * @param {{force?:boolean}} [options] force=true 整库重算
+ */
+export async function startPhashIndex({ force = false } = {}) {
+  const res = await fetch('/api/library/similar/index', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force: Boolean(force) }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || body.message || `启动指纹索引失败（HTTP ${res.status}）`);
+  return body;
+}
+
+// --------------------------------------------------------------- 相似资源检索（智能识图）
+
+/**
+ * 相似资源检索：以资源库里已有的图片为查询。
+ * @param {string} path 相对资源库的路径
+ * @param {{limit?:number, minScore?:number}} [options]
+ */
+export async function fetchSimilarByPath(path, { limit = 60, minScore = 0.55 } = {}) {
+  const query = new URLSearchParams({ path: String(path ?? ''), limit: String(limit), minScore: String(minScore) });
+  const res = await fetch(`/api/library/similar?${query}`);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || body.message || `相似检索失败（HTTP ${res.status}）`);
+  return body;
+}
+
+/**
+ * 智能识图：上传一张图片（本地文件 / 剪贴板 / 未入库素材）作为查询。
+ * @param {Blob} blob 图片字节
+ * @param {{fileName?:string, limit?:number, minScore?:number}} [options]
+ */
+export async function fetchSimilarByImage(blob, { fileName = 'query.png', limit = 60, minScore = 0.55 } = {}) {
+  const query = new URLSearchParams({ limit: String(limit), minScore: String(minScore), name: fileName });
+  const res = await fetch(`/api/library/similar?${query}`, {
+    method: 'POST',
+    headers: { 'Content-Type': blob.type || 'application/octet-stream' },
+    body: blob,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || body.message || `识图失败（HTTP ${res.status}）`);
+  return body;
+}

@@ -256,11 +256,15 @@ export function createVideoRouter(library) {
       const entries = [];
       for (const file of result.files) {
         try {
-          entries.push(await library.entryByRel(path.relative(library.root, file.path).split(path.sep).join('/')));
+          const relFile = path.relative(library.root, file.path).split(path.sep).join('/');
+          entries.push(await library.entryByRel(relFile));
+          // 截出来的关键帧是新资源：立刻加入指纹队列，相似检索马上能用
+          library.phashTouch(relFile);
         } catch {
           /* 单条元数据读取失败不影响整体结果 */
         }
       }
+      library.invalidateScan();
 
       res.json({
         ok: true,
