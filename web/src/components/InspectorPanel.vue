@@ -1,6 +1,6 @@
 <script setup>
 /** 右侧检查器：检测参数 / 当前结果 / 导出（对应 Figma 的右侧属性面板）。 */
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import RangeField from './ui/RangeField.vue';
 import SwitchField from './ui/SwitchField.vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
@@ -60,6 +60,43 @@ const atlasFrameIndex = computed(() => {
 });
 const currentAtlasFrame = computed(() => atlasPreviewRows.value[atlasFrameIndex.value] ?? null);
 
+/**
+ * 播放器与「图片本体」区分：
+ * 播放器是深色舞台，图片本体单独一个带边框 + 阴影的框，框内才是棋盘（透明区域）。
+ * 这样图片的实际边界一目了然，不会把播放器背景误认成图片的一部分（看起来“比实际尺寸大”）。
+ */
+const atlasPlayerEl = ref(null);
+const atlasPlayerBox = reactive({ width: 0, height: 0 });
+
+function measureAtlasPlayer() {
+  const stage = atlasPlayerEl.value;
+  const frame = currentAtlasFrame.value;
+  if (!stage || !frame?.width || !frame?.height) return;
+  const availW = Math.max(80, stage.clientWidth - 48);
+  const availH = Math.max(80, stage.clientHeight - 48);
+  // 上限 4 倍：再大只是把像素放大成马赛克，预览没必要
+  const scale = Math.min(availW / frame.width, availH / frame.height, 4);
+  atlasPlayerBox.width = Math.max(1, Math.round(frame.width * scale));
+  atlasPlayerBox.height = Math.max(1, Math.round(frame.height * scale));
+}
+
+let atlasResizeObserver = null;
+
+function observeAtlasPlayer() {
+  atlasResizeObserver?.disconnect();
+  atlasResizeObserver = null;
+  const stage = atlasPlayerEl.value;
+  if (!stage || typeof ResizeObserver !== 'function') return;
+  atlasResizeObserver = new ResizeObserver(() => measureAtlasPlayer());
+  atlasResizeObserver.observe(stage);
+}
+
+watch(currentAtlasFrame, async () => {
+  await nextTick();
+  measureAtlasPlayer();
+  observeAtlasPlayer();
+});
+
 /** GIF 式播放：按选定帧率循环播放裁切后的帧。 */
 const ATLAS_FPS_OPTIONS = [6, 12, 24];
 const atlasPlayback = reactive({ playing: false, index: 0, fps: 12 });
@@ -108,20 +145,24 @@ async function openAtlasPreview() {
   if (atlasPreviewBusy.value || !trimAtlas.value) return;
   closeAtlasPreview();
   atlasPreviewBusy.value = true;
-  stopAtlasTimer();
-  atlasPlayback.playing = false;
-  atlasPlayback.index = 0;
-  const session = reactive({
-    count: trimAtlas.value.count,
-    total: trimAtlas.value.items.length,
-    done: 0,
-    results: [],
-    cancelled: false,
-    outSize: trimAtlas.value.outSize ? { ...trimAtlas.value.outSize } : null,
-  });
-  atlasPreview.value = session;
-  window.addEventListener('keydown', onAtlasPreviewKey);
   try {
+    stopAtlasTimer();
+    atlasPlayback.playing = false;
+    atlasPlayback.index = 0;
+    const session = reactive({
+      count: trimAtlas.value.count,
+      total: trimAtlas.value.items.length,
+      done: 0,
+      results: [],
+      cancelled: false,
+      outSize: trimAtlas.value.outSize ? { ...trimAtlas.value.outSize } : null,
+    });
+    atlasPreview.value = session;
+    window.addEventListener('keydown', onAtlasPreviewKey);
+    // 面板先挂载出来（播放器要量尺寸），再开始逐帧裁切
+    await nextTick();
+    measureAtlasPlayer();
+    observeAtlasPlayer();
     await actions.previewAtlasCrop({
       onResult: (row) => {
         // 生成过程中用户可能已经关掉面板：把已经建好的 object URL 立刻回收
@@ -146,6 +187,8 @@ async function openAtlasPreview() {
 
 function closeAtlasPreview() {
   window.removeEventListener('keydown', onAtlasPreviewKey);
+  atlasResizeObserver?.disconnect();
+  atlasResizeObserver = null;
   stopAtlasTimer();
   atlasPlayback.playing = false;
   const session = atlasPreview.value;
@@ -175,7 +218,11 @@ function onAtlasPreviewKey(event) {
   }
 }
 
-onBeforeUnmount(closeAtlasPreview);
+onBeforeUnmount(() => {
+  atlasResizeObserver?.disconnect();
+  atlasResizeObserver = null;
+  closeAtlasPreview();
+});
 
 const spriteMaxColumns = computed(() => Math.max(1, spriteGroup.value?.frames.length ?? 1));
 watch(spriteMaxColumns, (max) => {
@@ -526,12 +573,19 @@ const spritePlan = computed(() => {
           <span class="mono">正在裁切 {{ atlasPreview.done }} / {{ atlasPreview.total }}</span>
         </div>
 
-        <div class="atlas-player">
-          <img v-if="currentAtlasFrame" :src="currentAtlasFrame.url" :alt="currentAtlasFrame.name" />
+        <div ref="atlasPlayerEl" class="atlas-player">
+          <!-- 图片本体：按实际裁剪尺寸等比缩放的独立框（棋盘 + 描边 + 阴影），与深色播放器舞台区分开 -->
+          <div
+            v-if="currentAtlasFrame"
+            class="atlas-frame"
+            :style="{ width: `${atlasPlayerBox.width}px`, height: `${atlasPlayerBox.height}px` }"
+          >
+            <img :src="currentAtlasFrame.url" :alt="currentAtlasFrame.name" />
+          </div>
           <span v-else class="atlas-player-hint muted">正在裁切第一帧…</span>
           <span v-if="currentAtlasFrame" class="atlas-player-badge mono">
             第 {{ atlasFrameIndex + 1 }} / {{ atlasPreviewRows.length }} 帧
-            <template v-if="atlasOutputSize"> · {{ atlasOutputSize.width }}×{{ atlasOutputSize.height }}</template>
+            <template v-if="atlasOutputSize"> · 实际 {{ atlasOutputSize.width }}×{{ atlasOutputSize.height }}</template>
           </span>
         </div>
 
@@ -756,6 +810,8 @@ const spritePlan = computed(() => {
   display: flex;
   flex-direction: column;
   width: min(960px, 100%);
+  /* 给定高度，播放器（flex:1）才能拿到足够空间放大画面 */
+  height: min(640px, 86vh);
   max-height: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg, 10px);
@@ -834,22 +890,32 @@ const spritePlan = computed(() => {
   align-items: center;
   justify-content: center;
   flex: 1;
-  min-height: 180px;
+  min-height: 220px;
   margin: 12px 16px 0;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  /* 棋盘格底：透明区域直接能看出来 */
-  background-color: var(--panel-2);
-  background-image: repeating-conic-gradient(rgba(255, 255, 255, 0.08) 0% 25%, transparent 0% 50%);
-  background-size: 12px 12px;
+  /* 播放器舞台是纯深色：和图片内部的透明棋盘区分开，避免把背景当成图片 */
+  background: #0f0f12;
   overflow: hidden;
 }
 
-.atlas-player img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
+/* 图片本体：尺寸完全由实际像素按比例缩放得到，棋盘只出现在图片范围内 */
+.atlas-frame {
+  position: relative;
+  flex: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background-color: var(--panel-2);
+  background-image: repeating-conic-gradient(rgba(255, 255, 255, 0.1) 0% 25%, transparent 0% 50%);
+  background-size: 12px 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.atlas-frame img {
   display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .atlas-player-hint {
