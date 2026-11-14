@@ -244,6 +244,22 @@ export function probeLibraryVideo(path) {
   return requestJson(`/api/video/probe?path=${encodeURIComponent(path)}`, { cache: 'no-store' });
 }
 
+/**
+ * 视频某一时刻的单帧图片 URL（服务端 ffmpeg 解码成 JPEG）。
+ *
+ * 逐帧比对用它而不是直接播放 <video>：容器/编码（HEVC、ProRes…）浏览器可能解不了，
+ * 但 JPEG 一定显示得出来；帧画面也天然可放进 canvas 做像素差。
+ * version 建议传文件 mtime：换版本后 URL 变化，配合服务端长缓存不会串图。
+ */
+export function videoFrameUrl(path, time, { width = 640, version = 0 } = {}) {
+  const params = new URLSearchParams();
+  params.set('path', path);
+  params.set('t', Math.max(0, Number(time) || 0).toFixed(3));
+  params.set('w', String(Math.max(240, Math.min(1280, Math.round(width) || 640))));
+  if (version) params.set('v', String(version));
+  return `/api/video/frame?${params.toString()}`;
+}
+
 export function fetchFilmstrip(path, { count = 16, width = 160 } = {}) {
   return requestJson('/api/video/filmstrip', {
     method: 'POST',

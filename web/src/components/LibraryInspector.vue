@@ -15,6 +15,7 @@ import { useVideo } from '../composables/useVideo.js';
 import { useAudio } from '../composables/useAudio.js';
 import { setMode } from '../composables/useAppMode.js';
 import { formatDuration, formatSize, fetchLibraryVersions } from '../lib/library.js';
+import VersionCompareDialog from './VersionCompareDialog.vue';
 
 const { state, folders, selectedEntries, selectedFolders, selectedSummary, actions } = useLibrary();
 const { confirm } = useConfirm();
@@ -43,6 +44,10 @@ const versions = ref([]);
 const versionsLoading = ref(false);
 const versionsError = ref('');
 const versionInput = ref(null);
+/** 历史版本对比：entry 在打开时快照，避免右侧选中变化把对话框内容换掉。 */
+const compareOpen = ref(false);
+const compareEntry = ref(null);
+const compareVersionId = ref('');
 
 const config = ref({
   mode: 'sequence',
@@ -188,6 +193,18 @@ function versionTime(value) {
 
 function openVersion(version) {
   window.open(version.url, '_blank', 'noopener');
+}
+
+/** 打开对比：图片走滑块/差异图，视频逐帧，音频波形。 */
+function openCompare(version) {
+  if (!single.value) return;
+  compareEntry.value = single.value;
+  compareVersionId.value = version?.id ?? versions.value[0]?.id ?? '';
+  compareOpen.value = true;
+}
+
+function closeCompare() {
+  compareOpen.value = false;
 }
 
 function pickVersionFile() {
@@ -364,6 +381,7 @@ function fileInfo(entry) {
           <div v-for="version in versions" :key="version.id" class="version-row">
             <span class="version-time mono" :title="versionTime(version.at)">{{ versionTime(version.at) }}</span>
             <span class="version-size mono">{{ formatSize(version.bytes) }}</span>
+            <button class="link-action is-compare" type="button" title="与当前文件对比" @click="openCompare(version)">对比</button>
             <button class="link-action" type="button" title="在新标签页预览这一版" @click="openVersion(version)">预览</button>
             <button class="link-action" type="button" :disabled="state.busy" @click="restoreVersion(version)">恢复</button>
           </div>
@@ -579,6 +597,14 @@ function fileInfo(entry) {
       </section>
     </div>
   </aside>
+
+  <VersionCompareDialog
+    :open="compareOpen"
+    :entry="compareEntry"
+    :versions="versions"
+    :initial-version-id="compareVersionId"
+    @close="closeCompare"
+  />
 </template>
 
 <style scoped>
@@ -990,6 +1016,16 @@ function fileInfo(entry) {
 
 .link-action:hover:not(:disabled) {
   text-decoration: underline;
+}
+
+/* 「对比」是版本行里的主操作：用底色标出来，和预览/恢复区分 */
+.link-action.is-compare {
+  padding: 0 5px;
+  height: 18px;
+  border-radius: 3px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .link-action:disabled {

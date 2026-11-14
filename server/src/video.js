@@ -7,10 +7,12 @@
  *
  *   GET  /api/video/health             FFmpeg 是否可用、搜索过哪些路径
  *   GET  /api/video/probe?path=        视频元信息（时长/宽高/帧率/音轨）
+ *   GET  /api/video/frame?path=&t=&w=   取指定时刻的单帧（JPEG，供逐帧比对 / 预览）
  *   POST /api/video/frames             { path, mode:'interval'|'count'|'times', ... } → 截取关键帧
  *   POST /api/video/audio              { path, format:'mp3'|'m4a'|'wav'|'flac' } → 提取音轨
  *   POST /api/video/filmstrip          { path, count, width } → 时间轴缩略图 dataURL
  */
+import crypto from 'node:crypto';
 import express from 'express';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -19,6 +21,7 @@ import {
   VideoError,
   exportVideo,
   extractAudio,
+  extractFrame,
   extractFrames,
   ffmpegStatus,
   filmstrip,
@@ -29,6 +32,30 @@ import { LibraryError } from './library.js';
 import { detectVideoWatermark, removeVideoWatermark } from './video-watermark.js';
 
 const MAX_FRAMES = 120;
+
+/** 单帧缓存目录保留的文件数上限：逐帧对比会频繁取帧，缓存复用省掉 ffmpeg 启动成本。 */
+const MAX_FRAME_CACHE_FILES = 800;
+/** 同时跑的 ffmpeg 抽帧进程上限（CPU 密集，别把机器打满）。 */
+const FRAME_CONCURRENCY = 4;
+
+/**
+ * 探测结果短缓存：/api/video/frame 每取一帧都要知道时长/分辨率，
+ * 每次都 spawn ffprobe 太贵，按「路径+mtime+size」缓存即可。
+ */
+function createProbeCache() {
+  const cache = new Map();
+  return {
+    async get(abs, stat) {
+      const key = `${abs}|${stat.mtimeMs}|${stat.size}`;
+      const hit = cache.get(key);
+      if (hit) return hit;
+      const meta = await probeVideo(abs);
+      if (cache.size > 64) cache.clear();
+      cache.set(key, meta);
+      return meta;
+    },
+  };
+}
 
 /**
  * @param {import('./library.js').createLibrary} library
@@ -41,6 +68,48 @@ export function createVideoRouter(library) {
   router.use((req, res, next) => {
     library.init().then(() => next(), next);
   });
+
+  const probeCache = createProbeCache();
+  const frameInflight = new Map();
+  let frameActive = 0;
+  const frameWaiters = [];
+  let lastPruneAt = 0;
+
+  /** 抽帧并发池：把 ffmpeg 进程数压在 FRAME_CONCURRENCY 以内。 */
+  async function withFrameSlot(task) {
+    if (frameActive >= FRAME_CONCURRENCY) {
+      await new Promise((resolve) => frameWaiters.push(resolve));
+    } else {
+      frameActive += 1;
+    }
+    try {
+      return await task();
+    } finally {
+      const next = frameWaiters.shift();
+      if (next) next();
+      else frameActive -= 1;
+    }
+  }
+
+  /** 偶尔清一次帧缓存（只保留最新的若干张），避免逐帧拖动把磁盘塞满。 */
+  async function pruneFrameCache(dir) {
+    const now = Date.now();
+    if (now - lastPruneAt < 60_000) return;
+    lastPruneAt = now;
+    const dirents = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    const files = [];
+    for (const dirent of dirents) {
+      if (!dirent.isFile() || !dirent.name.endsWith('.jpg')) continue;
+      const abs = path.join(dir, dirent.name);
+      const stat = await fs.stat(abs).catch(() => null);
+      if (stat) files.push({ abs, at: stat.mtimeMs });
+    }
+    if (files.length <= MAX_FRAME_CACHE_FILES) return;
+    files.sort((a, b) => b.at - a.at);
+    for (const item of files.slice(MAX_FRAME_CACHE_FILES)) {
+      await fs.rm(item.abs, { force: true }).catch(() => {});
+    }
+  }
 
   router.get(
     '/health',
@@ -71,6 +140,69 @@ export function createVideoRouter(library) {
         url: `/api/library/file?path=${encodeURIComponent(rel)}`,
         ...meta,
       });
+    }),
+  );
+
+  /**
+   * 取某一时刻的单帧（JPEG）。
+   *
+   * 逐帧比对不依赖浏览器能不能解码这个容器/编码：ffmpeg 解码成 JPEG，
+   * 前端用 <img> 显示 + canvas 做像素差，HEVC / ProRes 之类也能比。
+   * 缓存键 = 路径 + mtime + 大小 + 时间(3 位小数) + 宽度；URL 里带 mtime，可长缓存。
+   */
+  router.get(
+    '/frame',
+    wrap(async (req, res) => {
+      const { abs, rel } = library.resolve(req.query.path, { allowRoot: false });
+      const stat = await fs.stat(abs).catch(() => null);
+      if (!stat?.isFile()) throw new LibraryError('视频不存在', 'NOT_FOUND', 404);
+
+      const meta = await probeCache.get(abs, stat);
+      const duration = Number(meta.duration) || 0;
+      const rawTime = Number(req.query.t);
+      const requested = Number.isFinite(rawTime) && rawTime > 0 ? rawTime : 0;
+      // 末尾几帧 seek 容易落到文件外，留 0.05s 余量
+      const time = duration > 0 ? Math.min(requested, Math.max(0, duration - 0.05)) : requested;
+      const width = Math.max(240, Math.min(1280, Math.round(Number(req.query.w) || 640)));
+
+      const dir = path.join(library.cacheRoot, 'frames');
+      await fs.mkdir(dir, { recursive: true });
+      const hash = crypto
+        .createHash('sha1')
+        .update(`${rel}|${stat.mtimeMs}|${stat.size}|${time.toFixed(3)}|${width}`)
+        .digest('hex')
+        .slice(0, 24);
+      const out = path.join(dir, `${hash}.jpg`);
+
+      const exists = await fs.stat(out).then((s) => s.isFile()).catch(() => false);
+      if (!exists) {
+        const inflight = frameInflight.get(out);
+        if (inflight) {
+          await inflight;
+        } else {
+          const task = withFrameSlot(async () => {
+            const stillMissing = await fs.stat(out).then((s) => s.isFile()).catch(() => false);
+            if (stillMissing) return;
+            const tmp = path.join(dir, `${hash}.${process.pid}-${crypto.randomBytes(3).toString('hex')}.part.jpg`);
+            try {
+              await extractFrame(abs, time, tmp, { width, quality: 3 });
+              await fs.rename(tmp, out);
+            } finally {
+              await fs.rm(tmp, { force: true }).catch(() => {});
+            }
+            void pruneFrameCache(dir);
+          });
+          frameInflight.set(out, task);
+          try {
+            await task;
+          } finally {
+            frameInflight.delete(out);
+          }
+        }
+      }
+
+      res.set('Cache-Control', 'private, max-age=31536000, immutable');
+      res.type('image/jpeg').sendFile(out);
     }),
   );
 

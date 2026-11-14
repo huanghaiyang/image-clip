@@ -743,6 +743,7 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 | POST | `/api/library/delete` | 批量删除 |
 | GET | `/api/video/health` | FFmpeg 可用性、版本、搜索过的路径 |
 | GET | `/api/video/probe?path=` | ffprobe 元信息（时长/帧率/编码/音轨） |
+| GET | `/api/video/frame?path=&t=&w=` | 取指定时刻的单帧 JPEG（逐帧比对 / 封面；`t` 秒、`w` 64–1280） |
 | POST | `/api/video/filmstrip` | 时间轴缩略图（`path`、`count`、`width`） |
 | POST | `/api/video/frames` | 截帧（`mode`+`interval`/`count`/`times`、`format`、`width`、`prefix`、`dir`） |
 | POST | `/api/video/audio` | 提取音轨（`format`、`name`、`dir`） |
@@ -762,7 +763,32 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
   是否需要重新导出；橡皮擦 / 像素笔绘 / 水印去除的编辑层用 `item.bitmap` / `item.imageData.data`
   的引用做基线，换了像素就重建；各舞台的 `pixelVersion` watch 触发重绘。
 
-### 10.10 资源加载提速
+### 10.10 历史版本对比
+
+资源库检查器的「历史版本」每行除了预览 / 恢复，还有 **对比**：把选中的历史版本和当前文件并排放在同一个
+对话框里比。服务端在覆盖上传、恢复版本、就地保存前都会 `snapshotVersion`，版本文件存在
+`data/library/.versions/`（保留原扩展名），`GET /api/library/versions?path=` 列出、`/versions/restore` 回滚。
+
+三类资源的对比方式不同：
+
+* **图片**（像素级）：两张图叠在一起，中间滑块左右擦除；也可切「并排」或「差异图」。
+  两张尺寸一致时在浏览器里逐像素求差（`diffImageData`），给出差异像素数 / 占比 / 平均差 / 最大差 /
+  alpha 变化像素数；差异图把通道最大差 ×4 放大成灰度，能看清是哪个像素变了。
+  尺寸不同或超过 1200 万像素时只给滑块 / 并排，并在下方说明原因（不做误导性的“近似统计”）。
+* **视频**（逐帧）：不直接播放 `<video>`，而是用 `GET /api/video/frame?path=&t=&w=` 让服务端 ffmpeg
+  把指定时刻解成 JPEG，两张 `<img>` 叠成滑块；`←`/`→` 或「◀ 帧 / 帧 ▶」按探测到的 fps 逐帧步进，
+  时间轴可拖到任意时刻，帧号与时间码同步显示。因为画面是服务端解的，HEVC / ProRes / 浏览器不支持的
+  容器也能逐帧比；同一帧还会在 canvas 上算一次像素差，直接告诉你“这一帧改了多少”。
+  帧缓存按「路径 + mtime + 大小 + 时刻(3 位小数) + 宽度」落在 `data/cache/frames/`，
+  抽帧并发 4、同一帧合并请求，首次取帧约 0.2–0.5s、之后命中缓存约 10ms。
+* **音频**（波形）：两份音频用 Web Audio `decodeAudioData` 解码，按列压成 min/max/RMS
+  （`buildAudioPeaks`），画成两条泳道 + 一条红色差异泳道，下方标出时间刻度；
+  统计给「变化列数 / 最大能量差及其时刻」，可试听当前或历史版本，点波形任意位置定位播放头。
+
+对话框左侧是版本列表（含「当前」），支持「互换左右」；所有计算都走
+`web/src/lib/versionCompare.js` 里的纯函数，单测见 `web/test/version-compare.test.js`。
+
+### 10.11 资源加载提速
 
 资源都在本机，瓶颈不是带宽而是 **IO 次数 / 主线程解码 / 启动时的模块编译**：
 
@@ -779,7 +805,7 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
   编译（冷启动实测 DCL 约 3.5s → 0.6s 量级；代价是 dev server 启动多花 1~2s）。
   改这个配置需要重启 `npm run dev` 才生效。
 
-### 10.11 测试
+### 10.12 测试
 
 `npm test` 里新增了几组共享算法与前端纯逻辑单测：
 
@@ -787,5 +813,7 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 * `shared/bgremove.test.js`：边框主色识别（含双色渐变）、连通漫水、套索限制、羽化/收缩、反混合；
 * `web/test/image-view.test.js`：画布查看「透明通道」的裁剪框（图片矩形 / 平移出界 / 空状态）；
 * `web/test/library-inplace.test.js`：就地保存的目标路径归一（.png 改名、根目录新建、兜底命名）；
-* `web/test/async.test.js`：`mapLimit` 的顺序、并发上限、空列表与错误冒泡。
+* `web/test/async.test.js`：`mapLimit` 的顺序、并发上限、空列表与错误冒泡；
+* `web/test/version-compare.test.js`：逐像素差异（透明像素 / 单通道偏色 / 阈值 / 长度不足）、
+  波形降采样与列比较（列数不一致）、帧号 ⇄ 秒数换算与时间码格式化。
 

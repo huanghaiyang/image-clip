@@ -1163,6 +1163,10 @@ export function createLibrary(options = {}) {
         const kind = classify(item.name).kind;
         return {
           ...item,
+          // 版本文件同样在资源库根内（.versions/），前端可以用 path 直接探测 / 预览，
+          // 不必从 url 里反解查询参数
+          path: `${VERSIONS_DIR}/${item.file}`,
+          kind,
           url: versionUrl(item.file),
           thumbUrl: kind === 'image'
             ? `/api/library/thumb?path=${encodeURIComponent(`${VERSIONS_DIR}/${item.file}`)}&v=${item.at}`
