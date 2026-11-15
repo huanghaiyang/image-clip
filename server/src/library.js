@@ -27,6 +27,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { createFileIdStore } from './fileIds.js';
 import { createFileLockStore } from './fileLocks.js';
+import { createFileMarkStore, normalizeMark } from './fileMarks.js';
 import { fileURLToPath } from 'node:url';
 
 import { VideoError, makeVideoPoster, probeVideo } from './ffmpeg.js';
@@ -60,6 +61,8 @@ export function createLibrary(options = {}) {
   const fileIds = createFileIdStore({ file: options.idFile ?? path.join(cacheRoot, 'file-ids.json') });
   /** 文件锁：按 id 存储，锁定后禁止删除（改名/移动不影响）。 */
   const fileLocks = createFileLockStore({ file: options.lockFile ?? path.join(cacheRoot, 'file-locks.json') });
+  /** 收藏 / emoji 标记：同样按文件 id 存储。 */
+  const fileMarks = createFileMarkStore({ file: options.markFile ?? path.join(cacheRoot, 'file-marks.json') });
 
   let meta = null;
   let metaDirty = false;
@@ -148,6 +151,7 @@ export function createLibrary(options = {}) {
         await fs.mkdir(thumbnailRoot, { recursive: true });
         await fileIds.init();
         await fileLocks.init();
+        await fileMarks.init();
         await loadMeta();
         // 启动后自动为资源库里已有的图片补指纹（后台跑，不挡首个请求）
         scheduleWarmPhashIndex();
@@ -225,6 +229,51 @@ export function createLibrary(options = {}) {
       }
     }
     await fileLocks.persist();
+    invalidateScan();
+    return rows;
+  }
+
+  /**
+   * 批量收藏 / 取消收藏 / 设置 emoji 标记（null 清除）。
+   * @param {Array} refs
+   * @param {{favorite?:boolean, mark?:string|null}} patch
+   */
+  async function setMarks(refs, patch = {}) {
+    const hasFavorite = typeof patch.favorite === 'boolean';
+    const hasMark = Object.prototype.hasOwnProperty.call(patch, 'mark');
+    if (!hasFavorite && !hasMark) throw new LibraryError('没有需要更新的收藏/标记', 'BAD_INPUT', 400);
+    let mark;
+    if (hasMark) {
+      try {
+        mark = normalizeMark(patch.mark);
+      } catch (err) {
+        throw new LibraryError(err.message, 'BAD_INPUT', 400);
+      }
+    }
+
+    const rows = [];
+    for (const ref of refs ?? []) {
+      const rel = resolveRef(ref);
+      if (rel == null) {
+        rows.push({ path: ref?.path ?? null, id: ref?.id ?? null, ok: false, error: '文件不存在或 id 已失效' });
+        continue;
+      }
+      try {
+        const { abs } = resolve(rel, { allowRoot: false });
+        const stat = await fs.stat(abs);
+        if (stat.isDirectory()) {
+          rows.push({ path: rel, ok: false, error: '文件夹不支持收藏/标记，请选中文件' });
+          continue;
+        }
+        const id = fileIds.idFor(rel);
+        if (hasFavorite) fileMarks.setFavorite(id, patch.favorite);
+        if (hasMark) fileMarks.setMark(id, mark);
+        rows.push({ id, path: rel, ok: true, favorite: fileMarks.isFavorite(id), mark: fileMarks.markOf(id) });
+      } catch (err) {
+        rows.push({ path: rel, id: null, ok: false, error: err.message });
+      }
+    }
+    await fileMarks.persist();
     invalidateScan();
     return rows;
   }
@@ -429,6 +478,8 @@ export function createLibrary(options = {}) {
     return {
       id,
       locked: fileLocks.has(id),
+      favorite: fileMarks.isFavorite(id),
+      mark: fileMarks.markOf(id),
       path: rel,
       name,
       dir: posixDir(rel),
@@ -1120,7 +1171,15 @@ export function createLibrary(options = {}) {
         results.push({ path: rel, ok: false, error: err.message });
       }
     }
-    // 已移入回收站的文件释放 id；恢复时会分配新 id
+    // 已移入回收站的文件释放 id；收藏/标记一并清理，恢复时分配新 id（默认未收藏）
+    const removedIds = results
+      .filter((row) => row.ok)
+      .map((row) => fileIds.idOrNull(row.path))
+      .filter(Boolean);
+    if (removedIds.length) {
+      fileMarks.forget(removedIds);
+      await fileMarks.persist();
+    }
     fileIds.forget(results.filter((row) => row.ok).map((row) => row.path));
     await fileIds.persist();
     return results;
@@ -2084,6 +2143,8 @@ export function createLibrary(options = {}) {
     fileIds,
     fileLocks,
     setLocks,
+    fileMarks,
+    setMarks,
     renameWithRetry,
     invalidate() {
       meta = null;
@@ -2386,6 +2447,23 @@ export function createLibraryRouter(library) {
     wrap(async (req, res) => {
       const folder = await library.mkdir(req.body?.dir ?? '', req.body?.name ?? '');
       res.status(201).json({ ok: true, folder });
+    }),
+  );
+
+  router.post(
+    '/marks',
+    jsonBody,
+    wrap(async (req, res) => {
+      const results = await library.setMarks(req.body?.items, {
+        favorite: req.body?.favorite,
+        ...(Object.prototype.hasOwnProperty.call(req.body ?? {}, 'mark') ? { mark: req.body.mark } : {}),
+      });
+      res.json({
+        ok: results.every((row) => row.ok),
+        total: results.length,
+        succeeded: results.filter((row) => row.ok).length,
+        results,
+      });
     }),
   );
 

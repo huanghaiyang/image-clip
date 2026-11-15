@@ -185,6 +185,15 @@ export function renameLibraryItems(items) {
   });
 }
 
+/** 批量收藏 / emoji 标记（按文件 id 持久化；mark 传 null 清除）。 */
+export function setLibraryMarks(items, patch) {
+  return requestJson('/api/library/marks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items, ...patch }),
+  });
+}
+
 /** 批量锁定 / 解锁（服务端按文件 id 持久化，锁定后禁止删除）。 */
 export function setLibraryLocks(items, locked) {
   return requestJson('/api/library/lock', {

@@ -115,6 +115,14 @@ const treeEntries = computed(() => {
     list = list.filter((entry) => entry.name.toLowerCase().includes(keyword) || entry.path.toLowerCase().includes(keyword));
   }
   if (state.kindFilter !== 'all') list = list.filter((entry) => entry.kind === state.kindFilter);
+  if (state.markFilter !== 'all') {
+    list = list.filter((entry) => {
+      if (state.markFilter === 'marked') return Boolean(entry.mark);
+      if (state.markFilter === 'favorite') return Boolean(entry.favorite);
+      if (state.markFilter === 'locked') return Boolean(entry.locked);
+      return true;
+    });
+  }
   return list;
 });
 
@@ -122,8 +130,8 @@ const treeRoot = computed(() => {
   const searching = Boolean(state.search.trim());
   return buildResourceTree(treeEntries.value, {
     root: searching ? '' : state.currentDir,
-    // 搜索或类型筛选时只保留命中的文件及其祖先目录，不显示无关的空文件夹
-    folders: searching || state.kindFilter !== 'all' ? [] : folders.value,
+    // 搜索 / 类型筛选 / 状态筛选时只保留命中的文件，不显示无关的空文件夹
+    folders: searching || state.kindFilter !== 'all' || state.markFilter !== 'all' ? [] : folders.value,
     compareFiles: compareEntries,
   });
 });
@@ -580,6 +588,15 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <label class="sort">
+        <span>显示</span>
+        <select class="select" :value="state.markFilter" @change="actions.setMarkFilter($event.target.value)">
+          <option value="all">全部</option>
+          <option value="marked">显示标记</option>
+          <option value="favorite">显示收藏</option>
+          <option value="locked">显示锁定</option>
+        </select>
+      </label>
+      <label class="sort">
         <span>排序</span>
         <select class="select" :value="state.sort" @change="actions.setSort($event.target.value)">
           <option v-for="item in SORTS" :key="item.value" :value="item.value">{{ item.label }}</option>
@@ -781,12 +798,15 @@ onBeforeUnmount(() => {
             />
             <span v-else class="thumb-icon">{{ KIND_ICON[entry.kind] ?? '▤' }}</span>
             <span v-if="entrySize(entry)" class="badge-size mono">{{ entrySize(entry) }}</span>
-            <span v-if="entry.locked" class="badge-lock" title="已锁定：禁止删除">
-              <svg width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <rect x="3.2" y="6.8" width="9.6" height="6.4" rx="1.4" stroke="currentColor" stroke-width="1.4" />
-                <path d="M5.4 6.8V5.1a2.6 2.6 0 0 1 5.2 0v1.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-              </svg>
-              已锁定
+            <span v-if="entry.locked || entry.favorite || entry.mark" class="card-flags">
+              <span v-if="entry.locked" class="flag is-lock" title="已锁定：禁止删除">
+                <svg width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <rect x="3.2" y="6.8" width="9.6" height="6.4" rx="1.4" stroke="currentColor" stroke-width="1.4" />
+                  <path d="M5.4 6.8V5.1a2.6 2.6 0 0 1 5.2 0v1.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                </svg>
+              </span>
+              <span v-if="entry.favorite" class="flag is-fav" title="已收藏">★</span>
+              <span v-if="entry.mark" class="flag is-mark" :title="`标记：${entry.mark}`">{{ entry.mark }}</span>
             </span>
             <span v-if="editingPaths.has(entry.path)" class="badge-editing">编辑中</span>
             <span v-if="duplicatePaths.has(entry.path)" class="badge-dup">重复 {{ duplicateGroupOf.get(entry.path) }}</span>
@@ -894,7 +914,11 @@ onBeforeUnmount(() => {
               <span class="tree-row-name">{{ row.name }}</span>
               <span class="tree-row-meta mono">{{ entryMeta(row.entry) }}</span>
             </span>
-            <span v-if="row.entry.locked" class="lock-flag" title="已锁定：禁止删除">锁</span>
+            <span v-if="row.entry.locked || row.entry.favorite || row.entry.mark" class="tree-flags">
+              <span v-if="row.entry.locked" class="tree-flag" title="已锁定：禁止删除">锁</span>
+              <span v-if="row.entry.favorite" class="tree-flag is-fav" title="已收藏">★</span>
+              <span v-if="row.entry.mark" class="tree-flag" :title="`标记：${row.entry.mark}`">{{ row.entry.mark }}</span>
+            </span>
             <span v-if="editingPaths.has(row.path)" class="edit-flag">编辑中</span>
             <span v-if="duplicatePaths.has(row.path)" class="dup-flag">重复 {{ duplicateGroupOf.get(row.path) }}</span>
             <span
@@ -1399,28 +1423,67 @@ onBeforeUnmount(() => {
 
 /* 徽标都画在缩略图之上：.thumb img 是 z-index:1（视频模糊铺底之后），
    徽标若停留在 auto 会被图片盖住，只透过 object-fit:contain 的透明留边露出一半。 */
-.badge-lock {
+.card-flags {
   position: absolute;
-  left: 5px;
-  bottom: 5px;
+  z-index: 3;
+  left: 4px;
+  bottom: 4px;
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  padding: 1px 5px;
+  pointer-events: none;
+}
+
+.flag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
   border-radius: 3px;
   background: rgba(0, 0, 0, 0.62);
-  color: #ffd166;
-  font-size: 9px;
-  line-height: 1.4;
-  pointer-events: none;
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
   white-space: nowrap;
 }
 
-.lock-flag {
+.flag.is-lock {
+  color: #ffd166;
+}
+
+.flag.is-fav {
+  color: #ffd166;
+  font-size: 11px;
+}
+
+.flag.is-mark {
+  font-size: 11px;
+}
+
+.tree-flags {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   flex: none;
-  font-size: 10px;
+}
+
+.tree-flag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--panel-3);
+  color: var(--text-2);
+  font-size: 9px;
   line-height: 1;
-  opacity: 0.9;
+}
+
+.tree-flag.is-fav {
+  color: #ffb020;
 }
 
 .badge-size {
@@ -1452,8 +1515,9 @@ onBeforeUnmount(() => {
 .badge-editing {
   position: absolute;
   z-index: 2;
-  left: 4px;
+  left: 50%;
   bottom: 4px;
+  transform: translateX(-50%);
   padding: 0 4px;
   border-radius: 3px;
   background: var(--accent);

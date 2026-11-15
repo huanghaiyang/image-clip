@@ -21,6 +21,7 @@ import {
   copyLibraryItems,
   renameLibraryItems,
   setLibraryLocks,
+  setLibraryMarks,
   restoreLibraryVersion,
   revealLibraryPath,
   uploadLibraryFile,
@@ -75,6 +76,8 @@ const dirCache = shallowRef(new Map());
 const metaByPath = shallowRef(new Map());
 /** 锁定状态覆盖：id -> boolean；接口返回后立即生效，不用整库刷新。 */
 const lockOverrides = shallowRef(new Map());
+/** 收藏 / 标记覆盖：id -> { favorite?, mark? }；接口返回后立即生效。 */
+const markOverrides = shallowRef(new Map());
 
 const state = reactive({
   initialized: false,
@@ -86,6 +89,8 @@ const state = reactive({
   currentDir: '',
   search: '',
   kindFilter: 'all', // all | image | video | audio | folder
+  /** 状态筛选：all | marked | favorite | locked（“显示标记”等）。 */
+  markFilter: 'all',
   sort: 'name', // name | kind | mtime | size
   browseMode: initialBrowseMode(), // flat | tree
   selected: [], // 相对路径数组，可包含文件夹
@@ -108,16 +113,19 @@ const entries = computed(() => {
   }
   const list = [...map.values()];
   const overrides = lockOverrides.value;
+  const markPatches = markOverrides.value;
   const withMeta = !metaByPath.value.size
     ? list
     : list.map((entry) => {
         const info = metaByPath.value.get(entry.path);
         return info ? { ...entry, ...info } : entry;
       });
-  if (!overrides.size) return withMeta;
+  if (!overrides.size && !markPatches.size) return withMeta;
   return withMeta.map((entry) => {
     const locked = overrides.get(entry.id);
-    return locked === undefined ? entry : { ...entry, locked };
+    const marks = markPatches.get(entry.id);
+    if (locked === undefined && !marks) return entry;
+    return { ...entry, ...(locked === undefined ? {} : { locked }), ...(marks ?? {}) };
   });
 });
 
@@ -144,11 +152,28 @@ const currentFolders = computed(() => {
   return [...list].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
 });
 
-/** 统一处理类型过滤与排序。 */
+/** 状态筛选：锁定 / 收藏 / 已标记。 */
+function matchesMarkFilter(entry) {
+  switch (state.markFilter) {
+    case 'marked':
+      return Boolean(entry.mark);
+    case 'favorite':
+      return Boolean(entry.favorite);
+    case 'locked':
+      return Boolean(entry.locked);
+    default:
+      return true;
+  }
+}
+
+/** 统一处理类型过滤、状态筛选与排序。 */
 function arrangeEntries(list) {
   let result = list;
   if (state.kindFilter !== 'all' && state.kindFilter !== 'folder') {
     result = result.filter((entry) => entry.kind === state.kindFilter);
+  }
+  if (state.markFilter !== 'all') {
+    result = result.filter(matchesMarkFilter);
   }
   const byName = (a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN');
   switch (state.sort) {
@@ -209,6 +234,9 @@ const previewList = computed(() => {
   }
   if (state.kindFilter !== 'all' && state.kindFilter !== 'folder') {
     list = list.filter((entry) => entry.kind === state.kindFilter);
+  }
+  if (state.markFilter !== 'all') {
+    list = list.filter(matchesMarkFilter);
   }
   return list;
 });
@@ -632,6 +660,10 @@ export function setSearch(value) {
 
 export function setKindFilter(value) {
   state.kindFilter = value;
+}
+
+export function setMarkFilter(value) {
+  state.markFilter = ['marked', 'favorite', 'locked'].includes(value) ? value : 'all';
 }
 
 export function setSort(value) {
@@ -1146,6 +1178,87 @@ export async function unlockSelected() {
   return setLock(files, false);
 }
 
+function applyMarkResults(results) {
+  const next = new Map(markOverrides.value);
+  for (const row of results ?? []) {
+    if (!row?.id) continue;
+    next.set(row.id, { favorite: Boolean(row.favorite), mark: row.mark ?? null });
+  }
+  markOverrides.value = next;
+}
+
+/** 设置收藏 / emoji 标记；patch 例：{favorite:true} / {mark:'⭐'} / {mark:null}。 */
+export async function setMarks(items, patch) {
+  const list = (Array.isArray(items) ? items : [items]).filter(Boolean);
+  if (!list.length) return false;
+  state.busy = true;
+  try {
+    const response = await setLibraryMarks(
+      list.map((item) => (item.id ? { id: item.id, path: item.path } : { path: item.path })),
+      patch,
+    );
+    applyMarkResults(response.results);
+    const failed = failedCount(response);
+    if (failed) {
+      const first = response.results?.find((row) => row.ok === false);
+      setError(`收藏/标记部分失败：${first?.error ?? `${failed} 项`}`);
+    } else {
+      const count = response.succeeded ?? list.length;
+      if (typeof patch.favorite === 'boolean') setStatus(`${patch.favorite ? '已收藏' : '已取消收藏'} ${count} 项`);
+      else if (Object.prototype.hasOwnProperty.call(patch, 'mark')) {
+        setStatus(patch.mark ? `已标记 ${patch.mark} ${count} 项` : `已清除标记 ${count} 项`);
+      }
+    }
+    return response.ok;
+  } catch (err) {
+    setError(`收藏/标记失败：${err.message}`);
+    return false;
+  } finally {
+    state.busy = false;
+  }
+}
+
+export async function toggleFavorite(entry) {
+  if (!entry) return false;
+  return setMarks([entry], { favorite: !entry.favorite });
+}
+
+export async function favoriteSelected() {
+  const files = selectedEntries.value.filter((entry) => entry.kind !== 'folder');
+  if (!files.length) {
+    setError('请选中要收藏的文件');
+    return false;
+  }
+  return setMarks(files, { favorite: true });
+}
+
+export async function unfavoriteSelected() {
+  const files = selectedEntries.value.filter((entry) => entry.kind !== 'folder');
+  if (!files.length) {
+    setError('请选中要取消收藏的文件');
+    return false;
+  }
+  return setMarks(files, { favorite: false });
+}
+
+export async function setEntryMark(entry, mark) {
+  if (!entry) return false;
+  return setMarks([entry], { mark });
+}
+
+export async function markSelected(mark) {
+  const files = selectedEntries.value.filter((entry) => entry.kind !== 'folder');
+  if (!files.length) {
+    setError('请选中要标记的文件');
+    return false;
+  }
+  return setMarks(files, { mark });
+}
+
+export async function clearSelectedMarks() {
+  return markSelected(null);
+}
+
 export async function deletePaths(paths) {
   const list = [...new Set((paths ?? []).filter(Boolean))];
   if (!list.length) {
@@ -1453,6 +1566,7 @@ export function useLibrary() {
       goUp,
       setSearch,
       setKindFilter,
+      setMarkFilter,
       setSort,
       setBrowseMode,
       setCurrentDir,
@@ -1478,6 +1592,13 @@ export function useLibrary() {
       toggleLock,
       lockSelected,
       unlockSelected,
+      setMarks,
+      toggleFavorite,
+      favoriteSelected,
+      unfavoriteSelected,
+      setEntryMark,
+      markSelected,
+      clearSelectedMarks,
       deleteFolder,
       describeDeletionImpact,
       confirmTransferToEditor,

@@ -694,6 +694,17 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 * 文件夹内只要有锁定文件，整个文件夹也不能删除（错误里带锁定数量），避免绕过；
 * 前端删除只移除真正成功的项，锁定项留在原位并提示原因；回收站恢复的文件会分配新 id（默认未锁定）。
 
+**收藏 / emoji 标记**
+
+* 收藏与 emoji 标记同样按文件 id 持久化（`data/cache/file-marks.json`），改名 / 移动不丢；
+  条目新增 `favorite`、`mark` 字段；
+* 检查器单文件：`☆ 收藏` 切换收藏，emoji 选择器（⭐🔥✅🎯📌…）设置/清除标记；
+* 多选：`☆ 收藏选中 / 取消收藏`、`标记选中`（同一 emoji 批量写入）或清除；
+* 资源卡片左下角显示状态徽标：锁（已锁定）、★（已收藏）、emoji 标记；树形列表同步显示；
+* 资源库工具栏「显示」下拉可按状态筛选：全部 / **显示标记** / 显示收藏 / 显示锁定（搜索、预览翻页同步生效）。
+* 接口：`POST /api/library/marks`，`{ items:[{id,path}], favorite?:boolean, mark?:string|null }`；
+  删除/移入回收站时自动清理收藏与标记。
+
 ### 10.3 视频工作区
 
 * **探测**：`ffprobe` 给出时长、宽高、帧率、编码、码率、是否有音轨。
@@ -1100,6 +1111,7 @@ data/logs/
 * `server/test/library-move.test.js`：移动 / 复制 / 批量改名遇到同名文件时自动加序号、不覆盖；
 * `server/test/file-ids.test.js`：文件 id 稳定（改名/移动）、跨重启持久化、按 id 操作与 HTTP `?id=`；
 * `server/test/file-locks.test.js`：锁定后禁止删除、文件夹含锁定文件时整夹拒绝、改名/移动保持锁定与跨重启持久化、HTTP `/lock`；
+* `server/test/file-marks.test.js`：收藏 / emoji 标记写入与清除、改名/移动保持、跨重启持久化、删除时清理、HTTP `/marks`；
 * `server/test/logger.test.js`：按天/按大小拆分、任务日志分离、保留期清理、tail；
 * `server/test/guest.test.js`：临时用户标识解析与任务/日志隔离（A 看不到 B 的任务，资源库共享）；
 * `server/test/jobs-queue.test.js`：任务并发上限、排队位置、用户配额、取消、任务日志落盘；

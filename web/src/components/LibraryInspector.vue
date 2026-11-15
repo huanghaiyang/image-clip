@@ -10,6 +10,7 @@
 import { computed, ref, watch } from 'vue';
 
 import { useLibrary } from '../composables/useLibrary.js';
+import EmojiMarkPicker from './EmojiMarkPicker.vue';
 import { useConfirm } from '../composables/useConfirm.js';
 import { useVideo } from '../composables/useVideo.js';
 import { useAudio } from '../composables/useAudio.js';
@@ -396,6 +397,13 @@ function fileInfo(entry) {
             {{ single.locked ? '已锁定 · 点击解锁' : '锁定（禁止删除）' }}
           </button>
         </div>
+        <div class="lock-row">
+          <span class="label">收藏 / 标记</span>
+          <button class="btn is-mini" :class="{ 'is-primary': single.favorite }" type="button" :disabled="state.busy" @click="actions.toggleFavorite(single)">
+            {{ single.favorite ? '★ 已收藏' : '☆ 收藏' }}
+          </button>
+          <EmojiMarkPicker :model-value="single.mark" title="设置当前文件的 emoji 标记" @pick="actions.setEntryMark(single, $event)" />
+        </div>
         <table class="info">
           <tbody>
             <tr v-for="[key, value] in fileInfo(single)" :key="key">
@@ -672,6 +680,11 @@ function fileInfo(entry) {
           <button class="btn is-mini is-ghost" type="button" :disabled="state.busy" @click="actions.unlockSelected()">
             解锁选中
           </button>
+        </div>
+        <div class="lock-row">
+          <button class="btn is-mini" type="button" :disabled="state.busy" @click="actions.favoriteSelected()">☆ 收藏选中</button>
+          <button class="btn is-mini is-ghost" type="button" :disabled="state.busy" @click="actions.unfavoriteSelected()">取消收藏</button>
+          <EmojiMarkPicker label="标记选中" title="给选中的文件设置 emoji 标记" @pick="actions.markSelected($event)" />
         </div>
         <p class="hint">锁定只禁止删除；改名、移动、复制不受影响。文件夹需先展开并锁定其中的文件。</p>
         <button class="btn is-block is-ghost is-danger" type="button" :disabled="state.busy" @click="removeAll">
