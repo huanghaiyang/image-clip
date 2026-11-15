@@ -770,13 +770,6 @@ function fileInfo(entry) {
 .text-input {
   flex: 1;
   min-width: 0;
-  height: 26px;
-  padding: 0 7px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--text);
-  font-size: 11px;
 }
 
 .text-input:disabled {

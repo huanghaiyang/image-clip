@@ -25,6 +25,7 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { createFileIdStore } from './fileIds.js';
 import { fileURLToPath } from 'node:url';
 
 import { VideoError, makeVideoPoster, probeVideo } from './ffmpeg.js';
@@ -54,6 +55,8 @@ export function createLibrary(options = {}) {
     options.thumbnailRoot ?? process.env.IMAGE_CLIP_THUMB_DIR ?? path.join(ROOT_DIR, 'data/library-thumbs'),
   );
   const cacheRoot = path.resolve(options.cacheRoot ?? path.join(ROOT_DIR, 'data/cache'));
+  /** 文件唯一 id：路径会变，id 不变；所有按文件操作都优先用它。 */
+  const fileIds = createFileIdStore({ file: options.idFile ?? path.join(cacheRoot, 'file-ids.json') });
 
   let meta = null;
   let metaDirty = false;
@@ -140,6 +143,7 @@ export function createLibrary(options = {}) {
       initPromise = (async () => {
         await fs.mkdir(root, { recursive: true });
         await fs.mkdir(thumbnailRoot, { recursive: true });
+        await fileIds.init();
         await loadMeta();
         // 启动后自动为资源库里已有的图片补指纹（后台跑，不挡首个请求）
         scheduleWarmPhashIndex();
@@ -175,6 +179,25 @@ export function createLibrary(options = {}) {
       }
     }, 800);
     metaTimer.unref?.();
+  }
+
+  /**
+   * 把 {id}/{path}/路径字符串解析成当前相对路径。
+   * 按 id 引用时即使文件刚改过名也能找到；找不到返回 null（调用方回 404）。
+   */
+  function resolveRef(ref) {
+    if (ref && typeof ref === 'object') {
+      if (ref.id) return fileIds.pathFor(ref.id);
+      if (ref.path != null) return String(ref.path);
+      return null;
+    }
+    return String(ref ?? '');
+  }
+
+  /** 路径或 {id} → 稳定 id（不存在时按路径补一个）。 */
+  function idForRef(ref) {
+    const rel = resolveRef(ref);
+    return rel == null ? null : fileIds.idFor(rel);
   }
 
   /** 相对路径 → 绝对路径；拒绝任何越出资源库根目录的写法。 */
@@ -300,6 +323,8 @@ export function createLibrary(options = {}) {
         return stat ? { abs: record.abs, rel: toRel(record.abs), name: record.name, stat } : null;
       });
       const fileRecords = statList.filter(Boolean);
+      // 给新文件补 id、清理已经消失的路径
+      fileIds.sync(fileRecords.map((record) => record.rel));
 
       const entries = light
         ? fileRecords.map((record) => basicEntry(record))
@@ -344,7 +369,10 @@ export function createLibrary(options = {}) {
   /** 只含 stat 信息的条目：不读图片/视频内容，供目录列表与轻量索引使用。 */
   function basicEntry({ rel, name, stat }) {
     const { kind, ext } = classify(name);
+    // 稳定文件 id：改名/移动后不变，接口优先按 id 定位文件
+    const id = fileIds.idOrNull(rel) ?? fileIds.idFor(rel);
     return {
+      id,
       path: rel,
       name,
       dir: posixDir(rel),
@@ -352,9 +380,9 @@ export function createLibrary(options = {}) {
       ext,
       bytes: stat.size,
       mtime: Math.round(stat.mtimeMs),
-      url: `/api/library/file?path=${encodeURIComponent(rel)}`,
+      url: `/api/library/file?id=${encodeURIComponent(id)}`,
       thumbUrl: kind === 'image' || kind === 'video' || kind === 'audio'
-        ? `/api/library/thumb?path=${encodeURIComponent(rel)}&v=${Math.round(stat.mtimeMs)}`
+        ? `/api/library/thumb?id=${encodeURIComponent(id)}&v=${Math.round(stat.mtimeMs)}`
         : null,
     };
   }
@@ -440,11 +468,15 @@ export function createLibrary(options = {}) {
         const stat = await fs.stat(fileAbs).catch(() => null);
         if (!stat) continue;
         const rel = toRel(fileAbs);
+        const id = fileIds.idFor(rel);
         previews.push({
+          id,
           path: rel,
           name: dirent.name,
           kind,
-          thumbUrl: `/api/library/thumb?path=${encodeURIComponent(rel)}&v=${Math.round(stat.mtimeMs)}`,
+          bytes: stat.size,
+          mtime: Math.round(stat.mtimeMs),
+          thumbUrl: `/api/library/thumb?id=${encodeURIComponent(id)}&v=${Math.round(stat.mtimeMs)}`,
         });
       }
     }
@@ -497,6 +529,7 @@ export function createLibrary(options = {}) {
     const { abs, rel: relPath } = resolve(rel, { allowRoot: false });
     const stat = await fs.stat(abs).catch(() => null);
     if (!stat?.isFile()) throw new LibraryError('文件不存在', 'NOT_FOUND', 404);
+    fileIds.idFor(relPath);
     const entry = await describeEntry({ abs, rel: relPath, name: path.basename(abs), stat });
     const { url, thumbUrl, path: entryPath, name, dir, kind, ext, bytes, mtime, ...info } = entry;
     return { path: entryPath, ...info };
@@ -701,7 +734,13 @@ export function createLibrary(options = {}) {
 
     const prepared = [];
     for (const item of items) {
-      const { abs, rel } = resolve(item?.path, { allowRoot: false });
+      // 支持 {id} 引用：改名后前端仍可用旧 id 继续操作
+      const rawPath = item && typeof item === 'object' && item.id ? fileIds.pathFor(item.id) : item?.path;
+      if (rawPath == null) {
+        prepared.push({ error: '文件不存在或 id 已失效', from: item?.path ?? item?.id, ok: false });
+        continue;
+      }
+      const { abs, rel } = resolve(rawPath, { allowRoot: false });
       const stat = await fs.stat(abs).catch(() => null);
       if (!stat) {
         prepared.push({ error: '文件不存在', from: item?.path, ok: false });
@@ -839,6 +878,7 @@ export function createLibrary(options = {}) {
     await moveVersions(moved);
     await moveMeta(moved);
     movePhash(moved);
+    fileIds.remap(moved);
 
     const failures = prepared.filter((p) => p.ok === false && !p.fromRel);
     for (const failure of failures) results.push({ from: failure.from, ok: false, error: failure.error });
@@ -868,7 +908,8 @@ export function createLibrary(options = {}) {
   }
 
   /** 移动文件/文件夹到目标目录；跨盘时自动退回“复制 + 删除”。 */
-  async function movePaths(paths, targetDirRel) {
+  async function movePaths(refs, targetDirRel) {
+    const paths = (refs ?? []).map((ref) => resolveRef(ref)).filter((value) => value != null);
     releaseOpenFiles(paths);
     invalidateScan();
     if (!Array.isArray(paths) || !paths.length) throw new LibraryError('没有需要移动的项目', 'BAD_INPUT', 400);
@@ -907,6 +948,7 @@ export function createLibrary(options = {}) {
     await moveVersions(moved);
     await moveMeta(moved);
     movePhash(moved);
+    fileIds.remap(moved);
     return results;
   }
 
@@ -914,7 +956,8 @@ export function createLibrary(options = {}) {
    * 复制文件/文件夹到目标目录（保留原件）。
    * 文件夹递归复制；重名自动加序号，复制到自身子目录会被拒绝。
    */
-  async function copyPaths(paths, targetDirRel) {
+  async function copyPaths(refs, targetDirRel) {
+    const paths = (refs ?? []).map((ref) => resolveRef(ref)).filter((value) => value != null);
     releaseOpenFiles(paths);
     invalidateScan();
     if (!Array.isArray(paths) || !paths.length) throw new LibraryError('没有需要复制的项目', 'BAD_INPUT', 400);
@@ -934,7 +977,8 @@ export function createLibrary(options = {}) {
         const { abs: dest, name: finalName } = await uniqueTarget(targetDir, path.basename(abs));
         await fs.cp(abs, dest, { recursive: true });
         results.push({ from: rel, ok: true, to: toRel(dest), name: finalName });
-        // 复制出来的是新文件：立刻排队补指纹（目录递归）
+        // 复制出来的是新文件：分配新 id，并排队补指纹（目录递归）
+        fileIds.idFor(toRel(dest));
         void phashTouchTree(toRel(dest));
       } catch (err) {
         results.push({ from: rel, ok: false, error: err.message });
@@ -969,7 +1013,8 @@ export function createLibrary(options = {}) {
    * 每项单独放进 `.trash/<id>/`：`item.<ext>` 保存原文件（目录则整体移动），
    * `meta.json` 记录原始路径与删除时间，恢复时按原路径搬回去。
    */
-  async function trashPaths(paths) {
+  async function trashPaths(refs) {
+    const paths = (refs ?? []).map((ref) => resolveRef(ref)).filter((value) => value != null);
     releaseOpenFiles(paths);
     invalidateScan();
     if (!Array.isArray(paths) || !paths.length) throw new LibraryError('没有需要删除的项目', 'BAD_INPUT', 400);
@@ -1009,6 +1054,8 @@ export function createLibrary(options = {}) {
         results.push({ path: rel, ok: false, error: err.message });
       }
     }
+    // 已移入回收站的文件释放 id；恢复时会分配新 id
+    fileIds.forget(results.filter((row) => row.ok).map((row) => row.path));
     return results;
   }
 
@@ -1143,6 +1190,7 @@ export function createLibrary(options = {}) {
         await moveVersions([{ from: record.path, to: restoredRel }]);
         await moveMeta([{ from: record.path, to: restoredRel }]);
         void phashTouchTree(restoredRel);
+        fileIds.idFor(restoredRel);
         results.push({ id, ok: true, path: restoredRel, name: finalName });
       } catch (err) {
         results.push({ id, ok: false, error: err.message });
@@ -1964,6 +2012,9 @@ export function createLibrary(options = {}) {
     findSimilar,
     trackOpenFile,
     releaseOpenFiles,
+    resolveRef,
+    idForRef,
+    fileIds,
     renameWithRetry,
     invalidate() {
       meta = null;
@@ -2025,6 +2076,13 @@ export function createLibraryRouter(library) {
    * Express 自动生成 ETag，内容没变时返回 304（无 body），
    * 大资源库反复刷新/切目录时不用再传整份索引。
    */
+  const refFromQuery = (req) => (req.query.id ? { id: String(req.query.id) } : { path: String(req.query.path ?? '') });
+  const requireRefPath = (req) => {
+    const rel = library.resolveRef(refFromQuery(req));
+    if (rel == null) throw new LibraryError('文件不存在或 id 已失效', 'NOT_FOUND', 404);
+    return rel;
+  };
+
   const sendListJson = (res, payload) => {
     // 注意别写 no-cache：Express 的 fresh 判断遇到 no-cache 会直接判定“不新鲜”，
     // 永远回 200 而拿不到 304。max-age=0 + must-revalidate 才是“可存、每次重验证”。
@@ -2056,7 +2114,7 @@ export function createLibraryRouter(library) {
   router.get(
     '/meta',
     wrap(async (req, res) => {
-      sendListJson(res, await library.describePath(req.query.path ?? ''));
+      sendListJson(res, await library.describePath(requireRefPath(req)));
     }),
   );
 
@@ -2064,7 +2122,7 @@ export function createLibraryRouter(library) {
   router.get(
     '/reveal',
     wrap(async (req, res) => {
-      res.json(await library.reveal(String(req.query.path ?? '')));
+      res.json(await library.reveal(String(requireRefPath(req))));
     }),
   );
 
@@ -2146,7 +2204,7 @@ export function createLibraryRouter(library) {
   router.get(
     '/file',
     wrap(async (req, res) => {
-      const { abs } = library.resolve(req.query.path, { allowRoot: false });
+      const { abs } = library.resolve(requireRefPath(req), { allowRoot: false });
       const stat = await fs.stat(abs).catch(() => null);
       if (!stat?.isFile()) throw new LibraryError('文件不存在', 'NOT_FOUND', 404);
       res.set('Cache-Control', 'private, max-age=0, must-revalidate');
@@ -2163,7 +2221,7 @@ export function createLibraryRouter(library) {
     wrap(async (req, res) => {
       // w：期望宽度（64–480，默认 320）。URL 里带 v=mtime，内容变了 URL 就变，
       // 所以可以直接长缓存，滚动列表时不再重复回源。
-      const file = await library.thumbnail(req.query.path, { width: req.query.w });
+      const file = await library.thumbnail(requireRefPath(req), { width: req.query.w });
       res.set('Cache-Control', 'private, max-age=31536000, immutable');
       res.type('image/webp').sendFile(file);
     }),
@@ -2358,7 +2416,7 @@ export function createLibraryRouter(library) {
   router.get(
     '/versions',
     wrap(async (req, res) => {
-      res.json(await library.listVersions(req.query.path));
+      res.json(await library.listVersions(requireRefPath(req)));
     }),
   );
 

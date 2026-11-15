@@ -501,19 +501,27 @@ const metaRequested = new Set();
 let metaRunning = 0;
 
 /** 卡片进入视口后请求尺寸 / 时长；同一路径只请求一次。 */
+/** 把路径转成 {id,path} 引用：接口优先按 id 定位，路径作为兜底。 */
+function refOfPath(path) {
+  const entry = entries.value.find((item) => item.path === path);
+  return entry?.id ? { id: entry.id, path } : { path };
+}
+
 export function requestEntryMeta(entry) {
-  const path = typeof entry === 'string' ? entry : entry?.path;
-  if (!path || metaRequested.has(path) || metaByPath.value.has(path)) return;
-  metaRequested.add(path);
-  metaQueue.push(path);
+  const ref = typeof entry === 'string' ? { path: entry } : entry;
+  const key = ref?.id ?? ref?.path;
+  if (!key || metaRequested.has(key) || (ref?.path && metaByPath.value.has(ref.path))) return;
+  metaRequested.add(key);
+  metaQueue.push(ref);
   pumpMetaQueue();
 }
 
 function pumpMetaQueue() {
   while (metaRunning < META_CONCURRENCY && metaQueue.length) {
-    const path = metaQueue.shift();
+    const ref = metaQueue.shift();
+    const path = ref?.path ?? String(ref);
     metaRunning += 1;
-    fetchLibraryEntryMeta(path)
+    fetchLibraryEntryMeta(ref)
       .then((info) => {
         if (!info) return;
         const next = new Map(metaByPath.value);
@@ -790,7 +798,8 @@ export async function saveBlobToLibraryPath(blob, { path = '', name = '' } = {})
 
     // 覆盖上传是「按目标路径写字节」，扩展名必须和真实编码一致，所以先改名成 .png
     if (targetPath && target.renamed) {
-      const response = await renameLibraryItems([{ path: targetPath, name: targetName }]);
+      const entryRef = entries.value.find((item) => item.path === targetPath);
+      const response = await renameLibraryItems([{ ...(entryRef?.id ? { id: entryRef.id } : {}), path: targetPath, name: targetName }]);
       const result = (response?.results ?? []).find((row) => row.ok !== false && row.to);
       if (!result?.to) {
         const failed = (response?.results ?? []).find((row) => row.ok === false);
@@ -844,7 +853,7 @@ export async function renameOne(entry, name) {
   if (!target || target === entry.name) return true;
   state.busy = true;
   try {
-    const result = await renameLibraryItems([{ path: entry.path, name: target }]);
+    const result = await renameLibraryItems([{ ...(entry.id ? { id: entry.id } : {}), path: entry.path, name: target }]);
     if (!result.ok) {
       const first = result.results?.find((item) => item.ok === false);
       throw new LibraryApiError(first?.error || '重命名失败', 'RENAME_FAILED');
@@ -915,7 +924,7 @@ export async function batchRename(config, list = selectedEntries.value) {
   const rows = buildBatchNames(list, config);
   state.busy = true;
   try {
-    const result = await renameLibraryItems(rows.map(({ entry, name }) => ({ path: entry.path, name })));
+    const result = await renameLibraryItems(rows.map(({ entry, name }) => ({ ...(entry.id ? { id: entry.id } : {}), path: entry.path, name })));
     applyPathMoves(result.results);
     await refreshLibrary({ quiet: true });
     const failed = failedCount(result);
@@ -937,7 +946,7 @@ export async function moveSelected(targetDir) {
   }
   state.busy = true;
   try {
-    const result = await moveLibraryItems([...state.selected], targetDir ?? '');
+    const result = await moveLibraryItems([...state.selected].map(refOfPath), targetDir ?? '');
     // 若移动的是当前目录（或它的上级），把目录与预览路径一起迁到新位置
     applyLibraryMoves(applyPathMoves(result.results));
     state.selected = [];
@@ -963,7 +972,7 @@ export async function copySelected(targetDir) {
   }
   state.busy = true;
   try {
-    const result = await copyLibraryItems([...state.selected], targetDir ?? '');
+    const result = await copyLibraryItems([...state.selected].map(refOfPath), targetDir ?? '');
     // 复制返回的结果里有新路径：用源条目做模板增量并入，避免整页刷新闪烁
     const template = new Map(entries.value.map((entry) => [entry.path, entry]));
     const added = [];
@@ -1071,7 +1080,7 @@ export async function deletePaths(paths) {
   }
   state.busy = true;
   try {
-    const result = await deleteLibraryItems(list);
+    const result = await deleteLibraryItems(list.map(refOfPath));
     await applyDeletionImpact(await inspectDeletionImpact(list), list);
     applyLibraryRemoval(list);
     const failed = failedCount(result);
@@ -1106,7 +1115,7 @@ export async function deleteFolder(folder) {
   const name = folder?.name || path.split('/').pop();
   state.busy = true;
   try {
-    const result = await deleteLibraryItems([path]);
+    const result = await deleteLibraryItems([{ path }]);
     await applyDeletionImpact(await inspectDeletionImpact([path]), [path]);
     // applyLibraryRemoval 会顺带处理当前目录 / 预览 / 选中项
     applyLibraryRemoval([path]);

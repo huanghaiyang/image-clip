@@ -65,8 +65,12 @@ export function fetchLibraryDirectory(dir = '', { force = false } = {}) {
 }
 
 /** 单个文件的尺寸 / 时长等元数据。 */
-export function fetchLibraryEntryMeta(path) {
-  return requestJson(`/api/library/meta?path=${encodeURIComponent(path)}`, { cache: 'no-cache' });
+export function fetchLibraryEntryMeta(ref) {
+  const isEntry = ref && typeof ref === 'object';
+  const query = isEntry && ref.id
+    ? `id=${encodeURIComponent(ref.id)}`
+    : `path=${encodeURIComponent(isEntry ? ref.path : ref)}`;
+  return requestJson(`/api/library/meta?${query}`, { cache: 'no-cache' });
 }
 
 /** 在系统文件资源管理器中打开目录 / 定位并选中文件。 */
@@ -330,7 +334,12 @@ export async function fetchLibraryBlob(entryOrUrl) {
 }
 
 export function libraryFileUrl(entry) {
-  const base = entry?.url ?? (entry?.path ? `/api/library/file?path=${encodeURIComponent(entry.path)}` : '');
+  const ref = entry?.id
+    ? `/api/library/file?id=${encodeURIComponent(entry.id)}`
+    : entry?.path
+      ? `/api/library/file?path=${encodeURIComponent(entry.path)}`
+      : '';
+  const base = entry?.url && !entry?.id ? entry.url : ref || entry?.url || '';
   if (!base) return '';
   // 带上 mtime：删除旧文件后上传同名新文件时 URL 会变，避免 <video>/<img> 复用旧缓存
   if (!entry?.mtime) return base;
@@ -346,15 +355,18 @@ export function libraryFileUrl(entry) {
 export function libraryThumbUrl(entry, width) {
   const w = Number(width);
   const hasWidth = Number.isFinite(w) && w > 0;
-  if (entry?.path && hasWidth) {
-    return `/api/library/thumb?path=${encodeURIComponent(entry.path)}&v=${entry.mtime ?? 0}&w=${Math.round(w)}`;
+  const id = entry?.id ? String(entry.id) : '';
+  if ((id || entry?.path) && hasWidth) {
+    const ref = id ? `id=${encodeURIComponent(id)}` : `path=${encodeURIComponent(entry.path)}`;
+    return `/api/library/thumb?${ref}&v=${entry.mtime ?? 0}&w=${Math.round(w)}`;
   }
   if (entry?.thumbUrl) {
     if (!hasWidth) return entry.thumbUrl;
     // 回收站 / 历史版本的条目只有服务端拼好的 thumbUrl，直接补一个 w 参数
     return `${entry.thumbUrl}${entry.thumbUrl.includes('?') ? '&' : '?'}w=${Math.round(w)}`;
   }
-  if (!entry?.path) return '';
+  if (!entry?.path && !id) return '';
+  if (id) return `/api/library/thumb?id=${encodeURIComponent(id)}&v=${entry.mtime ?? 0}`;
   return `/api/library/thumb?path=${encodeURIComponent(entry.path)}&v=${entry.mtime ?? 0}`;
 }
 

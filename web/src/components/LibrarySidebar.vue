@@ -518,13 +518,6 @@ async function removeFolder(folder) {
 .text-input {
   flex: 1;
   min-width: 0;
-  height: 24px;
-  padding: 0 6px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--text);
-  font-size: 11px;
 }
 
 .mono {

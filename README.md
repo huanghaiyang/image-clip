@@ -664,6 +664,28 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 * **文件服务**：`GET /api/library/file` 走 `res.sendFile`，因此支持 Range 请求，
   `<video>` 可以拖动进度条、只加载需要的片段。
 
+**输入控件样式**
+
+`.text-input` / 数字 / 搜索 / 密码输入框、`select`、`textarea` 统一到一套全局样式：
+28px 高、9px 内边距、7px 圆角、`--border-strong` 描边、悬浮/聚焦描边渐变、聚焦时 3px 主色光环；
+数字输入等宽数字并去掉系统上下箭头；下拉框统一内联 SVG 箭头；checkbox/range 使用主色；
+组件里只保留 flex/width 等布局规则，不再各自重复边框与高度。
+
+**文件唯一 ID（`server/src/fileIds.js`）**
+
+资源库给每个文件分配稳定 id（`f_` + 12 位 hex），存 `<cacheRoot>/file-ids.json`：
+
+* 扫描时给新文件补 id、清理已消失路径的映射；**改名 / 移动后 id 不变**；
+* 条目（tree/list/meta/上传响应）都带 `id`，服务端拼的 `url` / `thumbUrl` 也优先用 id；
+* 所有按文件操作的接口都支持 id：
+  - 查询参数 `?id=f_xxx`（`/file`、`/thumb`、`/meta`、`/reveal`、`/versions`）；
+  - 请求体 `{ items:[{id,name}] }`（改名）、`{ paths:[{id},...], target }`（移动/复制）、
+    `{ paths:[{id},...] }`（删除）；
+  - 找不到/失效的 id 返回 404，前端可回退路径；
+* 前端 `libraryFileUrl` / `libraryThumbUrl` / 元数据懒加载 / 改名 / 移动 / 复制 / 删除都优先按 id 调用，
+  避免「改名后用旧路径操作失败」「两个操作抢同一路径」这类占用问题；
+* 回收站回收时释放 id，恢复时分配新 id；复制得到新 id。
+
 ### 10.3 视频工作区
 
 * **探测**：`ffprobe` 给出时长、宽高、帧率、编码、码率、是否有音轨。
@@ -1062,6 +1084,7 @@ data/logs/
 * `web/test/similar.test.js`：相似度文案分档、百分比/距离格式化、结果排序与 minScore 过滤、汇总文案；
 * `server/test/jobs.test.js`：后台任务创建/进度/完成/失败/取消、列表排序与上限；
 * `server/test/library-move.test.js`：移动 / 复制 / 批量改名遇到同名文件时自动加序号、不覆盖；
+* `server/test/file-ids.test.js`：文件 id 稳定（改名/移动）、跨重启持久化、按 id 操作与 HTTP `?id=`；
 * `server/test/logger.test.js`：按天/按大小拆分、任务日志分离、保留期清理、tail；
 * `server/test/guest.test.js`：临时用户标识解析与任务/日志隔离（A 看不到 B 的任务，资源库共享）；
 * `server/test/jobs-queue.test.js`：任务并发上限、排队位置、用户配额、取消、任务日志落盘；

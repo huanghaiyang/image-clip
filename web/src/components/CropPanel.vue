@@ -342,19 +342,8 @@ function savePreset() {
 .mini-field input {
   flex: 1;
   min-width: 0;
-  height: 24px;
-  padding: 0 6px;
   text-align: right;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--text);
   font-family: var(--mono);
-}
-
-.mini-field input:focus {
-  outline: none;
-  border-color: var(--accent);
 }
 
 .row-actions {
@@ -411,17 +400,6 @@ function savePreset() {
 .text-input {
   flex: 1;
   min-width: 0;
-  height: 26px;
-  padding: 0 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--text);
-}
-
-.text-input:focus {
-  outline: none;
-  border-color: var(--accent);
 }
 
 .check-row {

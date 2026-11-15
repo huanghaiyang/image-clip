@@ -866,17 +866,6 @@ onMounted(() => {
 
 .text-input {
   width: 100%;
-  height: 24px;
-  padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--panel-2);
-  color: var(--text);
-}
-
-.text-input:focus {
-  outline: none;
-  border-color: var(--accent);
 }
 
 .text-input.is-narrow {

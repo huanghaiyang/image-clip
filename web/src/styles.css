@@ -117,6 +117,132 @@ input {
   background: transparent;
 }
 
+/* ---- 输入控件（全局统一） ----
+ * 文本 / 数字 / 搜索 / 密码输入框、下拉框、多行文本共用一套尺寸与焦点样式。
+ * 组件里只保留布局相关的 flex/width，不再各自重复边框与高度。 */
+:where(
+  .text-input,
+  textarea,
+  select,
+  input[type='text'],
+  input[type='search'],
+  input[type='number'],
+  input[type='password'],
+  input[type='url'],
+  input[type='email'],
+  input[type='tel']
+) {
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--panel-2) 94%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+}
+
+:where(
+  .text-input,
+  textarea,
+  select,
+  input[type='text'],
+  input[type='search'],
+  input[type='number'],
+  input[type='password'],
+  input[type='url'],
+  input[type='email'],
+  input[type='tel']
+):hover:not(:disabled):not(:focus) {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border-strong));
+}
+
+:where(
+  .text-input,
+  textarea,
+  select,
+  input[type='text'],
+  input[type='search'],
+  input[type='number'],
+  input[type='password'],
+  input[type='url'],
+  input[type='email'],
+  input[type='tel']
+):focus {
+  border-color: var(--accent);
+  background: var(--panel-2);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+:where(.text-input, textarea, select, input[type='text'], input[type='search'], input[type='number'], input[type='password']):disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+:where(input, textarea)::placeholder {
+  color: var(--text-muted);
+  opacity: 0.78;
+}
+
+/* 数字输入：等宽数字、去掉系统上下箭头（避免深色面板里一块浅色疙瘩） */
+input[type='number'] {
+  font-variant-numeric: tabular-nums;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* 下拉框：统一去掉原生外观，用内联 SVG 画一个细箭头 */
+select {
+  appearance: none;
+  padding-right: 26px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23a0a0a0' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  cursor: pointer;
+}
+
+html[data-theme='light'] select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23757575' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+textarea {
+  height: auto;
+  min-height: 64px;
+  padding: 7px 9px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+input[type='checkbox'],
+input[type='radio'] {
+  accent-color: var(--accent);
+}
+
+input[type='range'] {
+  accent-color: var(--accent);
+}
+
+input[type='color'] {
+  padding: 2px;
+  cursor: pointer;
+}
+
+/* 键盘可达性：按钮/输入框获得键盘焦点时给一圈清晰的轮廓 */
+button:focus-visible,
+.btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 65%, transparent);
+  outline-offset: 1px;
+}
+
 /* ---- 通用小组件 ---- */
 
 .btn {
