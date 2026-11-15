@@ -60,7 +60,7 @@ function createProbeCache() {
 /**
  * @param {import('./library.js').createLibrary} library
  */
-export function createVideoRouter(library) {
+export function createVideoRouter(library, { jobs } = {}) {
   const router = express.Router();
   const jsonBody = express.json({ limit: '4mb' });
   const wrap = (handler) => (req, res, next) => Promise.resolve(handler(req, res)).catch(next);
@@ -137,6 +137,7 @@ export function createVideoRouter(library) {
         path: rel,
         name: path.basename(abs),
         bytes: stat.size,
+        mtime: Math.round(stat.mtimeMs),
         url: `/api/library/file?path=${encodeURIComponent(rel)}`,
         ...meta,
       });
@@ -223,6 +224,13 @@ export function createVideoRouter(library) {
     }),
   );
 
+  /**
+   * 截取关键帧（可后台执行）。
+   *
+   * 同步模式（默认，兼容旧客户端/测试）：请求里干完再返回；
+   * 后台模式：body 里 `background: true`，接口立刻返回 202 + job，
+   * 实际截帧在后台跑，进度写到 jobs，前端可用 /api/jobs 轮询。
+   */
   router.post(
     '/frames',
     jsonBody,
@@ -243,43 +251,77 @@ export function createVideoRouter(library) {
       await fs.mkdir(outputDir, { recursive: true });
 
       const prefix = sanitizePrefix(body.prefix || videoBase);
-      const result = await extractFrames({
-        input: abs,
-        times,
-        outputDir,
-        prefix,
-        format: body.format,
-        width: body.width,
-        pad: body.pad,
-      });
-
-      const entries = [];
-      for (const file of result.files) {
-        try {
-          const relFile = path.relative(library.root, file.path).split(path.sep).join('/');
-          entries.push(await library.entryByRel(relFile));
-          // 截出来的关键帧是新资源：立刻加入指纹队列，相似检索马上能用
-          library.phashTouch(relFile);
-        } catch {
-          /* 单条元数据读取失败不影响整体结果 */
-        }
-      }
-      library.invalidateScan();
-
-      res.json({
-        ok: true,
-        sourcePath: rel,
+      const background = body.background === true || req.query.background === '1';
+      const jobMeta = {
+        type: 'video.frames',
+        path: rel,
         sourceName: path.basename(abs),
-        duration: meta.duration,
-        mode: resolveMode(body),
         folder: folderRel,
         requested: times.length,
-        extracted: result.files.length,
-        failed: result.errors.length,
-        errors: result.errors.slice(0, 20),
-        entries,
-        elapsedMs: Date.now() - started,
-      });
+      };
+
+      const run = async (onProgress) => {
+        const result = await extractFrames({
+          input: abs,
+          times,
+          outputDir,
+          prefix,
+          format: body.format,
+          width: body.width,
+          pad: body.pad,
+          onProgress,
+        });
+        const entries = [];
+        for (const file of result.files) {
+          try {
+            const relFile = path.relative(library.root, file.path).split(path.sep).join('/');
+            entries.push(await library.entryByRel(relFile));
+            // 截出来的关键帧是新资源：立刻加入指纹队列，相似检索马上能用
+            library.phashTouch(relFile);
+          } catch {
+            /* 单条元数据读取失败不影响整体结果 */
+          }
+        }
+        library.invalidateScan();
+        return {
+          ok: true,
+          sourcePath: rel,
+          sourceName: path.basename(abs),
+          duration: meta.duration,
+          mode: resolveMode(body),
+          folder: folderRel,
+          requested: times.length,
+          extracted: result.files.length,
+          failed: result.errors.length,
+          errors: result.errors.slice(0, 20),
+          entries,
+          elapsedMs: Date.now() - started,
+        };
+      };
+
+      if (background) {
+        if (!jobs) throw new LibraryError('后台任务未启用', 'NO_JOBS', 500);
+        const job = jobs.create({
+          type: jobMeta.type,
+          label: `截取关键帧 · ${jobMeta.sourceName}`,
+          meta: jobMeta,
+        });
+        void (async () => {
+          try {
+            const payload = await run((done, total) => {
+              jobs.update(job.id, { progress: total ? done / total : 0, detail: `已截取 ${done}/${total}` });
+              if (jobs.get(job.id)?.cancelled) throw new Error('任务已取消');
+            });
+            jobs.finish(job.id, payload);
+          } catch (err) {
+            jobs.fail(job.id, err.message);
+          }
+        })();
+        res.status(202).json({ ok: true, background: true, job });
+        return;
+      }
+
+      res.json(await run());
     }),
   );
 

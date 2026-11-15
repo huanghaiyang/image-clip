@@ -777,6 +777,9 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 | POST | `/api/library/similar?limit=` | 智能识图：body 为图片字节，按内容找相似图片 |
 | GET | `/api/library/similar/index` | 指纹索引状态（running/queued/indexed/totalImages/done/failed） |
 | POST | `/api/library/similar/index` | 为存量图片补建指纹（`{force:true}` 整库重算，后台执行） |
+| GET | `/api/jobs` | 后台任务列表（`?active=1` 只看运行中的） |
+| GET | `/api/jobs/:id` | 单个任务状态 / 进度 / 结果 |
+| POST | `/api/jobs/:id/cancel` | 请求取消任务（分片间检查） |
 | GET | `/api/video/health` | FFmpeg 可用性、版本、搜索过的路径 |
 | GET | `/api/video/probe?path=` | ffprobe 元信息（时长/帧率/编码/音轨） |
 | GET | `/api/video/frame?path=&t=&w=` | 取指定时刻的单帧 JPEG（逐帧比对 / 封面；`t` 秒、`w` 64–1280） |
@@ -889,7 +892,53 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
   编译（冷启动实测 DCL 约 3.5s → 0.6s 量级；代价是 dev server 启动多花 1~2s）。
   改这个配置需要重启 `npm run dev` 才生效。
 
-### 10.13 测试
+### 10.13 后台任务与右下角通知（`jobs.js` / `useJobs` / `useToasts`）
+
+视频截帧这类几秒到几十秒的操作改成**后台任务**：HTTP 立即返回 202 + job，实际工作异步执行。
+
+* `server/src/jobs.js`：内存任务表（保留最近 50 条），字段 `status(running/done/failed/cancelled)`、`progress 0~1`、
+  `detail`、`result/error`、`meta`；`POST /api/video/frames` 带 `background:true` 时创建任务，
+  每截一帧回调 `jobs.update()`，结束 `finish/fail`；`GET /api/jobs`、`GET /api/jobs/:id`、`POST /api/jobs/:id/cancel`。
+* `web/src/composables/useJobs.js`：轮询任务（有任务 1s、空闲 6s），状态变化时发通知并用 `window` 事件 `dsh:job`
+  广播，视频工作区据此刷新「上次截帧」、资源库与侧栏。
+* `useToasts` + `Toasts.vue`：右下角气泡栈，最多 5 条，同一 id 原地更新（进度→成功/失败），
+  多任务同时跑时纵向堆叠；覆盖上传、删除、音频提取、视频导出、截帧等关键阶段。
+* 首次打开应用时**不会补发历史任务通知**（首轮只做基线），避免一进页面刷出一屏旧气泡。
+
+### 10.14 资源库目录选择器（`useFolderPicker`）
+
+以前视频面板的保存位置是手填字符串（容易打错、不校验目录是否存在）。现在统一用树形选择器：
+点「选择…」弹出 `FolderPickerDialog`，与左侧目录树同源，支持展开/折叠、根目录、Esc 关闭，
+返回相对资源库的 POSIX 路径；已覆盖关键帧保存位置、音频保存目录、视频裁剪/水印输出目录。
+其余「保存到资源库/xxx」都是固定目录（裁剪结果/抠图结果…），不涉及手填路径。
+
+### 10.15 视频时间轴与同名替换（首次打开 / 换文件）
+
+* **首次打开没有关键帧缩略图**：`loadFilmstrip()` 以前在 `ffmpegReady` 还没返回（健康检查异步）时直接 `return []`，
+  之后没人再调用；现在先 `await checkVideoHealth()` 再抽帧，并加了「请求期间切视频就丢弃旧结果」的保护。
+* **删除旧视频后上传同名新视频仍显示旧帧**：`selectVideo()` 以前 `state.activePath === path && state.meta` 就直接复用旧 meta。
+  现在总是先 `probe`，用 `bytes + mtime + 时长 + 分辨率` 判断文件是否真的换了：没换则保持现场，
+  换了则清空并按新文件重新探测、重载时间轴；`/api/video/probe` 增加 `mtime` 字段，文件 URL 也带 `v=<mtime>` 避免浏览器旧缓存。
+
+### 10.16 图片处理 · 编辑历史时间轴 + 前后对比（`useEditTimeline`）
+
+* 每 600ms 检查各工具（裁剪/去背景/橡皮擦/像素画/水印/素材列表）的历史深度与当前工具，
+  变化时抓一张「当前结果」缩略图（直接取各工具已渲染好的 canvas，或按裁剪框从原图裁），
+  放进**垂直时间轴**（最多 40 步，每步有缩略图与时间）。
+* 点击某一步 → 把每个工具栈 undo/redo 到当时的深度（跨工具回退），不新增步骤。
+* 「对比」：选中的那一步（修改前）与最新一步（修改后）左右并排，修改后按步骤位置叠加透明度，便于目视差异。
+* 左下角浮动按钮「历史 N」展开面板，面板里也有撤销/重做。
+
+### 10.17 资源库展示细节
+
+* **缩略图按原始比例**：网格卡片不再统一 4:3 黑边，卡片高度跟随素材真实宽高比（极端长条夹在 0.55~2.4 之间），
+  通过 CSS 变量 `--thumb-aspect` 传给 `.thumb`。
+* **精灵图播放**：预览层对图片提供「精灵图播放」，名称含 sprite/sheet/序列/帧 或 `7x6` 之类网格的图片会自动进入播放器
+  （`SpritePlayer.vue`）；按透明分隔线自动切帧，也可切换到「网格」并手填列/行，支持播放/暂停、逐帧、FPS 选择与循环。
+* **删除前提示**：删除的资源如果正在图片处理「当前素材」里、或视频/音频工作区正在使用，确认框会明确列出
+  （例如「图片处理工作区的『当前素材』里有 1 张来自这里」），确认后从工作区移除并清理未保存编辑；取消则整个删除中止。
+
+### 10.17 测试
 
 `npm test` 里新增了几组共享算法与前端纯逻辑单测：
 
@@ -905,6 +954,8 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 * `server/test/phash-index.test.js`：指纹索引维护（存量全量补建、二次调用幂等、扫描发现新图自动补、
   写操作 phashTouch 立即排队、改名迁移/删除清理/force 重算、索引落盘）；
 * `web/test/similar.test.js`：相似度文案分档、百分比/距离格式化、结果排序与 minScore 过滤、汇总文案；
+* `server/test/jobs.test.js`：后台任务创建/进度/完成/失败/取消、列表排序与上限；
+* `web/test/toasts.test.js`：气泡通知的 push/update（同 id 原地更新）/dismiss/上限 5 条；
 * `web/test/async.test.js`：`mapLimit` 的顺序、并发上限、空列表与错误冒泡；
 * `web/test/version-compare.test.js`：逐像素差异（透明像素 / 单通道偏色 / 阈值 / 长度不足）、
   波形降采样与列比较（列数不一致）、帧号 ⇄ 秒数换算与时间码格式化。

@@ -5,7 +5,7 @@
  * 目录树直接用服务端返回的扁平文件夹列表（每个条目带 parent/depth），
  * 前端不再递归建树 —— 这样搜索、批量移动都不需要遍历 UI 结构。
  */
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 
 import { useLibrary } from '../composables/useLibrary.js';
 import { useRenamePrompt } from '../composables/useRenamePrompt.js';
@@ -19,6 +19,14 @@ const { confirm } = useConfirm();
 
 const creating = ref(false);
 const folderName = ref('');
+const folderInput = ref(null);
+
+// 点「新建文件夹」后输入框自动获得焦点（不用再点一次才能输入）
+watch(creating, async (open) => {
+  if (!open) return;
+  await nextTick();
+  folderInput.value?.focus();
+});
 
 /** 每层缩进 12px，根节点不缩进。 */
 function indentOf(folder) {
@@ -137,11 +145,12 @@ function renameFolder(folder) {
 
 /** 整个文件夹连同子目录一起移入回收站。 */
 async function removeFolder(folder) {
+  const impact = await actions.describeDeletionImpact([folder.path]);
   const ok = await confirm({
     title: '删除文件夹',
-    message: `将文件夹「${folder.name}」及其中的全部内容移入回收站？`,
-    detail: folder.path,
-    confirmText: '移入回收站',
+    message: `将文件夹「${folder.name}」及其中的全部内容移入回收站？${impact.message ? ` ${impact.message}` : ''}`,
+    detail: impact.detail || folder.path,
+    confirmText: impact.message ? '删除并从工作区移除' : '移入回收站',
     danger: true,
   });
   if (ok) void actions.deleteFolder(folder);
@@ -249,6 +258,7 @@ async function removeFolder(folder) {
       </div>
       <div v-else-if="creating" class="new-folder">
         <input
+          ref="folderInput"
           v-model="folderName"
           class="text-input"
           placeholder="文件夹名称"

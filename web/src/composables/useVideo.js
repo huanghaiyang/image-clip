@@ -24,6 +24,7 @@ import {
   removeVideoWatermark,
 } from '../lib/library.js';
 import { refreshLibrary, setDir as setLibraryDir } from './useLibrary.js';
+import { pushToast, updateToast } from './useToasts.js';
 import { onLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
 
 const state = reactive({
@@ -33,6 +34,7 @@ const state = reactive({
   meta: null,
   loading: false,
   filmstripLoading: false,
+  framesJobId: null,
   busy: false,
   error: '',
   status: '',
@@ -244,7 +246,27 @@ export async function checkVideoHealth({ force = false } = {}) {
 export async function selectVideo(pathOrEntry) {
   const path = typeof pathOrEntry === 'string' ? pathOrEntry : pathOrEntry?.path;
   if (!path) return null;
-  if (state.activePath === path && state.meta) return state.meta;
+
+  // 同一个路径的视频可能已经被「删除旧文件 + 上传同名新文件」替换掉。
+  // 以前这里直接 `if (state.activePath === path && state.meta) return state.meta`，
+  // 于是新视频沿用旧 meta / 旧时间轴缩略图。现在先 probe 一次，用
+  // bytes + mtime + 时长/分辨率判断文件是否真的变了：
+  // 没变 → 直接复用现场（不打断播放）；变了 → 清空并按新文件重新加载。
+  const previousMeta = state.meta;
+  let probed = null;
+  try {
+    probed = await probeLibraryVideo(path);
+  } catch (err) {
+    if (state.activePath === path && previousMeta) return previousMeta;
+    setError(`读取视频失败：${err.message}`);
+    return null;
+  }
+  const signature = (meta) =>
+    meta ? [meta.bytes ?? '', meta.mtime ?? '', Math.round((meta.duration ?? 0) * 1000), meta.width ?? '', meta.height ?? ''].join('|') : '';
+  if (state.activePath === path && previousMeta && signature(previousMeta) === signature(probed)) {
+    state.meta = { ...previousMeta, ...probed };
+    return state.meta;
+  }
 
   pause();
   state.activePath = path;
@@ -263,7 +285,7 @@ export async function selectVideo(pathOrEntry) {
   void checkVideoHealth();
 
   try {
-    const meta = await probeLibraryVideo(path);
+    const meta = probed;
     state.meta = meta;
     setStatus(`已载入 ${meta.name} · ${formatDuration(meta.duration)} · ${meta.width || '?'}×${meta.height || '?'}`);
     void loadFilmstrip();
@@ -278,10 +300,18 @@ export async function selectVideo(pathOrEntry) {
 
 /** 请求服务端均匀抽帧，拼成时间轴缩略图带。 */
 export async function loadFilmstrip({ count = 16, width = 160 } = {}) {
+  if (!state.activePath) return [];
+  // 首次打开视频时，健康检查可能还没返回（ffmpegReady 仍是 false）。
+  // 以前这里直接 return，导致「第一次进视频工作区时间轴没有关键帧缩略图」——
+  // 现在先等健康检查，再决定能不能出图；失败也走下面统一的 catch。
+  if (!ffmpegReady.value) await checkVideoHealth();
   if (!state.activePath || !ffmpegReady.value) return [];
+  const requestedPath = state.activePath;
   state.filmstripLoading = true;
   try {
-    const payload = await fetchFilmstrip(state.activePath, { count, width });
+    const payload = await fetchFilmstrip(requestedPath, { count, width });
+    // 请求期间用户可能已经切到别的视频，避免把旧结果覆盖到新视频上
+    if (state.activePath !== requestedPath) return state.filmstrip;
     state.filmstrip = payload?.frames ?? [];
     return state.filmstrip;
   } catch (err) {
@@ -452,38 +482,69 @@ export async function extractFrames() {
     return null;
   }
 
-  state.busy = true;
-  state.progress = '正在截取关键帧…';
-  setStatus(`正在截取关键帧（${mode === 'times' ? `${state.marks.length} 个时间点` : mode === 'count' ? `${state.options.count} 帧` : `每 ${state.options.interval}s 一帧`}）`);
+  const payload = {
+    path: state.activePath,
+    mode,
+    interval: state.options.interval,
+    count: state.options.count,
+    times: manualTimes.value,
+    format: state.options.format,
+    width: state.options.width,
+    prefix: state.options.prefix || videoBase.value,
+    dir: targetDir.value,
+    // 关键帧截取走后台任务：接口立即返回 job，用户可以继续播放/切视频/去别的工区
+    background: true,
+  };
+  const describe = mode === 'times' ? `${state.marks.length} 个时间点` : mode === 'count' ? `${state.options.count} 帧` : `每 ${state.options.interval}s 一帧`;
+  setStatus(`已提交后台截帧（${describe}），完成后会通知`);
   try {
-    const payload = {
-      path: state.activePath,
-      mode,
-      interval: state.options.interval,
-      count: state.options.count,
-      times: manualTimes.value,
-      format: state.options.format,
-      width: state.options.width,
-      prefix: state.options.prefix || videoBase.value,
-      dir: targetDir.value,
-    };
     const result = await extractVideoFrames(payload);
-    state.lastExtract = {
-      type: 'frames',
-      ...result,
-      at: Date.now(),
-    };
+    if (result?.job) {
+      state.framesJobId = result.job.id;
+      pushToast({
+        id: `job:${result.job.id}`,
+        kind: 'progress',
+        title: '正在后台截取关键帧',
+        message: `${describe} · 保存到 资源库/${result.job.meta?.folder ?? targetDir.value}`,
+        progress: 0,
+        timeout: 0,
+      });
+      return { background: true, job: result.job };
+    }
+    // 兼容同步返回（旧服务端）：直接当成一次完成
+    state.lastExtract = { type: 'frames', ...result, at: Date.now() };
     await refreshLibrary({ quiet: true });
     setLibraryDir(result.folder);
-    setStatus(`已截取 ${result.extracted}/${result.requested} 帧 → 资源库/${result.folder}${result.failed ? `（${result.failed} 帧失败）` : ''}`);
+    setStatus(`已截取 ${result.extracted}/${result.requested} 帧 → 资源库/${result.folder}`);
     return result;
   } catch (err) {
     setError(`截取关键帧失败：${err.message}`);
     return null;
-  } finally {
-    state.busy = false;
-    state.progress = '';
   }
+}
+
+/**
+ * 后台任务状态广播：截帧完成时刷新资源库、记录最近结果。
+ * 只处理 video.frames（其他任务由各自模块关心）。
+ */
+function onJobEvent(event) {
+  const job = event?.detail;
+  if (!job || job.type !== 'video.frames' || job.status === 'running') return;
+  if (job.status === 'done' && job.result) {
+    state.lastExtract = { type: 'frames', ...job.result, at: Date.now() };
+    state.framesJobId = null;
+    void refreshLibrary({ quiet: true }).then(() => {
+      setLibraryDir(job.result.folder);
+    });
+    setStatus(`后台截帧完成：${job.result.extracted}/${job.result.requested} 帧 → 资源库/${job.result.folder}`);
+  } else if (job.status === 'failed') {
+    state.framesJobId = null;
+    setError(`后台截帧失败：${job.error || '未知错误'}`);
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('dsh:job', onJobEvent);
 }
 
 export async function extractAudio() {
@@ -503,6 +564,8 @@ export async function extractAudio() {
   state.busy = true;
   state.progress = '正在提取音频…';
   setStatus(`正在提取音频（${state.audio.format.toUpperCase()}）`);
+  const toastId = `video:audio:${Date.now()}`;
+  pushToast({ id: toastId, kind: 'progress', title: '正在提取音频', message: state.audio.format.toUpperCase(), timeout: 0 });
   try {
     const result = await extractVideoAudio({
       path: state.activePath,
@@ -514,9 +577,11 @@ export async function extractAudio() {
     await refreshLibrary({ quiet: true });
     setLibraryDir(state.audio.dir || '音频');
     setStatus(`已提取音频 → 资源库/${result.entry?.path ?? ''}`);
+    updateToast(toastId, { kind: 'success', progress: 1, title: '音频提取完成', message: `资源库/${result.entry?.path ?? ''}` });
     return result;
   } catch (err) {
     setError(`提取音频失败：${err.message}`);
+    updateToast(toastId, { kind: 'error', title: '音频提取失败', message: err.message });
     return null;
   } finally {
     state.busy = false;
@@ -700,6 +765,8 @@ export async function cutVideo() {
 
   state.busy = true;
   setStatus(`正在导出${hasTrim ? `切断 ${range.start.toFixed(2)}s → ${range.end.toFixed(2)}s` : '裁剪'}…`);
+  const cutToast = `video:cut:${Date.now()}`;
+  pushToast({ id: cutToast, kind: 'progress', title: '正在导出视频', message: 'FFmpeg 重编码中…', timeout: 0 });
   try {
     const result = await cutVideoFile({
       path: state.activePath,
@@ -713,9 +780,11 @@ export async function cutVideo() {
     await refreshLibrary({ quiet: true });
     setLibraryDir(result.entry?.dir || state.edit.output.dir || '视频处理');
     setStatus(`已导出裁剪视频 → 资源库/${result.entry?.path ?? ''}`);
+    updateToast(cutToast, { kind: 'success', progress: 1, title: '视频导出完成', message: `资源库/${result.entry?.path ?? ''}` });
     return result;
   } catch (err) {
     setError(`导出视频失败：${err.message}`);
+    updateToast(cutToast, { kind: 'error', title: '视频导出失败', message: err.message });
     return null;
   } finally {
     state.busy = false;

@@ -868,6 +868,12 @@ export function clearSession() {
   Object.assign(state.view, { mode: 'source', compare: false, split: 0.5, zoom: 'fit' });
 }
 
+/** 掩膜笔刷历史深度（供图片处理的「垂直时间轴」记录/回退）。 */
+export function maskHistoryInfo() {
+  const entry = selectedEntry.value;
+  return { undo: entry?.history?.length ?? 0, redo: entry?.redo?.length ?? 0 };
+}
+
 export function useWatermark() {
   return {
     state: readonly(state),

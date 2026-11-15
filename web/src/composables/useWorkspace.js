@@ -272,6 +272,11 @@ function applySnapshot(snapshot) {
   scheduleRecompute({ immediate: true });
 }
 
+/** 素材列表撤销/重做深度（供图片处理时间轴记录/回退）。 */
+export function historyInfo() {
+  return { undo: history.length, redo: redo.length };
+}
+
 export function undoWorkspace() {
   if (!history.length) return false;
   redo.push(workspaceSnapshot());
@@ -450,6 +455,27 @@ export function removeItem(id) {
     state.selectedId = state.items[Math.min(index, state.items.length - 1)]?.id ?? null;
   }
   setStatus(`已移除 ${removed.name}`);
+}
+
+/**
+ * 资源库里的文件被删除后，把「当前素材」里来自这些路径的图片一并移除。
+ * 用于删除前的提示确认之后（避免编辑一张已经被删掉的文件）。
+ * @param {string[]} paths 被删除的资源库相对路径（可以是文件夹前缀）
+ * @returns {number} 移除的素材数量
+ */
+export function removeByLibraryPaths(paths) {
+  const roots = (paths ?? []).filter(Boolean);
+  if (!roots.length) return 0;
+  const inside = (value) => roots.some((root) => value === root || value.startsWith(`${root}/`));
+  const doomed = state.items.filter((item) => item.libraryPath && inside(item.libraryPath));
+  if (!doomed.length) return 0;
+  recordHistory();
+  const ids = new Set(doomed.map((item) => item.id));
+  state.items.splice(0, state.items.length, ...state.items.filter((item) => !ids.has(item.id)));
+  state.checkedIds = state.checkedIds.filter((id) => !ids.has(id));
+  if (ids.has(state.selectedId)) state.selectedId = state.items[0]?.id ?? null;
+  setStatus(`已从当前素材移除 ${ids.size} 张被删除的图片`);
+  return ids.size;
 }
 
 export function clearItems() {
@@ -1116,6 +1142,7 @@ export function useWorkspace() {
     trimAtlas,
     spriteMerge,
     stats,
+    historyInfo,
     canUndoAssets,
     canRedoAssets,
     actions: {
@@ -1125,6 +1152,7 @@ export function useWorkspace() {
       addImageBlob,
       loadSamples,
       removeItem,
+      removeByLibraryPaths,
       setItemLibraryPath,
       clearItems,
       selectItem,

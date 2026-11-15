@@ -48,6 +48,7 @@ import { createLlmRouter } from './llm/routes.js';
 import { DETECT_METHODS, DEFAULT_DETECT_OPTIONS } from '../../shared/watermark/detect.js';
 import { ffmpegStatus } from './ffmpeg.js';
 import { createLibrary, createLibraryRouter } from './library.js';
+import { createJobManager } from './jobs.js';
 import { createVideoRouter } from './video.js';
 import { cutoutModelPath, cutoutStatus } from './cutout.js';
 import { findCutoutModel } from '../../shared/cutout.js';
@@ -68,6 +69,9 @@ export function createApp() {
   // 资源库与视频工作区共用同一个 library 实例：视频接口也通过它做路径校验与落盘。
   const library = createLibrary();
   library.init().catch((err) => console.warn('[image-clip] 资源库初始化失败:', err.message));
+
+  // 后台任务（视频截帧等）：HTTP 请求只负责创建任务，长活在这里异步跑
+  const jobs = createJobManager();
 
   // 所有写接口都用“原始二进制”接收，JSON 负载由 extractInput 内部分支处理。
   const rawBody = express.raw({ type: () => true, limit: LIMITS.maxUploadBytes });
@@ -361,9 +365,27 @@ export function createApp() {
     }
   });
 
+  // 后台任务状态（前端轮询驱动右下角进度气泡）
+  app.get('/api/jobs', (req, res) => {
+    const active = String(req.query.active ?? '') === '1';
+    res.json({ ok: true, jobs: jobs.list({ active }) });
+  });
+  app.get('/api/jobs/:id', (req, res) => {
+    const job = jobs.get(req.params.id);
+    if (!job) {
+      res.status(404).json({ error: { code: 'JOB_NOT_FOUND', message: '任务不存在（可能已过期）' } });
+      return;
+    }
+    res.json({ ok: true, job });
+  });
+  app.post('/api/jobs/:id/cancel', (req, res) => {
+    const job = jobs.cancel(req.params.id);
+    res.json({ ok: Boolean(job), job });
+  });
+
   // 资源库 & 视频工作区（放在图片接口之后、静态资源之前；路径互不冲突）。
   app.use('/api/library', createLibraryRouter(library));
-  app.use('/api/video', createVideoRouter(library));
+  app.use('/api/video', createVideoRouter(library, { jobs }));
 
   // 大模型接入（提供方注册、对话、工具调用）。放在静态资源之前挂载。
   app.use('/api/llm', createLlmRouter());

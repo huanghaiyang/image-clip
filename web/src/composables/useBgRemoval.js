@@ -1510,6 +1510,12 @@ export function holeAtPoint(entry, x, y) {
   return null;
 }
 
+/** 编辑历史深度（按当前素材的抠图历史栈）。 */
+export function historyInfo() {
+  const entry = activeEntry.value;
+  return { undo: entry?.history?.length ?? 0, redo: entry?.redo?.length ?? 0 };
+}
+
 export function useBgRemoval() {
   return {
     state: readonly(state),

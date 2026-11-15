@@ -14,6 +14,9 @@ import SwitchField from './ui/SwitchField.vue';
 import { setMode } from '../composables/useAppMode.js';
 import { useLibrary } from '../composables/useLibrary.js';
 import { useVideo } from '../composables/useVideo.js';
+import { useFolderPicker } from '../composables/useFolderPicker.js';
+import { useJobs } from '../composables/useJobs.js';
+import { cancelJob } from '../lib/jobs.js';
 import { formatDuration, formatSize } from '../lib/library.js';
 
 const {
@@ -33,6 +36,49 @@ const {
   actions,
 } = useVideo();
 const { actions: libraryActions } = useLibrary();
+const { actions: folderPicker } = useFolderPicker();
+const { state: jobsState } = useJobs();
+
+/** 当前视频正在跑的后台截帧任务（按钮/进度条据此展示）。 */
+const framesJob = computed(() => {
+  const path = state.activePath;
+  if (!path) return null;
+  return (
+    jobsState.jobs.find(
+      (job) => job.type === 'video.frames' && job.meta?.path === path && job.status === 'running',
+    ) ?? null
+  );
+});
+
+/** 选择资源库里的目录（关键帧 / 音频 / 视频输出共用同一套树形选择器）。 */
+async function pickFolder({ title, detail, value, allowRoot = true }) {
+  const picked = await folderPicker.open({ title, detail, value, allowRoot });
+  return picked; // null = 取消；'' = 根目录
+}
+
+async function pickFramesFolder() {
+  const picked = await pickFolder({ title: '选择关键帧保存位置', value: targetDir.value, allowRoot: false });
+  if (picked !== null && picked !== undefined) actions.setOption('dir', picked);
+}
+
+async function pickAudioFolder() {
+  const picked = await pickFolder({ title: '选择音频保存位置', value: state.audio.dir || '音频' });
+  if (picked !== null && picked !== undefined) actions.setAudioOption('dir', picked);
+}
+
+async function pickOutputFolder() {
+  const picked = await pickFolder({ title: '选择视频导出位置', value: state.edit.output.dir || '视频处理' });
+  if (picked !== null && picked !== undefined) actions.setOutputOption('dir', picked);
+}
+
+async function cancelFramesJob() {
+  if (!framesJob.value) return;
+  try {
+    await cancelJob(framesJob.value.id);
+  } catch {
+    /* 取消失败会在下一轮轮询里体现 */
+  }
+}
 
 const FRAME_MODES = [
   { value: 'interval', label: '按间隔', hint: '固定时间间隔抽帧，适合做预览条' },
@@ -338,13 +384,25 @@ onMounted(() => {
 
         <div class="field-row">
           <label class="field-label">保存位置</label>
-          <p class="readonly mono" :title="targetDir">{{ targetDir || '—' }}</p>
+          <div class="dir-pick">
+            <p class="readonly mono" :title="targetDir">资源库/{{ targetDir || '—' }}</p>
+            <button class="btn is-mini is-ghost" type="button" @click="pickFramesFolder">选择…</button>
+          </div>
           <p class="note">默认写入资源库/关键帧/&lt;视频名&gt;，截取结果会立即出现在资源库。</p>
         </div>
 
-        <button class="btn is-primary is-block" type="button" :disabled="!canExtract" @click="actions.extractFrames()">
-          {{ state.busy ? state.progress || '处理中…' : '截取关键帧' }}
+        <button class="btn is-primary is-block" type="button" :disabled="!canExtract || Boolean(framesJob)" @click="actions.extractFrames()">
+          {{ framesJob ? '正在后台截帧…' : '截取关键帧' }}
         </button>
+
+        <div v-if="framesJob" class="job-progress">
+          <div class="job-progress-head">
+            <span class="job-progress-text">{{ framesJob.detail || '正在后台截帧…' }}</span>
+            <button class="btn is-mini is-ghost" type="button" @click="cancelFramesJob">取消</button>
+          </div>
+          <div class="job-progress-bar"><span :style="{ width: `${Math.round((framesJob.progress ?? 0) * 100)}%` }"></span></div>
+          <p class="note">后台执行，可以继续播放视频或切到其他工作区，完成后右下角会提示。</p>
+        </div>
 
         <div v-if="frameResult" class="result-box">
           <div class="result-head">
@@ -402,13 +460,10 @@ onMounted(() => {
             <div class="field-head">
               <label class="field-label">保存目录</label>
             </div>
-            <input
-              class="text-input"
-              type="text"
-              :value="state.audio.dir"
-              placeholder="音频"
-              @input="actions.setAudioOption('dir', $event.target.value)"
-            />
+            <div class="dir-pick">
+              <p class="readonly mono" :title="state.audio.dir">资源库/{{ state.audio.dir || '音频' }}</p>
+              <button class="btn is-mini is-ghost" type="button" @click="pickAudioFolder">选择…</button>
+            </div>
           </div>
         </template>
 
@@ -507,13 +562,10 @@ onMounted(() => {
           <div class="field-head">
             <label class="field-label">保存目录</label>
           </div>
-          <input
-            class="text-input"
-            type="text"
-            :value="state.edit.output.dir"
-            placeholder="视频处理"
-            @input="actions.setOutputOption('dir', $event.target.value)"
-          />
+          <div class="dir-pick">
+            <p class="readonly mono" :title="state.edit.output.dir">资源库/{{ state.edit.output.dir || '视频处理' }}</p>
+            <button class="btn is-mini is-ghost" type="button" @click="pickOutputFolder">选择…</button>
+          </div>
         </div>
 
         <div class="field-row">
@@ -595,6 +647,56 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.dir-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dir-pick .readonly {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 0;
+}
+
+.job-progress {
+  margin: 8px 0 4px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.job-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.job-progress-text {
+  font-size: 10px;
+  color: var(--text-2);
+}
+
+.job-progress-bar {
+  margin-top: 6px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--panel-3);
+  overflow: hidden;
+}
+
+.job-progress-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
 .video-panel {
   display: flex;
   flex-direction: column;

@@ -508,6 +508,12 @@ export function clearSession() {
   Object.assign(state.brush, DEFAULT_BRUSH);
 }
 
+/** 编辑历史深度（供图片处理的「垂直时间轴」记录/回退）。 */
+export function historyState() {
+  const entry = activeEntry.value;
+  return { undo: entry?.history.length ?? 0, redo: entry?.redo.length ?? 0 };
+}
+
 export function usePixelPaint() {
   return {
     state: readonly(state),

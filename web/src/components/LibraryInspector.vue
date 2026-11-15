@@ -297,11 +297,12 @@ async function submitRename() {
 
 async function removeAll() {
   if (!state.selected.length) return;
+  const impact = await actions.describeDeletionImpact(state.selected);
   const ok = await confirm({
     title: '删除选中项',
-    message: `将选中的 ${state.selected.length} 项移入回收站？`,
-    detail: '之后可在回收站恢复或彻底删除。',
-    confirmText: '移入回收站',
+    message: `将选中的 ${state.selected.length} 项移入回收站？${impact.message ? ` ${impact.message}` : ''}`,
+    detail: impact.detail || '之后可在回收站恢复或彻底删除。',
+    confirmText: impact.message ? '删除并从工作区移除' : '移入回收站',
     danger: true,
   });
   if (ok) await actions.deleteSelected();
@@ -311,11 +312,12 @@ async function removeAll() {
 async function removeFolder() {
   if (!singleFolder.value) return;
   const folder = singleFolder.value;
+  const impact = await actions.describeDeletionImpact([folder.path]);
   const ok = await confirm({
     title: '删除文件夹',
-    message: `将文件夹「${folder.name}」及其中的全部内容移入回收站？`,
-    detail: folder.path,
-    confirmText: '移入回收站',
+    message: `将文件夹「${folder.name}」及其中的全部内容移入回收站？${impact.message ? ` ${impact.message}` : ''}`,
+    detail: impact.detail || folder.path,
+    confirmText: impact.message ? '删除并从工作区移除' : '移入回收站',
     danger: true,
   });
   if (ok) await actions.deleteFolder(folder);

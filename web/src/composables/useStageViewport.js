@@ -151,6 +151,9 @@ export function useStageViewport() {
   }
 
   function resetView() {
+    // 先按当前容器重新量一次：面板宽度变化后若不重新计算 fit，
+    // 点「适合」看起来会「没反应」（缩放回不到窗口大小）。
+    measure();
     view.zoom = 1;
     view.panX = 0;
     view.panY = 0;

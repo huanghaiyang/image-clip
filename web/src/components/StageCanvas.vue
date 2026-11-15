@@ -75,6 +75,9 @@ const alphaClip = computed(() => {
 function fitToView() {
   actions.setView('zoom', 'fit');
   offset.value = centeredOffset();
+  // 已经处于 fit 时 setView 是同一个值、offset 也没变，watch 不会触发；
+  // 这里显式重画，保证点「适应/适合」永远有反馈。
+  requestDraw();
 }
 
 function setZoom(value, anchor) {

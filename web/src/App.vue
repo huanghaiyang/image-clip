@@ -38,6 +38,11 @@ import ChatDrawer from './components/ChatDrawer.vue';
 import UploadDialog from './components/UploadDialog.vue';
 import RenameDialog from './components/RenameDialog.vue';
 import ConfirmDialog from './components/ConfirmDialog.vue';
+import Toasts from './components/Toasts.vue';
+import FolderPickerDialog from './components/FolderPickerDialog.vue';
+import EditTimelinePanel from './components/EditTimelinePanel.vue';
+import { startTimeline, stopTimeline } from './composables/useEditTimeline.js';
+import { startJobPolling, stopJobPolling } from './composables/useJobs.js';
 import SessionDialog from './components/SessionDialog.vue';
 
 import { useWorkspace } from './composables/useWorkspace.js';
@@ -274,6 +279,10 @@ function onKeydown(event) {
 }
 
 onMounted(() => {
+  // 后台任务轮询（视频截帧等）：驱动右下角进度气泡
+  startJobPolling();
+  // 图片处理编辑历史：进入工作区后自动记录每一步
+  startTimeline();
   document.documentElement.dataset.theme = state.theme;
   window.addEventListener('paste', onPaste);
   window.addEventListener('dragover', preventWindowDrop);
@@ -285,6 +294,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  stopJobPolling();
+  stopTimeline();
   window.removeEventListener('paste', onPaste);
   window.removeEventListener('dragover', preventWindowDrop);
   window.removeEventListener('drop', onWindowDrop);
@@ -370,6 +381,8 @@ watch(
         <WatermarkStage v-else-if="activeTool === 'watermark'" />
         <StageCanvas v-else />
         <ImageToolPanel />
+        <!-- 编辑历史时间轴 + 前后对比（左下角浮动） -->
+        <EditTimelinePanel />
       </template>
     </main>
 
@@ -378,6 +391,10 @@ watch(
     <UploadDialog />
     <RenameDialog />
     <ConfirmDialog />
+    <!-- 右下角任务通知（多任务同时进行时纵向堆叠） -->
+    <Toasts />
+    <!-- 资源库目录选择（关键帧保存位置 / 导出目录） -->
+    <FolderPickerDialog />
     <SessionDialog v-if="sessionState.open" @close="sessionActions.closeDialog()" />
   </div>
 </template>

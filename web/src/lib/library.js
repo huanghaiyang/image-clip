@@ -31,7 +31,7 @@ async function parseError(res) {
   return new LibraryApiError(message, code, res.status);
 }
 
-async function requestJson(url, options = {}) {
+export async function requestJson(url, options = {}) {
   const res = await fetch(url, options);
   if (!res.ok) throw await parseError(res);
   return res.json();
@@ -325,7 +325,11 @@ export async function fetchLibraryBlob(entryOrUrl) {
 }
 
 export function libraryFileUrl(entry) {
-  return entry?.url ?? (entry?.path ? `/api/library/file?path=${encodeURIComponent(entry.path)}` : '');
+  const base = entry?.url ?? (entry?.path ? `/api/library/file?path=${encodeURIComponent(entry.path)}` : '');
+  if (!base) return '';
+  // 带上 mtime：删除旧文件后上传同名新文件时 URL 会变，避免 <video>/<img> 复用旧缓存
+  if (!entry?.mtime) return base;
+  return `${base}${base.includes('?') ? '&' : '?'}v=${entry.mtime}`;
 }
 
 /**

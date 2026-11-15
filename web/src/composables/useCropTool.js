@@ -573,6 +573,11 @@ export async function batchCrop(options = {}) {
   }
 }
 
+/** 编辑历史深度（供图片处理的「垂直时间轴」记录/回退）。 */
+export function historyInfo() {
+  return { undo: history.length, redo: redo.length };
+}
+
 export function useCropTool() {
   return {
     state,

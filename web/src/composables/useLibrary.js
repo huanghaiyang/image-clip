@@ -28,6 +28,8 @@ import {
   resolveInPlaceTarget,
 } from '../lib/library.js';
 import { useWorkspace } from './useWorkspace.js';
+import { useConfirm } from './useConfirm.js';
+import { pushToast } from './useToasts.js';
 import { setMode } from './useAppMode.js';
 import { movesFromResults, notifyLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
 import { mapLimit } from '../lib/async.js';
@@ -564,6 +566,7 @@ export async function uploadFiles(fileList, options = {}) {
       setStatus(`已处理 ${index + 1}/${files.length}：${file.name}`);
     }
 
+    // refreshLibrary 内部会 force 重扫当前目录：同名覆盖上传后元数据立刻更新
     await refreshLibrary({ quiet: true });
     const skipped = state.upload.skipped.length;
     const failed = state.upload.failed.length;
@@ -573,6 +576,13 @@ export async function uploadFiles(fileList, options = {}) {
       setStatus(`已上传 ${uploaded.length} 个文件，跳过 ${skipped} 个重复文件`);
     } else {
       setStatus(`已上传 ${uploaded.length} 个文件到资源库`);
+    }
+    if (uploaded.length) {
+      pushToast({
+        kind: 'success',
+        title: '上传完成',
+        message: `${uploaded.length} 个文件已加入资源库${skipped ? ` · 跳过 ${skipped} 个重复` : ''}${failed ? ` · ${failed} 个失败` : ''}`,
+      });
     }
   } catch (err) {
     setError(`上传失败：${err.message}`);
@@ -820,6 +830,77 @@ export async function copySelected(targetDir) {
  * 按路径删除文件 / 文件夹（移入回收站，可从回收站恢复）。
  * 供素材面板等不依赖 `state.selected` 的地方复用。
  */
+/**
+ * 删除前检查「正在编辑」的资源：图片处理当前素材、视频/音频工作区。
+ * 有影响时弹确认框（用户可选择取消删除）；确认后返回受影响的素材，供删除后统一清理。
+ */
+async function inspectDeletionImpact(list) {
+  const inside = (value) => list.some((root) => value === root || value.startsWith(`${root}/`));
+  const workspace = useWorkspace();
+  const imageItems = workspace.state.items.filter((item) => item.libraryPath && inside(item.libraryPath));
+  let videoActive = null;
+  let audioActive = null;
+  try {
+    const { useVideo } = await import('./useVideo.js');
+    const video = useVideo();
+    if (video.state.activePath && inside(video.state.activePath)) videoActive = video.state.activePath;
+  } catch {
+    // 视频工作区未加载时不阻断删除
+  }
+  try {
+    const { useAudio } = await import('./useAudio.js');
+    const audio = useAudio();
+    if (audio.state.activePath && inside(audio.state.activePath)) audioActive = audio.state.activePath;
+  } catch {
+    // 音频工作区未加载时不阻断删除
+  }
+  return { imageItems, videoActive, audioActive };
+}
+
+/**
+ * 删除影响描述（供各删除入口拼进确认弹窗）。
+ * 返回 message 为空字符串表示没有正在编辑的内容受影响。
+ */
+export async function describeDeletionImpact(paths) {
+  const list = [...new Set((paths ?? []).filter(Boolean))];
+  if (!list.length) return { count: 0, message: '', detail: '' };
+  const impact = await inspectDeletionImpact(list);
+  const reasons = [];
+  if (impact.imageItems.length) reasons.push(`图片处理工作区的「当前素材」里有 ${impact.imageItems.length} 张来自这里`);
+  if (impact.videoActive) reasons.push('视频工作区正在播放这个视频');
+  if (impact.audioActive) reasons.push('音频工作区正在编辑这个音频');
+  return {
+    count: reasons.length ? 1 : 0,
+    message: reasons.length ? `${reasons.join('；')}。删除后会一并从工作区移除，未保存的编辑将丢失。` : '',
+    detail: impact.imageItems.slice(0, 6).map((item) => item.name).join('、'),
+  };
+}
+
+/** 删除完成后清理工作区里已经失效的内容。 */
+async function applyDeletionImpact(impact, list) {
+  if (impact.imageItems?.length) {
+    useWorkspace().actions.removeByLibraryPaths(list);
+  }
+  if (impact.videoActive) {
+    try {
+      const { useVideo } = await import('./useVideo.js');
+      useVideo().actions.resetSession?.();
+    } catch {
+      /* 视频模块未加载则忽略 */
+    }
+  }
+  if (impact.audioActive) {
+    try {
+      const { useAudio } = await import('./useAudio.js');
+      const audio = useAudio();
+      if (typeof audio.actions?.close === 'function') audio.actions.close();
+      else if (typeof audio.actions?.resetSession === 'function') audio.actions.resetSession();
+    } catch {
+      /* 音频模块未加载则忽略 */
+    }
+  }
+}
+
 export async function deletePaths(paths) {
   const list = [...new Set((paths ?? []).filter(Boolean))];
   if (!list.length) {
@@ -829,12 +910,18 @@ export async function deletePaths(paths) {
   state.busy = true;
   try {
     const result = await deleteLibraryItems(list);
+    await applyDeletionImpact(await inspectDeletionImpact(list), list);
     const doomed = new Set(list);
     state.selected = state.selected.filter((path) => !doomed.has(path));
     await refreshLibrary({ quiet: true });
     const failed = failedCount(result);
-    if (failed) setError(`删除部分失败：${failed} 项`);
-    else setStatus(`已将 ${result.succeeded ?? list.length} 项移入回收站`);
+    if (failed) {
+      setError(`删除部分失败：${failed} 项`);
+      pushToast({ kind: 'error', title: '删除部分失败', message: `${failed} 项没有移入回收站` });
+    } else {
+      setStatus(`已将 ${result.succeeded ?? list.length} 项移入回收站`);
+      pushToast({ kind: 'success', title: '已移入回收站', message: `${result.succeeded ?? list.length} 项 · 可在回收站恢复` });
+    }
     return result.ok;
   } catch (err) {
     setError(`删除失败：${err.message}`);
@@ -860,6 +947,7 @@ export async function deleteFolder(folder) {
   state.busy = true;
   try {
     const result = await deleteLibraryItems([path]);
+    await applyDeletionImpact(await inspectDeletionImpact([path]), [path]);
     const inside = (value) => Boolean(value) && (value === path || value.startsWith(`${path}/`));
     // 先退出被删目录，再刷新，避免请求已不存在的路径
     if (inside(state.currentDir)) {
@@ -1116,6 +1204,7 @@ export function useLibrary() {
       deletePaths,
       deleteSelected,
       deleteFolder,
+      describeDeletionImpact,
       openPreview,
       closePreview,
       stepPreview,

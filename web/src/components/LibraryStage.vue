@@ -24,6 +24,7 @@ import LibrarySlideshow from './LibrarySlideshow.vue';
 import TrashDialog from './TrashDialog.vue';
 import ViewToggle from './ui/ViewToggle.vue';
 import SimilarSearchDialog from './SimilarSearchDialog.vue';
+import SpritePlayer from './SpritePlayer.vue';
 import { useSimilarSearch } from '../composables/useSimilarSearch.js';
 
 const {
@@ -67,6 +68,18 @@ const KIND_ICON = { image: '▣', video: '▶', audio: '♪', file: '▤' };
 
 const failedThumbs = ref(new Set());
 const previewError = ref(false);
+// 精灵图播放：名称像 sprite/序列 的图片打开预览时自动进入播放，其他图片可手动切换
+const spritePlay = ref(false);
+const SPRITE_NAME_HINT = /sprite|sheet|序列|帧序列|动画帧|_seq/i;
+
+watch(
+  () => previewEntry.value?.path,
+  (path) => {
+    const entry = previewEntry.value;
+    spritePlay.value = Boolean(path) && entry?.kind === 'image' && SPRITE_NAME_HINT.test(entry.name || '');
+  },
+  { immediate: true },
+);
 const trashOpen = ref(false);
 
 /** 正在编辑的资源：图片工作区当前素材的来源 + 视频/音频当前打开的文件。 */
@@ -379,11 +392,12 @@ function startRename(item, isFolder = false) {
 
 /** 整个文件夹连同子目录一起移入回收站。 */
 async function removeFolder(folder) {
+  const impact = await actions.describeDeletionImpact([folder.path]);
   const ok = await confirm({
     title: '删除文件夹',
-    message: `将文件夹「${folder.name}」及其中的全部内容移入回收站？`,
-    detail: folder.path,
-    confirmText: '移入回收站',
+    message: `将文件夹「${folder.name}」及其中的全部内容移入回收站？${impact.message ? ` ${impact.message}` : ''}`,
+    detail: impact.detail || folder.path,
+    confirmText: impact.message ? '删除并从工作区移除' : '移入回收站',
     danger: true,
   });
   if (ok) void actions.deleteFolder(folder);
@@ -411,6 +425,19 @@ function entryMeta(entry) {
   }
   if (entry.kind === 'audio' && entry.duration) parts.push(formatDuration(entry.duration));
   return parts.join(' · ');
+}
+
+/**
+ * 缩略图按「原始比例」显示：卡片高度跟着图片真实宽高比走，
+ * 不再统一套 4:3 的黑边盒子（竖图 / 超宽图也不会被留边）。
+ * 极端长条限制在 0.55 ~ 2.4 之间，避免一张全景图把整行拉得很高。
+ */
+function thumbAspect(entry) {
+  const width = Number(entry?.width) || 0;
+  const height = Number(entry?.height) || 0;
+  if (!width || !height) return '4 / 3';
+  const ratio = Math.min(2.4, Math.max(0.55, width / height));
+  return `${ratio.toFixed(4)} / 1`;
 }
 
 /** 缩略图左上角的尺寸徽标：图片/视频始终能看到真实分辨率，不受文本截断影响。 */
@@ -723,7 +750,7 @@ onBeforeUnmount(() => {
           @click="select($event, entry)"
           @dblclick="openEntry(entry)"
         >
-          <span class="thumb" :class="{ 'is-video': entry.kind === 'video' }">
+          <span class="thumb" :class="{ 'is-video': entry.kind === 'video' }" :style="{ '--thumb-aspect': thumbAspect(entry) }">
             <!-- 视频封面按原比例完整显示；空隙用同一张封面的模糊铺底填满，避免“黑条”或裁切 -->
             <span
               v-if="entry.kind === 'video' && thumbOf(entry, 160)"
@@ -872,8 +899,13 @@ onBeforeUnmount(() => {
       </div>
       <div class="preview-body">
         <button class="nav-btn prev" type="button" title="上一张 (←)" @click="actions.stepPreview(-1)">‹</button>
+        <SpritePlayer
+          v-if="previewEntry.kind === 'image' && spritePlay"
+          :src="libraryFileUrl(previewEntry)"
+          :name="previewEntry.name"
+        />
         <img
-          v-if="previewEntry.kind === 'image' && !previewError"
+          v-else-if="previewEntry.kind === 'image' && !previewError"
           class="preview-media"
           :src="libraryFileUrl(previewEntry)"
           alt=""
@@ -892,6 +924,16 @@ onBeforeUnmount(() => {
       </div>
       <div class="preview-foot">
         <span class="mono">{{ entryMeta(previewEntry) }}</span>
+        <button
+          v-if="previewEntry.kind === 'image'"
+          class="btn is-mini is-ghost"
+          type="button"
+          :class="{ 'is-on': spritePlay }"
+          :title="spritePlay ? '退出精灵图播放，查看原图' : '按透明分隔线 / 网格切帧并循环播放'"
+          @click="spritePlay = !spritePlay"
+        >
+          {{ spritePlay ? '查看原图' : '精灵图播放' }}
+        </button>
         <button
           v-if="previewEntry.kind === 'image'"
           class="btn is-mini"
@@ -1293,7 +1335,8 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  aspect-ratio: 4 / 3;
+  /* 默认 4:3；卡片会按素材真实宽高比传入 --thumb-aspect（缩略图按原始比例展示） */
+  aspect-ratio: var(--thumb-aspect, 4 / 3);
   border-radius: 4px;
   background: repeating-conic-gradient(var(--panel-3) 0% 25%, var(--panel-2) 0% 50%) 50% / 12px 12px;
   overflow: hidden;
