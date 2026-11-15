@@ -446,23 +446,40 @@ export function applyLibraryMoves(moves = []) {
   });
   libraryIndex.value = { ...libraryIndex.value, entries: indexEntries, folders: indexFolders };
 
+  // 目录缓存按「新的 dir」重新归组：移动后源目录里不能再残留旧条目，
+  // 目标目录已加载时要立刻出现这些条目（关键修复：之前只改 path/dir 字段，
+  // 条目仍留在源目录的 bucket 里，导致当前文件夹不刷新）。
   const nextCache = new Map();
   for (const [dir, bucket] of dirCache.value) {
-    nextCache.set(remap(dir), {
+    const key = remap(dir);
+    nextCache.set(key, {
       ...bucket,
-      entries: (bucket.entries ?? []).map((entry) => {
-        const path = remap(entry.path);
-        if (path === entry.path) return entry;
-        const nextDir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-        return { ...entry, path, dir: nextDir, name: path.slice(path.lastIndexOf('/') + 1) };
-      }),
-      folders: (bucket.folders ?? []).map((folder) => {
-        const path = remap(folder.path);
-        if (path === folder.path) return folder;
-        const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-        return { ...folder, path, parent, name: path.slice(path.lastIndexOf('/') + 1) };
-      }),
+      key,
+      entries: [],
+      folders: [],
     });
+  }
+  const pushEntry = (dir, entry) => {
+    const bucket = nextCache.get(dir);
+    if (!bucket) return; // 目标目录没加载过，进入时会重新拉取
+    if (!bucket.entries.some((item) => item.path === entry.path)) bucket.entries.push(entry);
+  };
+  const pushFolder = (parent, folder) => {
+    const bucket = nextCache.get(parent);
+    if (!bucket) return;
+    if (!bucket.folders.some((item) => item.path === folder.path)) bucket.folders.push(folder);
+  };
+  for (const [, bucket] of dirCache.value) {
+    for (const entry of bucket.entries ?? []) {
+      const path = remap(entry.path);
+      const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+      pushEntry(dir, path === entry.path ? entry : { ...entry, path, dir, name: path.slice(path.lastIndexOf('/') + 1) });
+    }
+    for (const folder of bucket.folders ?? []) {
+      const path = remap(folder.path);
+      const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+      pushFolder(parent, path === folder.path ? folder : { ...folder, path, parent, name: path.slice(path.lastIndexOf('/') + 1) });
+    }
   }
   dirCache.value = nextCache;
 

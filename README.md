@@ -671,6 +671,11 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 数字输入等宽数字并去掉系统上下箭头；下拉框统一内联 SVG 箭头；checkbox/range 使用主色；
 组件里只保留 flex/width 等布局规则，不再各自重复边框与高度。
 
+**移动后当前目录即时刷新**
+
+`applyLibraryMoves` 不再只改条目的 `path/dir` 字段，而是按新的目录重新归组已经加载的目录缓存：
+源目录立即移除移走的条目，目标目录若已加载会立刻出现；改名（同目录内）也走同一套逻辑。
+
 **文件唯一 ID（`server/src/fileIds.js`）**
 
 资源库给每个文件分配稳定 id（`f_` + 12 位 hex），存 `<cacheRoot>/file-ids.json`：
