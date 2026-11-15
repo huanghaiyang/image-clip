@@ -50,6 +50,77 @@ export function resolveAtlasFrameSize(min, frame) {
 }
 
 /** 预设命名：没填名字就用「宽×高」。 */
+/**
+ * 拖动把手计算新尺寸。
+ * 画布里输出框居中显示，所以拖动右/下边缘时两侧对称扩张：
+ * 屏幕位移 d 对应总尺寸变化 2d（这样把手会跟着光标走）。
+ *
+ * @param {{start:{width:number,height:number}, dx?:number, dy?:number, scale?:number, handle?:string}} input
+ *   handle: 由 n/s/e/w 组合，例如 'se' / 'e' / 'n' / 'nw'
+ */
+/**
+ * 单张图片的自定义尺寸框（固定大小，只移动位置）。
+ *
+ * 尺寸由「自定义输出尺寸的宽高比」决定：取能完整包住 AABB 的最大同比例矩形
+ * （再限制在图片范围内），所以用户改尺寸预设时框尺寸会跟着变，但界面上不能拖大拖小。
+ * 位置用归一化中心点保存，每张图片各自独立；不传 center 时默认套在 AABB 中心。
+ */
+export function customFrameRect({ imageWidth, imageHeight, bounds, outSize, center } = {}) {
+  const imageW = Math.max(1, Math.round(Number(imageWidth) || 1));
+  const imageH = Math.max(1, Math.round(Number(imageHeight) || 1));
+  const aspect = Math.max(0.0001, (Number(outSize?.width) || 1) / (Number(outSize?.height) || 1));
+  const content =
+    bounds && Number(bounds.width) > 0 && Number(bounds.height) > 0
+      ? { x: Number(bounds.x) || 0, y: Number(bounds.y) || 0, width: Number(bounds.width), height: Number(bounds.height) }
+      : { x: 0, y: 0, width: imageW, height: imageH };
+
+  // 完整包住内容
+  let width = Math.max(content.width, content.height * aspect);
+  let height = width / aspect;
+  if (width > imageW) {
+    width = imageW;
+    height = width / aspect;
+  }
+  if (height > imageH) {
+    height = imageH;
+    width = height * aspect;
+  }
+  width = Math.max(1, Math.round(width));
+  height = Math.max(1, Math.round(height));
+  if (width > imageW) width = imageW;
+  if (height > imageH) height = imageH;
+
+  const defaultCx = (content.x + content.width / 2) / imageW;
+  const defaultCy = (content.y + content.height / 2) / imageH;
+  const halfX = width / 2 / imageW;
+  const halfY = height / 2 / imageH;
+  const clampAxis = (value, half) => Math.min(1 - half, Math.max(half, Number(value)));
+  const cx = clampAxis(center?.cx ?? defaultCx, halfX);
+  const cy = clampAxis(center?.cy ?? defaultCy, halfY);
+  return {
+    x: Math.max(0, Math.min(imageW - width, Math.round(cx * imageW - width / 2))),
+    y: Math.max(0, Math.min(imageH - height, Math.round(cy * imageH - height / 2))),
+    width,
+    height,
+    cx,
+    cy,
+  };
+}
+
+export function resizeAtlasFrame({ start, dx = 0, dy = 0, scale = 1, handle = 'se' } = {}) {
+  const factor = 2 / Math.max(0.0001, Number(scale) || 1);
+  const horizontal = /[ew]/.test(handle);
+  const vertical = /[ns]/.test(handle);
+  let width = Number(start?.width) || 1;
+  let height = Number(start?.height) || 1;
+  if (horizontal) width += (handle.includes('w') ? -dx : dx) * factor;
+  if (vertical) height += (handle.includes('n') ? -dy : dy) * factor;
+  return {
+    width: Math.round(width),
+    height: Math.round(height),
+  };
+}
+
 export function atlasSizeName(name, width, height) {
   const text = String(name ?? '').trim().slice(0, 40);
   return text || `${normalizeSide(width)}×${normalizeSide(height)}`;

@@ -160,12 +160,36 @@ function paint() {
   const fy = offset.value.y + item.bounds.y * scale;
   const fw = item.bounds.width * scale;
   const fh = item.bounds.height * scale;
+  // 自定义尺寸框存在时，压暗在自定义框外；否则压暗在 AABB 外
+  const cut = customFrame.value;
+  const cx = cut ? offset.value.x + cut.x * scale : fx;
+  const cy = cut ? offset.value.y + cut.y * scale : fy;
+  const cw = cut ? cut.width * scale : fw;
+  const ch = cut ? cut.height * scale : fh;
   ctx.fillStyle = 'rgba(0, 0, 0, 0.34)';
-  ctx.fillRect(offset.value.x, offset.value.y, dw, Math.max(0, fy - offset.value.y));
-  ctx.fillRect(offset.value.x, fy + fh, dw, Math.max(0, offset.value.y + dh - (fy + fh)));
-  ctx.fillRect(offset.value.x, fy, Math.max(0, fx - offset.value.x), fh);
-  ctx.fillRect(fx + fw, fy, Math.max(0, offset.value.x + dw - (fx + fw)), fh);
+  ctx.fillRect(offset.value.x, offset.value.y, dw, Math.max(0, cy - offset.value.y));
+  ctx.fillRect(offset.value.x, cy + ch, dw, Math.max(0, offset.value.y + dh - (cy + ch)));
+  ctx.fillRect(offset.value.x, cy, Math.max(0, cx - offset.value.x), ch);
+  ctx.fillRect(cx + cw, cy, Math.max(0, offset.value.x + dw - (cx + cw)), ch);
 }
+
+/** 每张图片的自定义尺寸框（固定大小、只移动）；自动模式/未勾选时为 null。 */
+const customFrame = computed(() => actions.customFrameForItem(selected.value));
+
+/** 自定义框在屏幕坐标下的位置。 */
+const customScreen = computed(() => {
+  const item = selected.value;
+  const target = customFrame.value;
+  if (!item || !target) return null;
+  const scale = zoom.value;
+  return {
+    left: offset.value.x + target.x * scale,
+    top: offset.value.y + target.y * scale,
+    width: target.width * scale,
+    height: target.height * scale,
+    outSize: target.outSize,
+  };
+});
 
 /** 选择框在屏幕坐标下的位置（用于 DOM 叠加层，保证 1px 描边清晰）。 */
 const frame = computed(() => {
@@ -250,6 +274,46 @@ function onPointerUp(event) {
   stageEl.value?.releasePointerCapture?.(event.pointerId);
 }
 
+/** 自定义尺寸框：只允许拖动位置，不允许改大小。 */
+let customDrag = null;
+
+function onCustomPointerDown(event) {
+  if (!selected.value || !customFrame.value || event.button !== 0) return;
+  event.stopPropagation();
+  event.preventDefault();
+  customDrag = {
+    item: selected.value,
+    start: { ...customFrame.value },
+    x: event.clientX,
+    y: event.clientY,
+    scale: zoom.value,
+  };
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+}
+
+function onCustomPointerMove(event) {
+  if (!customDrag) return;
+  event.stopPropagation();
+  const dx = (event.clientX - customDrag.x) / customDrag.scale;
+  const dy = (event.clientY - customDrag.y) / customDrag.scale;
+  actions.setCustomFrameCenter(customDrag.item, {
+    cx: (customDrag.start.cx * customDrag.item.width + dx) / customDrag.item.width,
+    cy: (customDrag.start.cy * customDrag.item.height + dy) / customDrag.item.height,
+  });
+}
+
+function onCustomPointerUp(event) {
+  if (!customDrag) return;
+  event.stopPropagation();
+  customDrag = null;
+  event.currentTarget.releasePointerCapture?.(event.pointerId);
+}
+
+function resetCustomFrame() {
+  if (!selected.value) return;
+  actions.resetCustomFrame(selected.value);
+}
+
 function onWheel(event) {
   if (!selected.value) return;
   event.preventDefault();
@@ -324,6 +388,8 @@ watch(
     selected.value?.detectedAt,
     selected.value?.width,
     selected.value?.height,
+    customFrame.value ? `${customFrame.value.x},${customFrame.value.y},${customFrame.value.width},${customFrame.value.height}` : '',
+    customScreen.value ? `${Math.round(customScreen.value.left)},${Math.round(customScreen.value.top)}` : '',
   ],
   () => requestDraw(),
   { flush: 'post' },
@@ -346,12 +412,40 @@ watch(
   >
     <canvas ref="canvasEl" class="stage-canvas" :style="alphaClip ? { clipPath: alphaClip } : null" />
 
-    <!-- Figma 风格选择框：1px 描边 + 8 个手柄 + 尺寸标签 -->
-    <div v-if="frame" class="frame" :style="{ left: `${frame.left}px`, top: `${frame.top}px`, width: `${frame.width}px`, height: `${frame.height}px` }">
-      <span v-for="handle in handles" :key="handle" class="handle" :class="`is-${handle}`" />
-      <span class="frame-label" :class="{ 'is-inside': frame.top < 26 }">
-        {{ selected.bounds.width }} × {{ selected.bounds.height }}
+    <!-- 两套框：橙色虚线 = AABB；蓝色实线 = 当前图片的自定义尺寸框（只移动不改大小） -->
+    <div
+      v-if="frame"
+      class="frame"
+      :class="{ 'is-aabb': customScreen }"
+      :style="{ left: `${frame.left}px`, top: `${frame.top}px`, width: `${frame.width}px`, height: `${frame.height}px` }"
+    >
+      <template v-if="!customScreen">
+        <span v-for="handle in handles" :key="handle" class="handle" :class="`is-${handle}`" />
+      </template>
+      <span class="frame-label" :class="{ 'is-inside': frame.top < 26, 'is-aabb': customScreen }">
+        {{ customScreen ? 'AABB ' : '' }}{{ selected.bounds.width }} × {{ selected.bounds.height }}
       </span>
+    </div>
+
+    <div
+      v-if="customScreen"
+      class="custom-frame"
+      :data-item-id="selected.id"
+      :data-cx="customFrame?.cx"
+      :data-cy="customFrame?.cy"
+      :style="{ left: `${customScreen.left}px`, top: `${customScreen.top}px`, width: `${customScreen.width}px`, height: `${customScreen.height}px` }"
+      title="拖动移动自定义尺寸框（大小固定，不能缩放）"
+      @pointerdown="onCustomPointerDown"
+      @pointermove="onCustomPointerMove"
+      @pointerup="onCustomPointerUp"
+      @pointercancel="onCustomPointerUp"
+    >
+      <span class="custom-frame-label mono">
+        自定义 {{ customScreen.outSize.width }} × {{ customScreen.outSize.height }}
+      </span>
+      <button class="custom-frame-reset" type="button" title="还原本图自定义框位置" @pointerdown.stop @click.stop="resetCustomFrame">
+        还原
+      </button>
     </div>
 
     <div class="stage-toolbar">
@@ -364,6 +458,9 @@ watch(
         @click="actions.setView('showBox', !showBox)"
       >
         <span class="dot" :class="{ 'is-on': showBox }" />显示裁剪框
+      </button>
+      <button v-if="customScreen" class="btn is-ghost" type="button" title="还原本图自定义尺寸框位置" @click="resetCustomFrame">
+        还原尺寸框
       </button>
     </div>
 
@@ -489,6 +586,56 @@ watch(
 .frame-label.is-inside {
   bottom: auto;
   top: 4px;
+}
+
+/* 有自定义尺寸框时：AABB 只用橙色虚线做参考，不再显示缩放手柄 */
+.frame.is-aabb {
+  border-color: #ffb020;
+  border-style: dashed;
+  background: rgba(255, 176, 32, 0.06);
+}
+
+.frame-label.is-aabb {
+  background: #b87500;
+}
+
+.custom-frame {
+  position: absolute;
+  border: 1.5px solid var(--accent);
+  background: rgba(13, 153, 255, 0.08);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+  cursor: move;
+  touch-action: none;
+}
+
+.custom-frame-label {
+  position: absolute;
+  left: 50%;
+  top: -22px;
+  transform: translateX(-50%);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.custom-frame-reset {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.custom-frame-reset:hover {
+  background: rgba(0, 0, 0, 0.8);
 }
 
 .stage-toolbar {

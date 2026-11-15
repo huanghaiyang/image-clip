@@ -10,6 +10,7 @@
 import { computed, reactive, ref, watch, watchEffect } from 'vue';
 
 import { useWorkspace } from '../composables/useWorkspace.js';
+import { resizeAtlasFrame } from '../lib/atlasFrame.js';
 
 const { state, trimAtlas, atlasMinSize, atlasFrameSize, atlasQuickSizes, actions } = useWorkspace();
 
@@ -19,6 +20,7 @@ const PAD = 14;
 const canvasEl = ref(null);
 const custom = reactive({ name: '', width: 0, height: 0 });
 const drag = ref(null);
+const hoverHandle = ref('');
 
 const mode = computed(() => state.atlasFrame.mode);
 const min = computed(() => atlasMinSize.value);
@@ -41,6 +43,35 @@ const frameRect = computed(() => {
   return { x: (W - width) / 2, y: (H - height) / 2, width, height };
 });
 
+/** 8 个把手：四角 + 四条边中点（边只改一个方向，角同时改两个方向）。 */
+const handles = computed(() => {
+  const outer = frameRect.value;
+  if (!outer) return [];
+  const midX = outer.x + outer.width / 2;
+  const midY = outer.y + outer.height / 2;
+  const right = outer.x + outer.width;
+  const bottom = outer.y + outer.height;
+  return [
+    { id: 'nw', x: outer.x, y: outer.y, cursor: 'nwse-resize' },
+    { id: 'n', x: midX, y: outer.y, cursor: 'ns-resize' },
+    { id: 'ne', x: right, y: outer.y, cursor: 'nesw-resize' },
+    { id: 'e', x: right, y: midY, cursor: 'ew-resize' },
+    { id: 'se', x: right, y: bottom, cursor: 'nwse-resize' },
+    { id: 's', x: midX, y: bottom, cursor: 'ns-resize' },
+    { id: 'sw', x: outer.x, y: bottom, cursor: 'nesw-resize' },
+    { id: 'w', x: outer.x, y: midY, cursor: 'ew-resize' },
+  ];
+});
+
+const activeHandle = computed(() => drag.value?.handle ?? hoverHandle.value);
+
+const canvasCursor = computed(() => {
+  if (drag.value) {
+    return handles.value.find((item) => item.id === drag.value.handle)?.cursor ?? 'default';
+  }
+  return handles.value.find((item) => item.id === hoverHandle.value)?.cursor ?? 'default';
+});
+
 /** 内容区（最大 AABB）在输出框里等比居中。 */
 const contentRect = computed(() => {
   const frame = size.value;
@@ -54,6 +85,9 @@ const contentRect = computed(() => {
 });
 
 watchEffect(() => {
+  // 让悬停把手切换时也重绘
+  void hoverHandle.value;
+  void activeHandle.value;
   const canvas = canvasEl.value;
   if (!canvas) return;
   const dpr = window.devicePixelRatio || 1;
@@ -97,16 +131,18 @@ watchEffect(() => {
     ctx.fillText('最大 AABB', content.x + 4, content.y - 4);
   }
 
-  // 右下角把手
-  const hx = outer.x + outer.width;
-  const hy = outer.y + outer.height;
-  ctx.fillStyle = '#0d99ff';
-  ctx.beginPath();
-  ctx.arc(hx, hy, 5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 1.2;
-  ctx.stroke();
+  // 8 个把手：四角 + 边中点；悬停/拖动时放大高亮
+  for (const item of handles.value) {
+    const active = item.id === activeHandle.value;
+    const radius = active ? 5.5 : 3.5;
+    ctx.beginPath();
+    ctx.arc(item.x, item.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = active ? '#7cc7ff' : '#0d99ff';
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+  }
 
   // 尺寸文字
   ctx.fillStyle = 'rgba(255,255,255,0.75)';
@@ -121,29 +157,59 @@ function pixelFromEvent(event) {
   return { x: ((event.clientX - rect.left) / rect.width) * W, y: ((event.clientY - rect.top) / rect.height) * H };
 }
 
+/** 命中检测：返回最近的把手（半径 12 个画布像素）。 */
+function handleAt(point) {
+  let best = null;
+  let bestDistance = 12;
+  for (const item of handles.value) {
+    const distance = Math.hypot(point.x - item.x, point.y - item.y);
+    if (distance <= bestDistance) {
+      best = item;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
 function onPointerDown(event) {
-  const outer = frameRect.value;
-  if (!outer) return;
   const point = pixelFromEvent(event);
-  const handle = { x: outer.x + outer.width, y: outer.y + outer.height };
-  if (Math.hypot(point.x - handle.x, point.y - handle.y) > 14) return;
-  drag.value = { start: { ...size.value }, outer: { ...outer }, point };
+  const handle = handleAt(point);
+  if (!handle) return;
+  drag.value = {
+    handle: handle.id,
+    start: { ...size.value },
+    point,
+    // 缩放冻结在按下时：拖动过程中尺寸变化不会改变光标→尺寸的映射
+    scale: scale.value,
+  };
+  hoverHandle.value = handle.id;
   event.currentTarget.setPointerCapture?.(event.pointerId);
 }
 
 function onPointerMove(event) {
-  if (!drag.value) return;
-  const outer = frameRect.value;
-  if (!outer) return;
   const point = pixelFromEvent(event);
-  const nextWidth = drag.value.start.width + (point.x - drag.value.point.x) / scale.value;
-  const nextHeight = drag.value.start.height + (point.y - drag.value.point.y) / scale.value;
-  actions.setAtlasFrameSize({ width: Math.round(nextWidth), height: Math.round(nextHeight) });
+  if (!drag.value) {
+    hoverHandle.value = handleAt(point)?.id ?? '';
+    return;
+  }
+  const next = resizeAtlasFrame({
+    start: drag.value.start,
+    dx: point.x - drag.value.point.x,
+    dy: point.y - drag.value.point.y,
+    scale: drag.value.scale,
+    handle: drag.value.handle,
+  });
+  actions.setAtlasFrameSize(next);
 }
 
 function onPointerUp(event) {
   drag.value = null;
+  hoverHandle.value = '';
   event.currentTarget.releasePointerCapture?.(event.pointerId);
+}
+
+function onPointerLeave() {
+  if (!drag.value) hoverHandle.value = '';
 }
 
 function applyMode(next) {
@@ -189,12 +255,13 @@ function addPreset() {
     <canvas
       ref="canvasEl"
       class="afe-canvas"
-      :style="{ width: `${W}px`, height: `${H}px` }"
-      title="拖动右下角蓝点调整输出尺寸；不能小于红色虚线的「最大 AABB」"
+      :style="{ width: `${W}px`, height: `${H}px`, cursor: canvasCursor }"
+      title="拖四角同时调宽高；拖左右边只调宽；拖上下边只调高（不能小于红色虚线的最大 AABB）"
       @pointerdown="onPointerDown"
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
       @pointercancel="onPointerUp"
+      @pointerleave="onPointerLeave"
     />
 
     <div class="afe-fields">
@@ -208,7 +275,10 @@ function addPreset() {
       </label>
       <span class="afe-min muted mono">最小 {{ min?.width }}×{{ min?.height }}</span>
     </div>
-    <p class="afe-note muted">只能大于或等于最大 AABB（红色虚线）。调大时多出的区域为透明边，内容等比居中不拉伸。</p>
+    <p class="afe-note muted">
+      拖<b>四角</b>同时调宽高；拖<b>左右边</b>只调宽；拖<b>上下边</b>只调高。只能大于或等于最大 AABB（红色虚线），
+      多出的区域为透明边，内容等比居中不拉伸。
+    </p>
 
     <div class="afe-quick">
       <button
@@ -276,7 +346,6 @@ function addPreset() {
   height: 190px;
   margin: 0 auto;
   border-radius: 5px;
-  cursor: ew-resize;
   touch-action: none;
 }
 

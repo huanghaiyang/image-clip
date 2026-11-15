@@ -19,7 +19,14 @@ import {
 import { analyzeWith, cropWith } from '../lib/engine.js';
 import { blobToBytes, createZip } from '../lib/zip.js';
 import { onLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
-import { clampAtlasSize, makeAtlasSizePreset, normalizeMinSize, quickAtlasSizes, resolveAtlasFrameSize } from '../lib/atlasFrame.js';
+import {
+  clampAtlasSize,
+  customFrameRect,
+  makeAtlasSizePreset,
+  normalizeMinSize,
+  quickAtlasSizes,
+  resolveAtlasFrameSize,
+} from '../lib/atlasFrame.js';
 import { canvasToBlob, createCanvas, cropToBlob, stripExtension } from '../lib/imageops.js';
 import { mapLimit } from '../lib/async.js';
 import { computeAtlasOutputSize, fitInto } from '../lib/atlas.js';
@@ -80,6 +87,8 @@ const state = reactive({
   /** 图集统一输出尺寸：auto 跟随最大 AABB；custom 只能比它更大。 */
   atlasFrame: { mode: 'auto', width: 0, height: 0 },
   atlasSizePresets: loadAtlasSizePresets(),
+  /** 每张图片的自定义尺寸框位置：itemId -> { cx, cy }（归一化中心点，只移动不改大小）。 */
+  customFrames: {},
 });
 
 const selected = computed(() => state.items.find((item) => item.id === state.selectedId) ?? null);
@@ -155,17 +164,52 @@ const trimAtlas = computed(() => {
   const items = list.map((row) => row.item);
   // 各帧按同一个相对框裁出来以后，像素尺寸可能不同（源图尺寸不一致时）。
   // 统一尺寸取「最大裁剪宽高」，预览与批量裁剪都输出这个尺寸，帧与帧才能对齐播放/拼图。
-  const outSize = computeAtlasOutputSize(items.map((item) => normRect(item, norm)));
-  return { count: list.length, skipped: usable.length - list.length, items, norm, outSize };
+  const minSize = normalizeMinSize(computeAtlasOutputSize(items.map((item) => normRect(item, norm))));
+  // 自定义尺寸存在时：输出用自定义尺寸，每张图有各自的定位框（大小固定、只移动）
+  const outSize = resolveAtlasFrameSize(minSize, state.atlasFrame);
+  const custom = state.atlasFrame.mode === 'custom';
+  const frames = custom ? items.map((item) => customFrameForItem(item, { outSize })) : null;
+  return {
+    count: list.length,
+    skipped: usable.length - list.length,
+    items,
+    norm,
+    minSize,
+    outSize,
+    custom,
+    frames,
+  };
 });
 /** 图集输出尺寸的下限 = 各帧裁剪后的最大宽高（最大 AABB）。 */
-const atlasMinSize = computed(() => (trimAtlas.value ? normalizeMinSize(trimAtlas.value.outSize) : null));
+const atlasMinSize = computed(() => (trimAtlas.value ? normalizeMinSize(trimAtlas.value.minSize ?? trimAtlas.value.outSize) : null));
 
 /** 实际输出尺寸：auto 用下限；custom 夹到「不小于最大 AABB」。 */
 const atlasFrameSize = computed(() => {
   if (!atlasMinSize.value) return null;
   return resolveAtlasFrameSize(atlasMinSize.value, state.atlasFrame);
 });
+
+/** 是否启用「每张图片的自定义尺寸框」：固定尺寸模式 + 有可计算的输出尺寸。 */
+const customFrameEnabled = computed(() => Boolean(atlasFrameSize.value) && state.atlasFrame.mode === 'custom');
+
+/**
+ * 单张图片的自定义尺寸框（像素矩形）。固定尺寸、只移动位置：
+ *  - 尺寸 = 能完整包住 AABB 的最大同比例框（比例来自自定义输出尺寸）；
+ *  - 位置从 state.customFrames[itemId] 的归一化中心点恢复，默认 AABB 中心；
+ *  - 自动模式下返回 null。
+ */
+export function customFrameForItem(item, { outSize = atlasFrameSize.value, center } = {}) {
+  if (!item || !outSize || state.atlasFrame.mode !== 'custom') return null;
+  const bounds = item.bounds && !item.resultEmpty ? item.bounds : null;
+  const frame = customFrameRect({
+    imageWidth: item.width,
+    imageHeight: item.height,
+    bounds,
+    outSize,
+    center: center ?? state.customFrames[item.id],
+  });
+  return { ...frame, outSize: { ...outSize } };
+}
 
 /** 给 UI 的快捷预设（最大 AABB / 正方形 / 1.5x / 2x）。 */
 const atlasQuickSizes = computed(() => (atlasMinSize.value ? quickAtlasSizes(atlasMinSize.value) : []));
@@ -726,11 +770,16 @@ export async function saveTrimmedItem(item) {
   try {
     const { saveBlobToLibrary } = await import('./useLibrary.js');
     const filename = croppedFilename(item.name, 'png');
-    const { blob } = await cropWith(state.engine, item, optionsSnapshot(), {
-      format: 'png',
-      quality: 100,
-      filename,
-    });
+    const frame = customFrameForItem(item);
+    const blob = frame
+      ? await cropFrameToSize(item, frame, frame.outSize)
+      : (
+          await cropWith(state.engine, item, optionsSnapshot(), {
+            format: 'png',
+            quality: 100,
+            filename,
+          })
+        ).blob;
     const entry = await saveBlobToLibrary(blob, filename, '裁剪结果');
     setStatus(`已保存到资源库：${entry?.path ?? `裁剪结果/${filename}`}`);
   } catch (err) {
@@ -806,7 +855,10 @@ export async function saveTrimmedInPlace(item) {
   state.busy = true;
   try {
     const filename = croppedFilename(item.name, 'png');
-    const { blob } = await cropWith(state.engine, item, optionsSnapshot(), { format: 'png', quality: 100, filename });
+    const frame = customFrameForItem(item);
+    const blob = frame
+      ? await cropFrameToSize(item, frame, frame.outSize)
+      : (await cropWith(state.engine, item, optionsSnapshot(), { format: 'png', quality: 100, filename })).blob;
     return await saveEditedItem(item, blob);
   } catch (err) {
     setError(`保存到当前素材失败：${err.message}`);
@@ -836,6 +888,16 @@ async function cropByNorm(item, norm) {
  * 比例一致时正好铺满（等比缩放）；源图比例不同时留透明边，不做拉伸。
  * 预览与真正的「图集透明裁剪」都走这里，保证看到的尺寸就是最终输出尺寸。
  */
+/** 按「每张图自己的自定义框」裁切并缩放到自定义输出尺寸（框与输出同比例，不拉伸）。 */
+async function cropFrameToSize(item, frame, outSize) {
+  const canvas = createCanvas(outSize.width, outSize.height);
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(item.bitmap, frame.x, frame.y, frame.width, frame.height, 0, 0, outSize.width, outSize.height);
+  return canvasToBlob(canvas, 'image/png');
+}
+
 async function cropAtlasFrame(item, norm, outSize) {
   const rect = normRect(item, norm);
   const canvas = createCanvas(outSize.width, outSize.height);
@@ -870,8 +932,9 @@ export async function previewAtlasCrop({ onResult, onProgress } = {}) {
   let done = 0;
   await mapLimit(items, 3, async (item, index) => {
     try {
-      const rect = normRect(item, atlas.norm);
-      const blob = await cropAtlasFrame(item, atlas.norm, outSize);
+      const frame = atlas.custom ? atlas.frames[index] : null;
+      const rect = frame ?? normRect(item, atlas.norm);
+      const blob = frame ? await cropFrameToSize(item, frame, outSize) : await cropAtlasFrame(item, atlas.norm, outSize);
       const row = {
         id: item.id,
         index,
@@ -902,6 +965,31 @@ export async function previewAtlasCrop({ onResult, onProgress } = {}) {
 }
 
 /** 图集透明裁剪：所有勾选素材共用最大 AABB，结果写回素材列表，可选存入资源库。 */
+/** 移动某张图片的自定义框（只改位置，不改大小）。 */
+export function setCustomFrameCenter(item, { cx, cy } = {}) {
+  if (!item) return null;
+  const frame = customFrameForItem(item, { center: { cx, cy } });
+  if (!frame) return null;
+  const halfX = frame.width / 2 / item.width;
+  const halfY = frame.height / 2 / item.height;
+  const clampAxis = (value, half) => Math.min(1 - half, Math.max(half, Number(value) || half));
+  state.customFrames[item.id] = { cx: clampAxis(cx, halfX), cy: clampAxis(cy, halfY) };
+  return customFrameForItem(item);
+}
+
+/** 还原本图自定义框到默认位置（AABB 中心）。 */
+export function resetCustomFrame(item) {
+  if (!item?.id) return;
+  delete state.customFrames[item.id];
+  setStatus('已还原当前图片的自定义框位置');
+}
+
+/** 还原所有图片的自定义框位置。 */
+export function resetAllCustomFrames() {
+  state.customFrames = {};
+  setStatus('已还原全部自定义框位置');
+}
+
 /**
  * 图集尺寸操作：
  *  - setAtlasFrameMode('auto'|'custom')：自动跟随最大 AABB / 固定为自定义尺寸；
@@ -998,9 +1086,10 @@ export async function trimAtlasBatch({ saveToLibrary = true } = {}) {
   try {
     const { saveBlobToLibrary } = await import('./useLibrary.js');
     const outSize = atlasFrameSize.value ?? atlas.outSize;
-    for (const item of atlas.items) {
+    for (const [index, item] of atlas.items.entries()) {
       try {
-        const blob = await cropAtlasFrame(item, atlas.norm, outSize);
+        const frame = atlas.custom ? atlas.frames[index] : null;
+        const blob = frame ? await cropFrameToSize(item, frame, outSize) : await cropAtlasFrame(item, atlas.norm, outSize);
         const filename = `${stripExtension(item.name)}-透明裁剪.png`;
         await addImageBlob(blob, filename);
         if (saveToLibrary) await saveBlobToLibrary(blob, filename, '裁剪结果');
@@ -1182,6 +1271,8 @@ export async function exportSession({ withBlobs = true } = {}) {
     options: { ...state.options },
     view: { ...state.view },
     theme: state.theme,
+    atlasFrame: { ...state.atlasFrame },
+    customFrames: { ...state.customFrames },
     items: state.items.map(sessionItemMeta),
   };
   const blobs = new Map();
@@ -1253,6 +1344,25 @@ export async function importSession(snapshot, blobs = {}) {
     state.items.push(item);
   }
 
+  // 图集尺寸与每张图的自定义框位置随会话恢复
+  if (snapshot.atlasFrame && typeof snapshot.atlasFrame === 'object') {
+    state.atlasFrame.mode = snapshot.atlasFrame.mode === 'custom' ? 'custom' : 'auto';
+    state.atlasFrame.width = Math.max(0, Math.round(Number(snapshot.atlasFrame.width) || 0));
+    state.atlasFrame.height = Math.max(0, Math.round(Number(snapshot.atlasFrame.height) || 0));
+  } else {
+    state.atlasFrame.mode = 'auto';
+    state.atlasFrame.width = 0;
+    state.atlasFrame.height = 0;
+  }
+  const restoredIds = new Set(state.items.map((item) => item.id));
+  state.customFrames = {};
+  for (const [id, center] of Object.entries(snapshot.customFrames ?? {})) {
+    if (!restoredIds.has(id) || !center || typeof center !== 'object') continue;
+    const cx = Number(center.cx);
+    const cy = Number(center.cy);
+    if (Number.isFinite(cx) && Number.isFinite(cy)) state.customFrames[id] = { cx, cy };
+  }
+
   state.engine = snapshot.engine === 'server' ? 'server' : 'client';
   Object.assign(state.output, { format: 'png', quality: 92 }, snapshot.output ?? {});
   Object.assign(state.options, DEFAULT_OPTIONS, snapshot.options ?? {});
@@ -1287,6 +1397,7 @@ export function useWorkspace() {
     atlasMinSize,
     atlasFrameSize,
     atlasQuickSizes,
+    customFrameEnabled,
     spriteMerge,
     stats,
     historyInfo,
@@ -1324,6 +1435,10 @@ export function useWorkspace() {
       trimAtlasBatch,
       setAtlasFrameMode,
       setAtlasFrameSize,
+      customFrameForItem,
+      setCustomFrameCenter,
+      resetCustomFrame,
+      resetAllCustomFrames,
       saveAtlasSizePreset,
       addAtlasSizePreset,
       applyAtlasSizePreset,

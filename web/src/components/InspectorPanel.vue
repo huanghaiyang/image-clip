@@ -410,6 +410,17 @@ onBeforeUnmount(() => {
         <p v-else class="muted empty">还没有勾选可裁剪的素材（勾选 {{ checkedItems.length }} 张）。</p>
 
         <AtlasFrameEditor />
+        <p class="muted note">
+          {{ trimAtlas?.custom ? '当前使用自定义尺寸：舞台同时显示 AABB（橙色虚线）与自定义尺寸框（蓝色实线）；自定义框大小固定、可拖动位置，每张图独立。' : '舞台显示 AABB（橙色/蓝色选择框）；在尺寸编辑器里应用尺寸后，会额外出现可移动的自定义尺寸框。' }}
+        </p>
+        <button
+          v-if="trimAtlas?.custom"
+          class="btn is-block is-ghost"
+          type="button"
+          @click="actions.resetAllCustomFrames()"
+        >
+          还原全部图片的自定义框位置
+        </button>
 
         <label class="check-row">
           <input v-model="atlasSaveToLibrary" type="checkbox" />
@@ -486,7 +497,7 @@ onBeforeUnmount(() => {
           <div>
             <h2>图集透明裁剪预览</h2>
             <p class="atlas-sub">
-              {{ atlasPreview.count }} 张共用同一取景框
+              {{ atlasPreview.count }} 张{{ trimAtlas?.custom ? '各自使用自定义尺寸框' : '共用同一取景框' }}
               <template v-if="atlasOutputSize">· 统一输出 {{ atlasOutputSize.width }}×{{ atlasOutputSize.height }}</template>
               · 已生成 {{ atlasPreviewRows.length }} / {{ atlasPreview.total }} 张
             </p>
