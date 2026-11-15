@@ -390,6 +390,12 @@ function fileInfo(entry) {
             <button v-else class="btn is-mini" type="button" @click="submitRename">保存</button>
           </div>
         </div>
+        <div class="lock-row">
+          <span class="label">锁定</span>
+          <button class="btn is-mini" :class="{ 'is-primary': single.locked }" type="button" :disabled="state.busy" @click="actions.toggleLock(single)">
+            {{ single.locked ? '已锁定 · 点击解锁' : '锁定（禁止删除）' }}
+          </button>
+        </div>
         <table class="info">
           <tbody>
             <tr v-for="[key, value] in fileInfo(single)" :key="key">
@@ -659,6 +665,15 @@ function fileInfo(entry) {
           </button>
         </div>
         <p class="hint">文件夹会连同其中的全部内容一起移动 / 复制；灰色目标表示会嵌套到文件夹自身。</p>
+        <div class="lock-row">
+          <button class="btn is-mini" type="button" :disabled="state.busy" @click="actions.lockSelected()">
+            锁定选中（禁止删除）
+          </button>
+          <button class="btn is-mini is-ghost" type="button" :disabled="state.busy" @click="actions.unlockSelected()">
+            解锁选中
+          </button>
+        </div>
+        <p class="hint">锁定只禁止删除；改名、移动、复制不受影响。文件夹需先展开并锁定其中的文件。</p>
         <button class="btn is-block is-ghost is-danger" type="button" :disabled="state.busy" @click="removeAll">
           删除选中项
         </button>
@@ -924,6 +939,21 @@ function fileInfo(entry) {
   background: var(--panel-2);
   color: var(--text-2);
   font-size: 11px;
+}
+
+.lock-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 6px;
+}
+
+.lock-row .label {
+  flex: none;
+}
+
+.lock-row .btn {
+  flex: 1;
 }
 
 /* 移动到：树形选择器 */

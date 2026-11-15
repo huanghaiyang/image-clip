@@ -185,6 +185,15 @@ export function renameLibraryItems(items) {
   });
 }
 
+/** 批量锁定 / 解锁（服务端按文件 id 持久化，锁定后禁止删除）。 */
+export function setLibraryLocks(items, locked) {
+  return requestJson('/api/library/lock', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items, locked }),
+  });
+}
+
 export function moveLibraryItems(paths, target) {
   return requestJson('/api/library/move', {
     method: 'POST',

@@ -26,6 +26,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { createFileIdStore } from './fileIds.js';
+import { createFileLockStore } from './fileLocks.js';
 import { fileURLToPath } from 'node:url';
 
 import { VideoError, makeVideoPoster, probeVideo } from './ffmpeg.js';
@@ -57,6 +58,8 @@ export function createLibrary(options = {}) {
   const cacheRoot = path.resolve(options.cacheRoot ?? path.join(ROOT_DIR, 'data/cache'));
   /** 文件唯一 id：路径会变，id 不变；所有按文件操作都优先用它。 */
   const fileIds = createFileIdStore({ file: options.idFile ?? path.join(cacheRoot, 'file-ids.json') });
+  /** 文件锁：按 id 存储，锁定后禁止删除（改名/移动不影响）。 */
+  const fileLocks = createFileLockStore({ file: options.lockFile ?? path.join(cacheRoot, 'file-locks.json') });
 
   let meta = null;
   let metaDirty = false;
@@ -144,6 +147,7 @@ export function createLibrary(options = {}) {
         await fs.mkdir(root, { recursive: true });
         await fs.mkdir(thumbnailRoot, { recursive: true });
         await fileIds.init();
+        await fileLocks.init();
         await loadMeta();
         // 启动后自动为资源库里已有的图片补指纹（后台跑，不挡首个请求）
         scheduleWarmPhashIndex();
@@ -192,6 +196,57 @@ export function createLibrary(options = {}) {
       return null;
     }
     return String(ref ?? '');
+  }
+
+  /**
+   * 批量锁定 / 解锁。只支持文件（文件夹没有稳定 id，锁定无意义）。
+   * @returns {Promise<Array<{id:string,path:string,locked:boolean,ok:boolean,error?:string}>>}
+   */
+  async function setLocks(refs, locked) {
+    const rows = [];
+    for (const ref of refs ?? []) {
+      const rel = resolveRef(ref);
+      if (rel == null) {
+        rows.push({ path: ref?.path ?? null, id: ref?.id ?? null, ok: false, error: '文件不存在或 id 已失效' });
+        continue;
+      }
+      try {
+        const { abs } = resolve(rel, { allowRoot: false });
+        const stat = await fs.stat(abs);
+        if (stat.isDirectory()) {
+          rows.push({ path: rel, ok: false, error: '文件夹不支持锁定，请选中文件' });
+          continue;
+        }
+        const id = fileIds.idFor(rel);
+        fileLocks.set([id], Boolean(locked));
+        rows.push({ id, path: rel, locked: Boolean(locked), ok: true });
+      } catch (err) {
+        rows.push({ path: rel, id: null, ok: false, error: err.message });
+      }
+    }
+    await fileLocks.persist();
+    invalidateScan();
+    return rows;
+  }
+
+  /** 统计文件夹内被锁定的文件数量（删除文件夹前检查，避免绕过锁定）。 */
+  async function countLockedIn(dirAbs) {
+    let count = 0;
+    const queue = [dirAbs];
+    while (queue.length) {
+      const current = queue.shift();
+      const dirents = await fs.readdir(current, { withFileTypes: true }).catch(() => []);
+      for (const dirent of dirents) {
+        if (dirent.name.startsWith('.')) continue;
+        const abs = path.join(current, dirent.name);
+        if (dirent.isDirectory()) queue.push(abs);
+        else if (dirent.isFile()) {
+          const id = fileIds.idFor(toRel(abs));
+          if (fileLocks.has(id)) count += 1;
+        }
+      }
+    }
+    return count;
   }
 
   /** 路径或 {id} → 稳定 id（不存在时按路径补一个）。 */
@@ -373,6 +428,7 @@ export function createLibrary(options = {}) {
     const id = fileIds.idOrNull(rel) ?? fileIds.idFor(rel);
     return {
       id,
+      locked: fileLocks.has(id),
       path: rel,
       name,
       dir: posixDir(rel),
@@ -879,6 +935,7 @@ export function createLibrary(options = {}) {
     await moveMeta(moved);
     movePhash(moved);
     fileIds.remap(moved);
+    await fileIds.persist();
 
     const failures = prepared.filter((p) => p.ok === false && !p.fromRel);
     for (const failure of failures) results.push({ from: failure.from, ok: false, error: failure.error });
@@ -949,6 +1006,7 @@ export function createLibrary(options = {}) {
     await moveMeta(moved);
     movePhash(moved);
     fileIds.remap(moved);
+    await fileIds.persist();
     return results;
   }
 
@@ -1025,6 +1083,14 @@ export function createLibrary(options = {}) {
       try {
         const { abs } = resolve(rel, { allowRoot: false });
         const stat = await fs.stat(abs);
+        // 删除前检查锁定：文件本身、或文件夹内任意被锁定的文件
+        if (stat.isDirectory()) {
+          const lockedCount = await countLockedIn(abs);
+          if (lockedCount > 0) throw new Error(`文件夹内有 ${lockedCount} 个文件已锁定，无法删除`);
+        } else {
+          const fileId = fileIds.idFor(rel);
+          if (fileLocks.has(fileId)) throw new Error('文件已锁定，无法删除');
+        }
         const id = `${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
         itemDir = path.join(root, TRASH_DIR, id);
         await fs.mkdir(itemDir, { recursive: true });
@@ -1056,6 +1122,7 @@ export function createLibrary(options = {}) {
     }
     // 已移入回收站的文件释放 id；恢复时会分配新 id
     fileIds.forget(results.filter((row) => row.ok).map((row) => row.path));
+    await fileIds.persist();
     return results;
   }
 
@@ -2015,6 +2082,8 @@ export function createLibrary(options = {}) {
     resolveRef,
     idForRef,
     fileIds,
+    fileLocks,
+    setLocks,
     renameWithRetry,
     invalidate() {
       meta = null;
@@ -2317,6 +2386,20 @@ export function createLibraryRouter(library) {
     wrap(async (req, res) => {
       const folder = await library.mkdir(req.body?.dir ?? '', req.body?.name ?? '');
       res.status(201).json({ ok: true, folder });
+    }),
+  );
+
+  router.post(
+    '/lock',
+    jsonBody,
+    wrap(async (req, res) => {
+      const results = await library.setLocks(req.body?.items, Boolean(req.body?.locked));
+      res.json({
+        ok: results.every((row) => row.ok),
+        total: results.length,
+        succeeded: results.filter((row) => row.ok).length,
+        results,
+      });
     }),
   );
 

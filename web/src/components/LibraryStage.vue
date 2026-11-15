@@ -781,6 +781,13 @@ onBeforeUnmount(() => {
             />
             <span v-else class="thumb-icon">{{ KIND_ICON[entry.kind] ?? '▤' }}</span>
             <span v-if="entrySize(entry)" class="badge-size mono">{{ entrySize(entry) }}</span>
+            <span v-if="entry.locked" class="badge-lock" title="已锁定：禁止删除">
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <rect x="3.2" y="6.8" width="9.6" height="6.4" rx="1.4" stroke="currentColor" stroke-width="1.4" />
+                <path d="M5.4 6.8V5.1a2.6 2.6 0 0 1 5.2 0v1.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+              </svg>
+              已锁定
+            </span>
             <span v-if="editingPaths.has(entry.path)" class="badge-editing">编辑中</span>
             <span v-if="duplicatePaths.has(entry.path)" class="badge-dup">重复 {{ duplicateGroupOf.get(entry.path) }}</span>
             <span v-if="entry.kind === 'video'" class="badge-video">▶</span>
@@ -887,6 +894,7 @@ onBeforeUnmount(() => {
               <span class="tree-row-name">{{ row.name }}</span>
               <span class="tree-row-meta mono">{{ entryMeta(row.entry) }}</span>
             </span>
+            <span v-if="row.entry.locked" class="lock-flag" title="已锁定：禁止删除">锁</span>
             <span v-if="editingPaths.has(row.path)" class="edit-flag">编辑中</span>
             <span v-if="duplicatePaths.has(row.path)" class="dup-flag">重复 {{ duplicateGroupOf.get(row.path) }}</span>
             <span
@@ -1391,6 +1399,30 @@ onBeforeUnmount(() => {
 
 /* 徽标都画在缩略图之上：.thumb img 是 z-index:1（视频模糊铺底之后），
    徽标若停留在 auto 会被图片盖住，只透过 object-fit:contain 的透明留边露出一半。 */
+.badge-lock {
+  position: absolute;
+  left: 5px;
+  bottom: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #ffd166;
+  font-size: 9px;
+  line-height: 1.4;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.lock-flag {
+  flex: none;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.9;
+}
+
 .badge-size {
   position: absolute;
   z-index: 2;

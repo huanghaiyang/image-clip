@@ -20,6 +20,7 @@ import {
   moveLibraryItems,
   copyLibraryItems,
   renameLibraryItems,
+  setLibraryLocks,
   restoreLibraryVersion,
   revealLibraryPath,
   uploadLibraryFile,
@@ -72,6 +73,8 @@ function initialBrowseMode() {
 const libraryIndex = shallowRef({ folders: [], entries: [], stats: { ...EMPTY_STATS }, ready: false });
 const dirCache = shallowRef(new Map());
 const metaByPath = shallowRef(new Map());
+/** 锁定状态覆盖：id -> boolean；接口返回后立即生效，不用整库刷新。 */
+const lockOverrides = shallowRef(new Map());
 
 const state = reactive({
   initialized: false,
@@ -104,10 +107,17 @@ const entries = computed(() => {
     for (const entry of bucket.entries) map.set(entry.path, entry);
   }
   const list = [...map.values()];
-  if (!metaByPath.value.size) return list;
-  return list.map((entry) => {
-    const info = metaByPath.value.get(entry.path);
-    return info ? { ...entry, ...info } : entry;
+  const overrides = lockOverrides.value;
+  const withMeta = !metaByPath.value.size
+    ? list
+    : list.map((entry) => {
+        const info = metaByPath.value.get(entry.path);
+        return info ? { ...entry, ...info } : entry;
+      });
+  if (!overrides.size) return withMeta;
+  return withMeta.map((entry) => {
+    const locked = overrides.get(entry.id);
+    return locked === undefined ? entry : { ...entry, locked };
   });
 });
 
@@ -1072,6 +1082,70 @@ async function applyDeletionImpact(impact, list) {
   }
 }
 
+function refOfEntry(entry) {
+  return entry?.id ? { id: entry.id, path: entry.path } : { path: entry?.path };
+}
+
+function applyLockResults(results) {
+  const next = new Map(lockOverrides.value);
+  for (const row of results ?? []) {
+    const entry = entries.value.find((item) => item.id === row.id || item.path === row.path);
+    if (entry?.id) next.set(entry.id, Boolean(row.locked));
+  }
+  lockOverrides.value = next;
+}
+
+/** 锁定 / 解锁指定文件（entry 或 {id,path}）。 */
+export async function setLock(items, locked) {
+  const list = (Array.isArray(items) ? items : [items]).filter(Boolean);
+  if (!list.length) return false;
+  state.busy = true;
+  try {
+    const response = await setLibraryLocks(list.map((item) => (item.id ? { id: item.id, path: item.path } : { path: item.path })), Boolean(locked));
+    applyLockResults(response.results);
+    const failed = failedCount(response);
+    if (failed) {
+      const first = response.results?.find((row) => row.ok === false);
+      setError(`锁定操作部分失败：${first?.error ?? `${failed} 项`}`);
+      pushToast({ kind: 'error', title: '锁定失败', message: first?.error ?? `${failed} 项没有更新` });
+    } else {
+      const text = locked ? '已锁定' : '已解锁';
+      setStatus(`${text} ${response.succeeded ?? list.length} 项${locked ? '（锁定后不能删除）' : ''}`);
+      pushToast({ kind: 'success', title: text, message: `${response.succeeded ?? list.length} 个文件${locked ? '已锁定，删除会被拒绝' : '已解锁'}` });
+    }
+    return response.ok;
+  } catch (err) {
+    setError(`锁定操作失败：${err.message}`);
+    return false;
+  } finally {
+    state.busy = false;
+  }
+}
+
+export async function toggleLock(entry) {
+  if (!entry) return false;
+  return setLock([entry], !entry.locked);
+}
+
+/** 批量锁定选中的文件（文件夹会被忽略并提示）。 */
+export async function lockSelected() {
+  const files = selectedEntries.value.filter((entry) => entry.kind !== 'folder');
+  if (!files.length) {
+    setError('请选中要锁定的文件（文件夹不支持锁定）');
+    return false;
+  }
+  return setLock(files, true);
+}
+
+export async function unlockSelected() {
+  const files = selectedEntries.value.filter((entry) => entry.kind !== 'folder');
+  if (!files.length) {
+    setError('请选中要解锁的文件');
+    return false;
+  }
+  return setLock(files, false);
+}
+
 export async function deletePaths(paths) {
   const list = [...new Set((paths ?? []).filter(Boolean))];
   if (!list.length) {
@@ -1081,12 +1155,18 @@ export async function deletePaths(paths) {
   state.busy = true;
   try {
     const result = await deleteLibraryItems(list.map(refOfPath));
-    await applyDeletionImpact(await inspectDeletionImpact(list), list);
-    applyLibraryRemoval(list);
+    // 只移除真正成功的项：锁定 / 失败的项目必须留在列表里
+    const removed = (result.results ?? []).filter((row) => row.ok).map((row) => row.path);
+    if (removed.length) {
+      await applyDeletionImpact(await inspectDeletionImpact(removed), removed);
+      applyLibraryRemoval(removed);
+    }
     const failed = failedCount(result);
     if (failed) {
-      setError(`删除部分失败：${failed} 项`);
-      pushToast({ kind: 'error', title: '删除部分失败', message: `${failed} 项没有移入回收站` });
+      const first = result.results?.find((row) => row.ok === false);
+      const message = first?.error?.includes('锁定') ? first.error : `${failed} 项没有移入回收站${first?.error ? `：${first.error}` : ''}`;
+      setError(`删除部分失败：${message}`);
+      pushToast({ kind: 'error', title: '删除被阻止', message });
     } else {
       setStatus(`已将 ${result.succeeded ?? list.length} 项移入回收站`);
       pushToast({ kind: 'success', title: '已移入回收站', message: `${result.succeeded ?? list.length} 项 · 可在回收站恢复` });
@@ -1116,12 +1196,17 @@ export async function deleteFolder(folder) {
   state.busy = true;
   try {
     const result = await deleteLibraryItems([{ path }]);
-    await applyDeletionImpact(await inspectDeletionImpact([path]), [path]);
-    // applyLibraryRemoval 会顺带处理当前目录 / 预览 / 选中项
-    applyLibraryRemoval([path]);
+    const removed = (result.results ?? []).filter((row) => row.ok).map((row) => row.path);
+    if (removed.length) {
+      await applyDeletionImpact(await inspectDeletionImpact(removed), removed);
+      // applyLibraryRemoval 会顺带处理当前目录 / 预览 / 选中项
+      applyLibraryRemoval(removed);
+    }
     const failed = failedCount(result);
-    if (failed) setError(`删除文件夹部分失败：${failed} 项`);
-    else setStatus(`已将文件夹「${name}」及其内容移入回收站`);
+    if (failed) {
+      const first = result.results?.find((row) => row.ok === false);
+      setError(`删除文件夹失败：${first?.error ?? `${failed} 项`}`);
+    } else setStatus(`已将文件夹「${name}」及其内容移入回收站`);
     return result.ok;
   } catch (err) {
     setError(`删除文件夹失败：${err.message}`);
@@ -1389,6 +1474,10 @@ export function useLibrary() {
       copySelected,
       deletePaths,
       deleteSelected,
+      setLock,
+      toggleLock,
+      lockSelected,
+      unlockSelected,
       deleteFolder,
       describeDeletionImpact,
       confirmTransferToEditor,
