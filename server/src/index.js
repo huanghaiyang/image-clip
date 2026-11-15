@@ -49,6 +49,9 @@ import { DETECT_METHODS, DEFAULT_DETECT_OPTIONS } from '../../shared/watermark/d
 import { ffmpegStatus } from './ffmpeg.js';
 import { createLibrary, createLibraryRouter } from './library.js';
 import { createJobManager } from './jobs.js';
+import { createLogger } from './logger.js';
+import { guestMiddleware } from './guest.js';
+import { createLimiters } from './limiter.js';
 import { createVideoRouter } from './video.js';
 import { cutoutModelPath, cutoutStatus } from './cutout.js';
 import { findCutoutModel } from '../../shared/cutout.js';
@@ -70,13 +73,50 @@ export function createApp() {
   const library = createLibrary();
   library.init().catch((err) => console.warn('[image-clip] 资源库初始化失败:', err.message));
 
-  // 后台任务（视频截帧等）：HTTP 请求只负责创建任务，长活在这里异步跑；
-  // 已完成任务会持久化到 data/cache/jobs-history.json，重启后仍能在任务面板看到历史
-  const jobs = createJobManager({ cacheFile: path.join(library.cacheRoot, 'jobs-history.json') });
+  // 日志：应用日志按天 + 按大小拆分；任务日志单独留存（保留天数见环境变量）
+  const logger = createLogger({
+    dir: process.env.LOG_DIR || path.join(ROOT, 'data/logs'),
+    minLevel: process.env.LOG_LEVEL || 'info',
+    maxBytes: Number(process.env.LOG_MAX_BYTES) || 8 * 1024 * 1024,
+    retainAppDays: Number(process.env.LOG_RETAIN_APP_DAYS) || 14,
+    retainJobDays: Number(process.env.LOG_RETAIN_JOB_DAYS) || 30,
+  });
+  const loggerReady = logger.init().catch((err) => console.warn('[image-clip] 日志初始化失败:', err.message));
+
+  // 临时用户：浏览器为每个标签页生成一个临时身份（X-Client-Id），
+  // 不需要登录；所有人共享资源库，但任务/工作区按临时用户隔离。
+
+  // CPU/内存密集接口的并发闸门：超载时返回 503，而不是把进程拖死
+  const limiters = createLimiters({ logger });
+
+  // 后台任务（视频截帧等）：带并发上限、用户配额与任务日志
+  const jobs = createJobManager({
+    cacheFile: path.join(library.cacheRoot, 'jobs-history.json'),
+    logger,
+    concurrency: Number(process.env.JOB_CONCURRENCY) || 2,
+    maxPerUser: Number(process.env.JOB_MAX_PER_USER) || 3,
+    max: Number(process.env.JOB_HISTORY_MAX) || 200,
+  });
   jobs.init().catch((err) => console.warn('[image-clip] 任务历史读取失败:', err.message));
+
+  // 供优雅关闭 / 调试使用
+  app.locals.services = { library, jobs, logger, limiters };
+  app.locals.ready = Promise.all([loggerReady, jobs.init()]).catch(() => {});
 
   // 所有写接口都用“原始二进制”接收，JSON 负载由 extractInput 内部分支处理。
   const rawBody = express.raw({ type: () => true, limit: LIMITS.maxUploadBytes });
+
+  // ---- 临时用户 ---------------------------------------------------------
+  // 不登录、不注册：客户端用 X-Client-Id（每个标签页一个）标识自己；
+  // 所有请求都放行，req.user 只用于任务/日志隔离，不构成安全边界。
+  app.use(guestMiddleware());
+
+  // ---- 重接口并发闸门 ---------------------------------------------------
+  const imageGate = limiters.image.middleware();
+  const videoGate = limiters.video.middleware();
+  app.use('/api/library/thumb', limiters.thumbnail.middleware());
+  app.use('/api/library/similar', imageGate);
+  app.use('/api/video/frames', videoGate);
 
   app.get('/api/health', async (_req, res) => {
     let sharpVersion = null;
@@ -90,6 +130,10 @@ export function createApp() {
     res.json({
       ok: true,
       service: 'image-clip-server',
+      // 多用户 / 并发 / 任务 / 日志的观测面（不含任何用户隐私）
+      guestSessions: true,
+      jobs: jobs.stats(),
+      limiters: limiters.stats(),
       algorithm: ALGORITHM,
       engine: 'node-sharp',
       sharp: sharpVersion,
@@ -126,7 +170,7 @@ export function createApp() {
     }
   });
 
-  app.post('/api/analyze', rawBody, async (req, res, next) => {
+  app.post('/api/analyze', imageGate, rawBody, async (req, res, next) => {
     try {
       const { buffer, body } = extractInput(req);
       const options = pickOptions(req.query, body);
@@ -149,7 +193,7 @@ export function createApp() {
     }
   });
 
-  app.post('/api/crop', rawBody, async (req, res, next) => {
+  app.post('/api/crop', imageGate, rawBody, async (req, res, next) => {
     try {
       const { buffer, body } = extractInput(req);
       const options = pickOptions(req.query, body);
@@ -186,7 +230,7 @@ export function createApp() {
     }
   });
 
-  app.post('/api/crop/batch', rawBody, async (req, res, next) => {
+  app.post('/api/crop/batch', imageGate, rawBody, async (req, res, next) => {
     try {
       const body = parseJsonBody(req);
       const images = Array.isArray(body?.images) ? body.images : null;
@@ -255,7 +299,7 @@ export function createApp() {
     });
   });
 
-  app.post('/api/watermark/detect', rawBody, async (req, res, next) => {
+  app.post('/api/watermark/detect', imageGate, rawBody, async (req, res, next) => {
     try {
       const { buffer, body } = extractInput(req);
       const options = watermarkOptions(req.query, body);
@@ -286,7 +330,7 @@ export function createApp() {
     }
   });
 
-  app.post('/api/watermark/remove', rawBody, async (req, res, next) => {
+  app.post('/api/watermark/remove', imageGate, rawBody, async (req, res, next) => {
     try {
       const { buffer, body } = extractInput(req);
       const options = watermarkOptions(req.query, body);
@@ -367,22 +411,70 @@ export function createApp() {
     }
   });
 
-  // 后台任务状态（前端轮询驱动右下角进度气泡）
+  // 后台任务：普通用户只看自己的任务，管理员可加 ?all=1 看全部
+  const canSeeJob = (user, job) => Boolean(user) && (job.userId == null || job.userId === user.id);
+
   app.get('/api/jobs', (req, res) => {
-    const active = String(req.query.active ?? '') === '1';
-    res.json({ ok: true, jobs: jobs.list({ active }) });
+    res.json({
+      ok: true,
+      jobs: jobs.list({ active: String(req.query.active ?? '') === '1', userId: req.user.id }),
+      stats: jobs.stats(),
+    });
   });
+
+  app.get('/api/jobs/stats', (_req, res) => {
+    res.json({ ok: true, stats: { ...jobs.stats(), limiters: limiters.stats() } });
+  });
+
   app.get('/api/jobs/:id', (req, res) => {
     const job = jobs.get(req.params.id);
     if (!job) {
       res.status(404).json({ error: { code: 'JOB_NOT_FOUND', message: '任务不存在（可能已过期）' } });
       return;
     }
+    if (!canSeeJob(req.user, job)) {
+      res.status(403).json({ error: { code: 'FORBIDDEN', message: '无权查看其他用户的任务' } });
+      return;
+    }
     res.json({ ok: true, job });
   });
+
   app.post('/api/jobs/:id/cancel', (req, res) => {
-    const job = jobs.cancel(req.params.id);
-    res.json({ ok: Boolean(job), job });
+    const job = jobs.get(req.params.id);
+    if (!job) {
+      res.status(404).json({ error: { code: 'JOB_NOT_FOUND', message: '任务不存在' } });
+      return;
+    }
+    if (!canSeeJob(req.user, job)) {
+      res.status(403).json({ error: { code: 'FORBIDDEN', message: '无权操作其他用户的任务' } });
+      return;
+    }
+    res.json({ ok: true, job: jobs.cancel(job.id) });
+  });
+
+  /** 任务日志：默认读最后 200 行，支持 ?limit= 调到 5000。 */
+  app.get('/api/jobs/:id/log', async (req, res, next) => {
+    try {
+      const job = jobs.get(req.params.id);
+      if (!job) {
+        res.status(404).json({ error: { code: 'JOB_NOT_FOUND', message: '任务不存在' } });
+        return;
+      }
+      if (!canSeeJob(req.user, job)) {
+        res.status(403).json({ error: { code: 'FORBIDDEN', message: '无权查看其他用户的任务日志' } });
+        return;
+      }
+      const file = logger.fileForJob(job.id, new Date(job.startedAt || job.enqueuedAt || Date.now()));
+      let result = { total: 0, lines: [] };
+      try {
+        result = await logger.tailFile(file, req.query.limit ?? 200);
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+      }
+      res.json({ ok: true, jobId: job.id, file, ...result });
+    } catch (err) {
+      next(err);
+    }
   });
 
   // 资源库 & 视频工作区（放在图片接口之后、静态资源之前；路径互不冲突）。
@@ -573,9 +665,33 @@ function toBoolValue(value) {
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   const app = createApp();
-  app.listen(PORT, HOST, () => {
-    console.log(`[image-clip] API 已启动: http://${HOST}:${PORT}  (算法 ${ALGORITHM})`);
+  const { logger, jobs } = app.locals.services;
+  await app.locals.ready;
+  const server = app.listen(PORT, HOST, () => {
+    const stats = jobs.stats();
+    console.log(
+      `[image-clip] API 已启动: http://${HOST}:${PORT}  (算法 ${ALGORITHM}) · 任务并发 ${stats.concurrency} · 每用户上限 ${stats.maxPerUser}`,
+    );
+    logger.info('server', '服务启动', { port: PORT, pid: process.pid, concurrency: stats.concurrency });
   });
+
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[image-clip] 收到 ${signal}，正在优雅关闭…`);
+    logger.info('server', '服务关闭中', { signal });
+    const force = setTimeout(() => process.exit(1), 15000);
+    force.unref?.();
+    await new Promise((resolve) => server.close(resolve));
+    await jobs.drain(6000);
+    await logger.flush();
+    await logger.close();
+    console.log('[image-clip] 已退出');
+    process.exit(0);
+  };
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
 export default createApp;

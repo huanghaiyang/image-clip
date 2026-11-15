@@ -160,6 +160,17 @@ function toastId(job) {
 
 function notifyTransition(job) {
   const id = toastId(job);
+  if (job.status === 'queued') {
+    pushToast({
+      id,
+      kind: 'progress',
+      title: job.label || '任务排队中',
+      message: job.queuePosition ? `排队中 · 第 ${job.queuePosition} 位` : '排队中…',
+      progress: 0,
+      timeout: 60000,
+    });
+    return;
+  }
   if (job.status === 'running') {
     const detail = job.detail || '正在后台执行…';
     pushToast({
@@ -189,6 +200,16 @@ function notifyTransition(job) {
       title: `${job.label || '任务'} · 失败`,
       message: job.error || '任务执行失败',
       timeout: 9000,
+    });
+    return;
+  }
+  if (job.status === 'cancelled') {
+    pushToast({
+      id,
+      kind: 'info',
+      title: `${job.label || '任务'} · 已取消`,
+      message: job.detail || '',
+      timeout: 5000,
     });
   }
 }
@@ -233,7 +254,7 @@ export async function pollJobs() {
     state.error = err.message || '读取任务失败';
   } finally {
     inFlight = false;
-    const active = state.jobs.some((job) => job.status === 'running');
+    const active = state.jobs.some((job) => job.status === 'running' || job.status === 'queued');
     baseline = false;
     schedule(active ? 1000 : 6000);
   }
@@ -254,7 +275,7 @@ export function stopJobPolling() {
 }
 
 /** 正在跑的任务（UI 可用来显示进度）。 */
-const activeJobs = computed(() => state.jobs.filter((job) => job.status === 'running'));
+const activeJobs = computed(() => state.jobs.filter((job) => job.status === 'running' || job.status === 'queued'));
 
 export function findFramesJob(path) {
   return state.jobs.find((job) => job.type === 'video.frames' && (!path || job.meta?.path === path)) ?? null;

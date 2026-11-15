@@ -7,6 +7,8 @@
  *  3. 上传头里中文文件名必须 encodeURIComponent，否则浏览器会拒绝设置非 ASCII 头。
  */
 
+import { guestHeaders } from '../composables/useGuest.js';
+
 export class LibraryApiError extends Error {
   constructor(message, code = 'LIBRARY_API_ERROR', status = 0) {
     super(message);
@@ -99,6 +101,9 @@ export function uploadLibraryFile(file, options = {}) {
     xhr.open('POST', '/api/library/upload');
     xhr.responseType = 'json';
     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    const guest = guestHeaders();
+    xhr.setRequestHeader('X-Client-Id', guest['X-Client-Id']);
+    xhr.setRequestHeader('X-Client-Name', guest['X-Client-Name']);
     xhr.setRequestHeader('X-File-Name', encodeURIComponent(name));
     xhr.setRequestHeader('X-File-Dir', encodeURIComponent(dir));
     if (options.dedup) xhr.setRequestHeader('X-Dedup', '1');

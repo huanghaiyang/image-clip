@@ -301,22 +301,24 @@ export function createVideoRouter(library, { jobs } = {}) {
 
       if (background) {
         if (!jobs) throw new LibraryError('后台任务未启用', 'NO_JOBS', 500);
-        const job = jobs.create({
-          type: jobMeta.type,
-          label: `截取关键帧 · ${jobMeta.sourceName}`,
-          meta: jobMeta,
-        });
-        void (async () => {
-          try {
+        // 走任务管理器的队列：并发上限、用户配额、任务日志都由它统一处理
+        const job = jobs.run(
+          {
+            type: jobMeta.type,
+            label: `截取关键帧 · ${jobMeta.sourceName}`,
+            meta: jobMeta,
+            userId: req.user?.id ?? null,
+          },
+          async (ctx) => {
+            ctx.log('开始截取关键帧', { count: jobMeta.requested, folder: jobMeta.folder, width: jobMeta.width });
             const payload = await run((done, total) => {
-              jobs.update(job.id, { progress: total ? done / total : 0, detail: `已截取 ${done}/${total}` });
-              if (jobs.get(job.id)?.cancelled) throw new Error('任务已取消');
+              ctx.progress(total ? done / total : 0, `已截取 ${done}/${total}`);
+              if (ctx.isCancelled()) throw new Error('任务已取消');
             });
-            jobs.finish(job.id, payload);
-          } catch (err) {
-            jobs.fail(job.id, err.message);
-          }
-        })();
+            ctx.log('关键帧写入完成', { extracted: payload.extracted, failed: payload.failed, folder: payload.folder });
+            return payload;
+          },
+        );
         res.status(202).json({ ok: true, background: true, job });
         return;
       }

@@ -967,6 +967,59 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 **移动 / 复制 / 改名的重名处理**：目标目录已有同名文件时自动加序号（`name (2).ext`），
 绝不覆盖任何一方；文件夹同名也同理。`server/test/library-move.test.js` 覆盖移动、复制、批量改名三种情况。
 
+### 10.19 临时用户与高并发
+
+**多临时用户（不登录、不注册）**
+
+* 每个浏览器标签页 = 一个临时用户：客户端生成 `X-Client-Id`（存 sessionStorage，刷新不丢、关标签页结束），
+  请求自动带 `X-Client-Id / X-Client-Name`；服务端 `server/src/guest.js` 解析为 `req.user`。
+* **共享**：资源库、回收站、指纹索引、示例图——所有人看到同一份素材。
+* **隔离**：工作区现场（当前素材、工具参数、撤销栈、预览状态）按临时用户分键存在浏览器里
+  （会话文档 localStorage + IndexedDB blob 都加用户前缀）；任务列表、任务日志按 `req.user.id` 过滤，
+  各自只看自己的任务进度与日志。
+* 同一个浏览器可以开多个标签页，或点顶栏「临时用户」面板里的「新标签页开一个临时用户 / 本标签页换新用户」
+  得到互不干扰的工作区；新标签页凭 `?newGuest=1` 强制新身份。
+* 没有 header 的请求（curl、脚本、老客户端）落到 `guest-local`，行为与单用户一致。
+* 注意：临时用户不是安全边界，只解决「多人共用同一个媒体库时工作区/任务不要混淆」。
+
+**高并发保护**
+
+* `server/src/limiter.js`：按用途分开的有界并发闸门（image / thumbnail / video），
+  排队满时返回 `503 { code: 'BUSY' }` + `Retry-After`，避免几百个 sharp/ffmpeg 任务把进程拖死；
+  健康检查里能看到 `active / queued / rejected`（实测 100 并发缩略图、40 并发裁剪全部 200，限流器 0 拒绝）。
+* `server/src/jobs.js` 的任务队列：`JOB_CONCURRENCY`（默认 2）限制全局同时运行数，
+  `JOB_MAX_PER_USER`（默认 3）限制单个临时用户排队+运行数；任务状态新增 `queued` 与 `queuePosition`。
+* 优雅关闭：SIGINT/SIGTERM 时停止接新请求、等待任务排空（最多 6s）、flush 日志后退出。
+* 可调环境变量：`PORT`、`HOST`、`JOB_CONCURRENCY`、`JOB_MAX_PER_USER`、`JOB_HISTORY_MAX`、
+  `LOG_DIR`、`LOG_LEVEL`、`LOG_MAX_BYTES`、`LOG_RETAIN_APP_DAYS`、`LOG_RETAIN_JOB_DAYS`。
+
+**临时用户相关接口**
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/jobs` | 当前临时用户的任务（queued/running/done/failed/cancelled + queuePosition） |
+| GET | `/api/jobs/:id/log` | 当前临时用户某个任务的日志尾部（他人的任务返回 403） |
+| GET | `/api/health` | 含 `guestSessions / jobs / limiters` 观测字段 |
+
+### 10.20 日志长久留存与拆分
+
+`server/src/logger.js` 提供应用日志与任务日志：
+
+```
+data/logs/
+  app-YYYY-MM-DD.jsonl        应用日志，按天拆分
+  app-YYYY-MM-DD.N.jsonl      同一天超过 LOG_MAX_BYTES（默认 8MB）后按大小再拆
+  jobs/YYYY-MM-DD/<jobId>.jsonl   单个任务的完整日志
+  jobs/jobs-YYYY-MM-DD.jsonl      当天所有任务日志汇总（按天拆分）
+```
+
+* JSONL 一行一个 JSON（`t / level / scope / msg / 其它字段`），方便 tail、grep、导入；
+* 启动时和每 24h 清理过期文件：应用日志默认留 14 天，任务日志默认留 30 天；
+* 写入串行化，不会出现并发 append 交错；关闭前 `flush()` 保证不丢日志；
+* 任务生命周期的 enqueued / started / progress / done / failed / cancelled 都会写进任务日志；
+* 查询接口：`GET /api/jobs/:id/log?limit=300`（任务日志尾部，只能看当前临时用户自己的任务）。
+  任务中心里点任意任务即可直接看日志尾部，运行中的任务每 1.5s 自动刷新；原始文件由运维直接在 `data/logs` 查看。
+
 ### 10.17 测试
 
 `npm test` 里新增了几组共享算法与前端纯逻辑单测：
@@ -985,6 +1038,10 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 * `web/test/similar.test.js`：相似度文案分档、百分比/距离格式化、结果排序与 minScore 过滤、汇总文案；
 * `server/test/jobs.test.js`：后台任务创建/进度/完成/失败/取消、列表排序与上限；
 * `server/test/library-move.test.js`：移动 / 复制 / 批量改名遇到同名文件时自动加序号、不覆盖；
+* `server/test/logger.test.js`：按天/按大小拆分、任务日志分离、保留期清理、tail；
+* `server/test/guest.test.js`：临时用户标识解析与任务/日志隔离（A 看不到 B 的任务，资源库共享）；
+* `server/test/jobs-queue.test.js`：任务并发上限、排队位置、用户配额、取消、任务日志落盘；
+* `server/test/limiter.test.js`：并发闸门、队列满 503、释放后自动放行；
 * `web/test/toasts.test.js`：气泡通知的 push/update（同 id 原地更新）/dismiss/上限 5 条；
 * `web/test/async.test.js`：`mapLimit` 的顺序、并发上限、空列表与错误冒泡；
 * `web/test/version-compare.test.js`：逐像素差异（透明像素 / 单通道偏色 / 阈值 / 长度不足）、

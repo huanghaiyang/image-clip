@@ -17,6 +17,7 @@ import { useWorkspace } from '../composables/useWorkspace.js';
 import { useWatermark } from '../composables/useWatermark.js';
 import { useLlmChat } from '../composables/useLlmChat.js';
 import { useJobs } from '../composables/useJobs.js';
+import { useGuest } from '../composables/useGuest.js';
 import { useAppMode, MODES } from '../composables/useAppMode.js';
 import { useLibrary } from '../composables/useLibrary.js';
 import { useVideo } from '../composables/useVideo.js';
@@ -126,6 +127,7 @@ function applyBackdropHex() {
 }
 const { state: sessionState, actions: sessionActions } = useWorkSession();
 const { state: jobsState, actions: jobsActions } = useJobs();
+const { state: guestState, actions: guestActions } = useGuest();
 const runningTasks = computed(
   () =>
     jobsState.jobs.filter((job) => job.status === 'running').length +
@@ -269,6 +271,15 @@ const sessionHint = computed(() => {
           <span class="task-glyph" aria-hidden="true">◷</span>
           任务
           <span v-if="runningTasks" class="task-count">{{ runningTasks }}</span>
+        </button>
+        <button
+          class="btn is-ghost user-btn"
+          type="button"
+          :title="`临时用户：${guestState.name}（工作区按标签页隔离，素材库共享）`"
+          @click="guestActions.openDialog()"
+        >
+          <span class="user-dot is-on"></span>
+          {{ guestState.name }}
         </button>
         <button class="btn is-ghost session-btn" type="button" :title="sessionHint" @click="sessionActions.openDialog()">
           <span
@@ -532,6 +543,26 @@ const sessionHint = computed(() => {
   line-height: 14px;
   text-align: center;
 }
+.user-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 150px;
+  overflow: hidden;
+}
+
+.user-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.user-dot.is-on {
+  background: #14ae5c;
+}
+
 <style scoped>
 .topbar {
   position: relative;

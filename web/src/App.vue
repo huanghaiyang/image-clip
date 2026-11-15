@@ -42,6 +42,9 @@ import Toasts from './components/Toasts.vue';
 import FolderPickerDialog from './components/FolderPickerDialog.vue';
 import TaskCenter from './components/TaskCenter.vue';
 import EditTimelinePanel from './components/EditTimelinePanel.vue';
+import GuestDialog from './components/GuestDialog.vue';
+import { useGuest } from './composables/useGuest.js';
+import { setSessionNamespace } from './lib/sessionStore.js';
 import { startTimeline, stopTimeline } from './composables/useEditTimeline.js';
 import { startJobPolling, stopJobPolling } from './composables/useJobs.js';
 import SessionDialog from './components/SessionDialog.vue';
@@ -279,6 +282,8 @@ function onKeydown(event) {
   }
 }
 
+const { state: guestState } = useGuest();
+
 onMounted(() => {
   // 后台任务轮询（视频截帧等）：驱动右下角进度气泡
   startJobPolling();
@@ -290,7 +295,9 @@ onMounted(() => {
   window.addEventListener('drop', onWindowDrop);
   window.addEventListener('keydown', onKeydown);
   void actions.checkServer();
-  // 恢复上次临时会话；之后所有变更自动暂存
+
+  // 临时用户：每个标签页一个独立工作区；刷新后恢复本标签页的现场
+  setSessionNamespace(guestState.id);
   void sessionActions.init();
 });
 
@@ -398,6 +405,8 @@ watch(
     <FolderPickerDialog />
     <!-- 应用级任务中心（进行中 + 历史） -->
     <TaskCenter />
+    <!-- 登录 / 初始化管理员 / 用户管理 -->
+    <GuestDialog />
     <SessionDialog v-if="sessionState.open" @close="sessionActions.closeDialog()" />
   </div>
 </template>
