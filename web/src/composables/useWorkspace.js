@@ -19,12 +19,43 @@ import {
 import { analyzeWith, cropWith } from '../lib/engine.js';
 import { blobToBytes, createZip } from '../lib/zip.js';
 import { onLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
+import { clampAtlasSize, makeAtlasSizePreset, normalizeMinSize, quickAtlasSizes, resolveAtlasFrameSize } from '../lib/atlasFrame.js';
 import { canvasToBlob, createCanvas, cropToBlob, stripExtension } from '../lib/imageops.js';
 import { mapLimit } from '../lib/async.js';
 import { computeAtlasOutputSize, fitInto } from '../lib/atlas.js';
 import { planSpriteSheet, spriteCellOrigin } from '../lib/sprite.js';
 
 let uid = 0;
+
+const ATLAS_SIZE_KEY = 'image-clip:atlas-sizes:v1';
+
+/** 图集尺寸预设：{id,name,width,height}，存 localStorage；非法数据直接忽略。 */
+function loadAtlasSizePresets() {
+  try {
+    const raw = localStorage.getItem(ATLAS_SIZE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((preset) => preset && Number(preset.width) > 0 && Number(preset.height) > 0)
+      .slice(0, 50)
+      .map((preset) => ({
+        id: String(preset.id || `atlas-${Math.random().toString(36).slice(2, 8)}`),
+        name: String(preset.name || `${preset.width}×${preset.height}`).slice(0, 40),
+        width: Math.round(Number(preset.width)),
+        height: Math.round(Number(preset.height)),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function persistAtlasSizePresets() {
+  try {
+    localStorage.setItem(ATLAS_SIZE_KEY, JSON.stringify(state.atlasSizePresets));
+  } catch {
+    /* 隐私模式忽略 */
+  }
+}
 
 const state = reactive({
   items: [],
@@ -46,6 +77,9 @@ const state = reactive({
   status: '',
   error: '',
   server: { checked: false, ok: false, sharp: null, algorithm: null },
+  /** 图集统一输出尺寸：auto 跟随最大 AABB；custom 只能比它更大。 */
+  atlasFrame: { mode: 'auto', width: 0, height: 0 },
+  atlasSizePresets: loadAtlasSizePresets(),
 });
 
 const selected = computed(() => state.items.find((item) => item.id === state.selectedId) ?? null);
@@ -124,6 +158,18 @@ const trimAtlas = computed(() => {
   const outSize = computeAtlasOutputSize(items.map((item) => normRect(item, norm)));
   return { count: list.length, skipped: usable.length - list.length, items, norm, outSize };
 });
+/** 图集输出尺寸的下限 = 各帧裁剪后的最大宽高（最大 AABB）。 */
+const atlasMinSize = computed(() => (trimAtlas.value ? normalizeMinSize(trimAtlas.value.outSize) : null));
+
+/** 实际输出尺寸：auto 用下限；custom 夹到「不小于最大 AABB」。 */
+const atlasFrameSize = computed(() => {
+  if (!atlasMinSize.value) return null;
+  return resolveAtlasFrameSize(atlasMinSize.value, state.atlasFrame);
+});
+
+/** 给 UI 的快捷预设（最大 AABB / 正方形 / 1.5x / 2x）。 */
+const atlasQuickSizes = computed(() => (atlasMinSize.value ? quickAtlasSizes(atlasMinSize.value) : []));
+
 /**
  * 多图合并精灵图的帧集合：勾选素材里所有可用图片都参与，**尺寸可以不同**。
  *
@@ -818,7 +864,8 @@ export async function previewAtlasCrop({ onResult, onProgress } = {}) {
     return null;
   }
   const items = atlas.items;
-  const outSize = atlas.outSize;
+  // 输出尺寸受「不小于最大 AABB」约束；auto 时就是 max AABB
+  const outSize = atlasFrameSize.value ?? atlas.outSize;
   const rows = new Array(items.length);
   let done = 0;
   await mapLimit(items, 3, async (item, index) => {
@@ -855,6 +902,90 @@ export async function previewAtlasCrop({ onResult, onProgress } = {}) {
 }
 
 /** 图集透明裁剪：所有勾选素材共用最大 AABB，结果写回素材列表，可选存入资源库。 */
+/**
+ * 图集尺寸操作：
+ *  - setAtlasFrameMode('auto'|'custom')：自动跟随最大 AABB / 固定为自定义尺寸；
+ *  - setAtlasFrameSize({width,height})：只允许 ≥ 最大 AABB，小了自动夹到下限并提示；
+ *  - 预设：保存当前尺寸 / 添加命名尺寸 / 应用 / 删除。
+ */
+export function setAtlasFrameMode(mode) {
+  const next = mode === 'custom' ? 'custom' : 'auto';
+  if (state.atlasFrame.mode === next) return;
+  state.atlasFrame.mode = next;
+  if (next === 'custom') {
+    const size = atlasFrameSize.value;
+    state.atlasFrame.width = size?.width ?? 0;
+    state.atlasFrame.height = size?.height ?? 0;
+    setStatus('图集尺寸改为固定：只能大于或等于最大 AABB');
+  } else {
+    setStatus('图集尺寸改为自动：跟随最大 AABB');
+  }
+}
+
+export function setAtlasFrameSize({ width, height } = {}) {
+  const min = atlasMinSize.value;
+  if (!min) return null;
+  const clamped = clampAtlasSize(min, { width, height });
+  state.atlasFrame.mode = 'custom';
+  state.atlasFrame.width = clamped.width;
+  state.atlasFrame.height = clamped.height;
+  if (clamped.clamped.width || clamped.clamped.height) {
+    setError(`图集尺寸不能小于最大 AABB（${min.width}×${min.height}），已自动调整`);
+  } else {
+    setStatus(`图集尺寸：${clamped.width}×${clamped.height}（最大 AABB ${min.width}×${min.height}）`);
+  }
+  return clamped;
+}
+
+/** 保存当前生效尺寸为命名预设。 */
+export function saveAtlasSizePreset(name) {
+  const size = atlasFrameSize.value;
+  const min = atlasMinSize.value;
+  if (!size || !min) {
+    setError('请先勾选要图集裁剪的素材');
+    return null;
+  }
+  const preset = makeAtlasSizePreset({ name, width: size.width, height: size.height }, min);
+  state.atlasSizePresets = [preset, ...state.atlasSizePresets.filter((item) => item.name !== preset.name)].slice(0, 50);
+  persistAtlasSizePresets();
+  setStatus(`已保存图集尺寸：${preset.name}（${preset.width}×${preset.height}）`);
+  return preset;
+}
+
+/** 直接添加一个命名尺寸（会夹到最大 AABB 以上）。 */
+export function addAtlasSizePreset({ name, width, height } = {}) {
+  const min = atlasMinSize.value;
+  if (!min) {
+    setError('请先勾选要图集裁剪的素材');
+    return null;
+  }
+  const preset = makeAtlasSizePreset({ name, width, height }, min);
+  state.atlasSizePresets = [preset, ...state.atlasSizePresets.filter((item) => item.name !== preset.name)].slice(0, 50);
+  persistAtlasSizePresets();
+  if (preset.clamped.width || preset.clamped.height) {
+    setError(`尺寸小于最大 AABB，已调整为 ${preset.width}×${preset.height}`);
+  } else {
+    setStatus(`已添加尺寸：${preset.name}（${preset.width}×${preset.height}）`);
+  }
+  return preset;
+}
+
+export function applyAtlasSizePreset(id) {
+  const preset = state.atlasSizePresets.find((item) => item.id === id);
+  if (!preset) return null;
+  const clamped = setAtlasFrameSize({ width: preset.width, height: preset.height });
+  if (clamped) setStatus(`已应用图集尺寸：${preset.name}（${clamped.width}×${clamped.height}）`);
+  return clamped;
+}
+
+export function deleteAtlasSizePreset(id) {
+  const index = state.atlasSizePresets.findIndex((item) => item.id === id);
+  if (index < 0) return;
+  state.atlasSizePresets.splice(index, 1);
+  persistAtlasSizePresets();
+  setStatus('已删除图集尺寸预设');
+}
+
 export async function trimAtlasBatch({ saveToLibrary = true } = {}) {
   const atlas = trimAtlas.value;
   if (!atlas) {
@@ -866,7 +997,7 @@ export async function trimAtlasBatch({ saveToLibrary = true } = {}) {
   let failed = 0;
   try {
     const { saveBlobToLibrary } = await import('./useLibrary.js');
-    const outSize = atlas.outSize;
+    const outSize = atlasFrameSize.value ?? atlas.outSize;
     for (const item of atlas.items) {
       try {
         const blob = await cropAtlasFrame(item, atlas.norm, outSize);
@@ -1153,6 +1284,9 @@ export function useWorkspace() {
     selected,
     checkedItems,
     trimAtlas,
+    atlasMinSize,
+    atlasFrameSize,
+    atlasQuickSizes,
     spriteMerge,
     stats,
     historyInfo,
@@ -1188,6 +1322,12 @@ export function useWorkspace() {
       saveTrimmedInPlace,
       saveEditedItem,
       trimAtlasBatch,
+      setAtlasFrameMode,
+      setAtlasFrameSize,
+      saveAtlasSizePreset,
+      addAtlasSizePreset,
+      applyAtlasSizePreset,
+      deleteAtlasSizePreset,
       previewAtlasCrop,
       buildSpriteSheet,
       exportSpriteSheet,

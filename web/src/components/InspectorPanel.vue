@@ -5,9 +5,10 @@ import RangeField from './ui/RangeField.vue';
 import SwitchField from './ui/SwitchField.vue';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import { useWorkspace, ATLAS_NOISE_ALPHA } from '../composables/useWorkspace.js';
+import AtlasFrameEditor from './AtlasFrameEditor.vue';
 import { formatBytes, formatRatio } from '../lib/imaging.js';
 
-const { state, selected, checkedItems, trimAtlas, actions, meta } = useWorkspace();
+const { state, selected, checkedItems, trimAtlas, atlasFrameSize, atlasMinSize, actions, meta } = useWorkspace();
 
 const atlasSaveToLibrary = ref(true);
 
@@ -397,13 +398,18 @@ onBeforeUnmount(() => {
               <dt>相对取景</dt>
               <dd class="mono accent">{{ atlasSummary }}</dd>
             </div>
-            <div v-if="trimAtlas.outSize" class="kv-row">
+            <div v-if="atlasFrameSize" class="kv-row">
               <dt>统一输出</dt>
-              <dd class="mono">{{ trimAtlas.outSize.width }} × {{ trimAtlas.outSize.height }}</dd>
+              <dd class="mono">
+                {{ atlasFrameSize.width }} × {{ atlasFrameSize.height }}
+                <span class="muted">（最大 AABB {{ atlasMinSize?.width }}×{{ atlasMinSize?.height }}）</span>
+              </dd>
             </div>
           </dl>
         </template>
         <p v-else class="muted empty">还没有勾选可裁剪的素材（勾选 {{ checkedItems.length }} 张）。</p>
+
+        <AtlasFrameEditor />
 
         <label class="check-row">
           <input v-model="atlasSaveToLibrary" type="checkbox" />

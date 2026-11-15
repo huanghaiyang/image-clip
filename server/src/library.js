@@ -71,6 +71,66 @@ export function createLibrary(options = {}) {
   const scanCache = { light: null, full: null };
   const SCAN_TTL_MS = 1500;
   let scanVersion = 0;
+  /**
+   * 正在被浏览器播放/预览的文件响应。
+   * Windows 上只要还有打开的读句柄，重命名就会 EPERM/EBUSY；所以改名 / 移动 / 删除前
+   * 先主动结束这些响应（播放器会用新路径重新请求）。
+   */
+  const openFileResponses = new Map();
+
+  function trackOpenFile(absPath, res) {
+    const key = path.resolve(absPath);
+    if (!openFileResponses.has(key)) openFileResponses.set(key, new Set());
+    const set = openFileResponses.get(key);
+    set.add(res);
+    const cleanup = () => {
+      set.delete(res);
+      if (!set.size) openFileResponses.delete(key);
+    };
+    res.once('close', cleanup);
+    res.once('finish', cleanup);
+  }
+
+  /** 释放目标路径（也支持文件夹前缀）上正在进行的文件响应。 */
+  function releaseOpenFiles(paths) {
+    const list = Array.isArray(paths) ? paths : paths ? [paths] : [];
+    const targets = list
+      .filter(Boolean)
+      .map((item) => (path.isAbsolute(item) ? path.resolve(item) : path.resolve(root, item)));
+    if (!targets.length) return 0;
+    let released = 0;
+    for (const [file, set] of [...openFileResponses]) {
+      if (!targets.some((target) => file === target || file.startsWith(`${target}${path.sep}`))) continue;
+      for (const res of [...set]) {
+        released += 1;
+        try {
+          res.destroy();
+        } catch {
+          /* 响应可能已经结束 */
+        }
+      }
+      openFileResponses.delete(file);
+    }
+    return released;
+  }
+
+  const RETRY_RENAME_CODES = new Set(['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY']);
+  /** Windows 上文件/目录可能被杀毒、索引器或 ffmpeg 短暂占用：重试几次再放弃。 */
+  async function renameWithRetry(from, to, attempts = 6, delayMs = 120) {
+    let lastError = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        await fs.rename(from, to);
+        return;
+      } catch (err) {
+        lastError = err;
+        if (!RETRY_RENAME_CODES.has(err.code)) throw err;
+        await new Promise((resolve) => setTimeout(resolve, delayMs * (attempt + 1)));
+      }
+    }
+    throw lastError;
+  }
+
   /** 扫描时 fs.stat 的并发度：Windows 上单线程串行 stat 是主瓶颈。 */
   const STAT_CONCURRENCY = 16;
   let initPromise = null;
@@ -666,6 +726,8 @@ export function createLibrary(options = {}) {
     }
 
     const valid = prepared.filter((p) => p.ok !== false && p.changed);
+    // 视频正在播放时会占用文件；先结束播放响应，再开始改名
+    if (valid.length) releaseOpenFiles(valid.map((item) => item.abs));
     const sourceSet = new Set(valid.map((p) => path.resolve(p.abs)));
 
     // 同一目录内重名 → 自动加序号
@@ -707,7 +769,7 @@ export function createLibrary(options = {}) {
         item.tempName = `.rename-${token}-${tempIndex++}`;
         item.tempPath = path.join(item.parent, item.tempName);
         try {
-          await fs.rename(item.abs, item.tempPath);
+          await renameWithRetry(item.abs, item.tempPath);
         } catch (err) {
           item.ok = false;
           item.error = `无法重命名：${err.message}`;
@@ -729,7 +791,7 @@ export function createLibrary(options = {}) {
             const unique = await uniqueTarget(item.parent, item.finalName);
             target = unique.abs;
           }
-          await fs.rename(item.tempPath, target);
+          await renameWithRetry(item.tempPath, target);
           item.result = { from: item.fromRel, to: toRel(target), ok: true, name: path.basename(target) };
           results.push(item.result);
         } catch (err) {
@@ -741,7 +803,7 @@ export function createLibrary(options = {}) {
               const unique = await uniqueTarget(item.parent, path.basename(item.abs));
               restore = unique.abs;
             }
-            await fs.rename(item.tempPath, restore);
+            await renameWithRetry(item.tempPath, restore);
             item.result = { from: item.fromRel, ok: false, error: err.message, temporary: toRel(restore), name: path.basename(restore) };
           } catch {
             /* 回滚失败时把临时路径返回给前端，方便用户手动处理 */
@@ -807,6 +869,7 @@ export function createLibrary(options = {}) {
 
   /** 移动文件/文件夹到目标目录；跨盘时自动退回“复制 + 删除”。 */
   async function movePaths(paths, targetDirRel) {
+    releaseOpenFiles(paths);
     invalidateScan();
     if (!Array.isArray(paths) || !paths.length) throw new LibraryError('没有需要移动的项目', 'BAD_INPUT', 400);
     const { abs: targetDir, rel: targetRel } = resolve(targetDirRel || '');
@@ -852,6 +915,7 @@ export function createLibrary(options = {}) {
    * 文件夹递归复制；重名自动加序号，复制到自身子目录会被拒绝。
    */
   async function copyPaths(paths, targetDirRel) {
+    releaseOpenFiles(paths);
     invalidateScan();
     if (!Array.isArray(paths) || !paths.length) throw new LibraryError('没有需要复制的项目', 'BAD_INPUT', 400);
     const { abs: targetDir } = resolve(targetDirRel || '');
@@ -906,6 +970,7 @@ export function createLibrary(options = {}) {
    * `meta.json` 记录原始路径与删除时间，恢复时按原路径搬回去。
    */
   async function trashPaths(paths) {
+    releaseOpenFiles(paths);
     invalidateScan();
     if (!Array.isArray(paths) || !paths.length) throw new LibraryError('没有需要删除的项目', 'BAD_INPUT', 400);
     if (paths.length > 2000) throw new LibraryError('单次最多删除 2000 项', 'TOO_MANY', 413);
@@ -1897,6 +1962,9 @@ export function createLibrary(options = {}) {
     phashForgetTree,
     ensurePhashIndex,
     findSimilar,
+    trackOpenFile,
+    releaseOpenFiles,
+    renameWithRetry,
     invalidate() {
       meta = null;
       versionsIndex = null;
@@ -2082,6 +2150,8 @@ export function createLibraryRouter(library) {
       const stat = await fs.stat(abs).catch(() => null);
       if (!stat?.isFile()) throw new LibraryError('文件不存在', 'NOT_FOUND', 404);
       res.set('Cache-Control', 'private, max-age=0, must-revalidate');
+      // 登记这个文件响应：改名/移动/删除前会主动结束它，避免 Windows 文件句柄锁
+      library.trackOpenFile(abs, res);
       res.sendFile(abs, (err) => {
         if (err && !res.headersSent) res.status(err.statusCode || 404).end();
       });
