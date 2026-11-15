@@ -347,6 +347,10 @@ watch(
 watch(
   () => entry.value?.previewVersion,
   async () => {
+    // 预览尺寸可能变化（调参 / AI 抠图后重新生成预览）：同步给视口，
+    // 否则「适合」按旧尺寸计算，看起来点了没反应。
+    const preview = entry.value?.preview;
+    if (preview?.width && preview?.height) setImage(preview.width, preview.height, { reset: false });
     await nextTick();
     drawBase();
     scheduleOverlay();

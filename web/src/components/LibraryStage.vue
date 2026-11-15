@@ -45,7 +45,7 @@ const {
 } = useLibrary();
 const { actions: videoActions, state: videoState } = useVideo();
 const { actions: audioActions, state: audioState } = useAudio();
-const { selected: workspaceSelected } = useWorkspace();
+const { state: workspaceState, selected: workspaceSelected, actions: workspaceActions } = useWorkspace();
 const { actions: renameActions } = useRenamePrompt();
 const { confirm } = useConfirm();
 const { state: slideshowPrefs } = useSlideshowPrefs();
@@ -234,7 +234,20 @@ function openSimilarSearch() {
 async function sendSelectionToEditor() {
   const images = selectedImages.value;
   if (!images.length) return;
+  const proceed = await actions.confirmTransferToEditor(images.length);
+  if (!proceed) return;
   await actions.openInEditor(images);
+}
+
+/** 资源库 stage 的 Ctrl/Cmd+A：全选当前目录可见项。 */
+function onStageKeydown(event) {
+  if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'a') return;
+  const target = event.target;
+  const tag = target?.tagName?.toLowerCase?.() ?? '';
+  if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) return;
+  if (document.querySelector('.confirm-dialog, .fp-dialog, .ss-dialog, .tc-panel, .preview')) return;
+  event.preventDefault();
+  actions.selectAllVisible();
 }
 
 const selectedImages = computed(() => {
@@ -500,6 +513,7 @@ watch(
 );
 
 onMounted(() => {
+  window.addEventListener('keydown', onStageKeydown);
   void refreshPhashStatus();
   schedulePhashPoll(5000);
   window.addEventListener('keydown', onPreviewKey);
@@ -518,6 +532,7 @@ watch(listSentinel, (el, prev) => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onStageKeydown);
   if (phashTimer) window.clearTimeout(phashTimer);
   phashTimer = 0;
   window.removeEventListener('keydown', onPreviewKey);

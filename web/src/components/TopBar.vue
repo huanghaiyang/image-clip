@@ -16,6 +16,7 @@ import RangeField from './ui/RangeField.vue';
 import { useWorkspace } from '../composables/useWorkspace.js';
 import { useWatermark } from '../composables/useWatermark.js';
 import { useLlmChat } from '../composables/useLlmChat.js';
+import { useJobs } from '../composables/useJobs.js';
 import { useAppMode, MODES } from '../composables/useAppMode.js';
 import { useLibrary } from '../composables/useLibrary.js';
 import { useVideo } from '../composables/useVideo.js';
@@ -124,6 +125,12 @@ function applyBackdropHex() {
   backdropHex.value = viewState.backdropColor.toUpperCase();
 }
 const { state: sessionState, actions: sessionActions } = useWorkSession();
+const { state: jobsState, actions: jobsActions } = useJobs();
+const runningTasks = computed(
+  () =>
+    jobsState.jobs.filter((job) => job.status === 'running').length +
+    jobsState.localTasks.filter((task) => task.status === 'running').length,
+);
 const { canUndo, canRedo, actions: undoActions } = useUndo();
 
 const mode = computed(() => appMode.mode);
@@ -252,6 +259,16 @@ const sessionHint = computed(() => {
             <path d="M9.8 3.4 13.4 6.6l-3.6 3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
             <path d="M13.1 6.6H7a3.7 3.7 0 0 0 0 7.4h2.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
           </svg>
+        </button>
+        <button
+          class="btn is-ghost task-btn"
+          type="button"
+          :title="runningTasks ? `${runningTasks} 个任务进行中` : '任务中心：查看进行中与历史任务'"
+          @click="jobsActions.toggleCenter()"
+        >
+          <span class="task-glyph" aria-hidden="true">◷</span>
+          任务
+          <span v-if="runningTasks" class="task-count">{{ runningTasks }}</span>
         </button>
         <button class="btn is-ghost session-btn" type="button" :title="sessionHint" @click="sessionActions.openDialog()">
           <span
@@ -493,6 +510,28 @@ const sessionHint = computed(() => {
   </header>
 </template>
 
+.task-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.task-glyph {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.task-count {
+  min-width: 14px;
+  height: 14px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+}
 <style scoped>
 .topbar {
   position: relative;

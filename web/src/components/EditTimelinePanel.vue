@@ -9,6 +9,7 @@ import { computed } from 'vue';
 
 import { useEditTimeline } from '../composables/useEditTimeline.js';
 import { useUndo } from '../composables/useUndo.js';
+import EditCompareDialog from './EditCompareDialog.vue';
 
 const { state, selectedStep, selectedIndex, comparePair, actions } = useEditTimeline();
 const { canUndo, canRedo, actions: undoActions } = useUndo();
@@ -48,6 +49,7 @@ function restore(entry) {
           <button class="btn is-mini is-ghost" type="button" :disabled="!canUndo" :title="'撤销上一步编辑'" @click="undoActions.undo()">撤销</button>
           <button class="btn is-mini is-ghost" type="button" :disabled="!canRedo" :title="'重做下一步编辑'" @click="undoActions.redo()">重做</button>
           <button class="btn is-mini" type="button" :class="{ 'is-on': state.compare }" @click="actions.toggleCompare()">对比</button>
+          <button class="btn is-mini is-ghost" type="button" title="大面板 + 滑块对比" @click="actions.openCompare()">滑块对比</button>
           <button class="et-close" type="button" title="关闭" @click="actions.toggle()">×</button>
         </div>
       </header>
@@ -99,6 +101,9 @@ function restore(entry) {
         <span class="muted">最多保留 40 步</span>
       </footer>
     </aside>
+
+    <!-- 大面板滑块对比 -->
+    <EditCompareDialog />
   </div>
 </template>
 

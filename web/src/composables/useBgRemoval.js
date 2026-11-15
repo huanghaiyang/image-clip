@@ -30,6 +30,7 @@ import { cutoutConcurrency, fetchCutoutStatus, segmentImage } from '../lib/cutou
 import { useWorkspace } from './useWorkspace.js';
 import { saveBlobToLibrary } from './useLibrary.js';
 import { markSessionDirty } from '../lib/sessionSignals.js';
+import { finishLocalTask, startLocalTask, updateLocalTask } from './useJobs.js';
 
 const PREVIEW_MAX_SIDE = 1600;
 const DEFAULT_OPTIONS = {
@@ -1304,6 +1305,8 @@ export async function batchBackgroundRemoval({ saveToLibrary = false } = {}) {
   state.batch.saveToLibrary = saveToLibrary;
   state.busy = true;
   setStatus(`正在批量抠图（${useAi ? 'AI' : '颜色参数'}）：${all.length} 张…`);
+  const batchTaskId = `bg-batch-${Date.now().toString(36)}`;
+  startLocalTask({ id: batchTaskId, title: `批量抠图 ${all.length} 张`, detail: '准备中…' });
 
   const results = [];
   let failed = 0;
@@ -1374,6 +1377,10 @@ export async function batchBackgroundRemoval({ saveToLibrary = false } = {}) {
       return null;
     } finally {
       state.batch.done += 1;
+      updateLocalTask(batchTaskId, {
+        progress: all.length ? state.batch.done / all.length : 0,
+        detail: `${state.batch.done}/${all.length}`,
+      });
     }
   }
 
@@ -1396,9 +1403,14 @@ export async function batchBackgroundRemoval({ saveToLibrary = false } = {}) {
       `批量抠图完成：${results.length}/${all.length} 张 · ${Math.round(performance.now() - started)}ms` +
         `${saveToLibrary ? ' · 已保存到资源库/抠图结果' : ''}${failed ? ` · 失败 ${failed}` : ''}`,
     );
+    finishLocalTask(batchTaskId, {
+      status: 'done',
+      detail: `${results.length}/${all.length} 张${saveToLibrary ? ' · 已保存' : ''}${failed ? ` · 失败 ${failed}` : ''}`,
+    });
     return { results, failed, total: all.length };
   } catch (err) {
     setError(`批量抠图失败：${err.message}`);
+    finishLocalTask(batchTaskId, { status: 'failed', detail: err.message });
     return null;
   } finally {
     state.batch.running = false;

@@ -280,6 +280,8 @@ function mtimeText(value) {
 async function sendBatchToEditor() {
   const images = selectedImages.value;
   if (!images.length) return;
+  const proceed = await actions.confirmTransferToEditor(images.length);
+  if (!proceed) return;
   await actions.openInEditor(images);
 }
 

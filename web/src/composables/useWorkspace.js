@@ -478,6 +478,19 @@ export function removeByLibraryPaths(paths) {
   return ids.size;
 }
 
+/** 清理勾选的素材（只从工作区移除，不动资源库文件）。 */
+export function removeCheckedItems() {
+  const ids = [...state.checkedIds];
+  if (!ids.length) return 0;
+  recordHistory();
+  const doomed = new Set(ids);
+  state.items.splice(0, state.items.length, ...state.items.filter((item) => !doomed.has(item.id)));
+  state.checkedIds = [];
+  if (doomed.has(state.selectedId)) state.selectedId = state.items[0]?.id ?? null;
+  setStatus(`已清理 ${ids.length} 个素材`);
+  return ids.length;
+}
+
 export function clearItems() {
   if (!state.items.length) return;
   recordHistory();
@@ -1153,6 +1166,7 @@ export function useWorkspace() {
       loadSamples,
       removeItem,
       removeByLibraryPaths,
+      removeCheckedItems,
       setItemLibraryPath,
       clearItems,
       selectItem,

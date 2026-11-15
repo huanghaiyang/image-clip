@@ -495,6 +495,15 @@ watch(
             >
               {{ importing ? '导入中…' : `全部入库（${pendingImportItems.length}）` }}
             </button>
+            <button
+              class="btn is-mini is-ghost"
+              type="button"
+              :disabled="!checkedItems.length"
+              :title="`从「当前素材」里移除勾选的 ${checkedItems.length} 张（不会删除资源库文件）`"
+              @click="actions.removeCheckedItems()"
+            >
+              清理选中（{{ checkedItems.length }}）
+            </button>
           </div>
         </div>
         <p v-if="importNote" class="workspace-note">{{ importNote }}</p>

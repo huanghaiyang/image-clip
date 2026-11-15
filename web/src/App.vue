@@ -40,6 +40,7 @@ import RenameDialog from './components/RenameDialog.vue';
 import ConfirmDialog from './components/ConfirmDialog.vue';
 import Toasts from './components/Toasts.vue';
 import FolderPickerDialog from './components/FolderPickerDialog.vue';
+import TaskCenter from './components/TaskCenter.vue';
 import EditTimelinePanel from './components/EditTimelinePanel.vue';
 import { startTimeline, stopTimeline } from './composables/useEditTimeline.js';
 import { startJobPolling, stopJobPolling } from './composables/useJobs.js';
@@ -395,6 +396,8 @@ watch(
     <Toasts />
     <!-- 资源库目录选择（关键帧保存位置 / 导出目录） -->
     <FolderPickerDialog />
+    <!-- 应用级任务中心（进行中 + 历史） -->
+    <TaskCenter />
     <SessionDialog v-if="sessionState.open" @close="sessionActions.closeDialog()" />
   </div>
 </template>

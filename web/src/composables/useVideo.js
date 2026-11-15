@@ -23,7 +23,7 @@ import {
   probeLibraryVideo,
   removeVideoWatermark,
 } from '../lib/library.js';
-import { refreshLibrary, setDir as setLibraryDir } from './useLibrary.js';
+import { applyLibraryAdditions, refreshLibrary, setDir as setLibraryDir } from './useLibrary.js';
 import { pushToast, updateToast } from './useToasts.js';
 import { onLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
 
@@ -513,7 +513,7 @@ export async function extractFrames() {
     }
     // 兼容同步返回（旧服务端）：直接当成一次完成
     state.lastExtract = { type: 'frames', ...result, at: Date.now() };
-    await refreshLibrary({ quiet: true });
+    applyLibraryAdditions(result.entries ?? []);
     setLibraryDir(result.folder);
     setStatus(`已截取 ${result.extracted}/${result.requested} 帧 → 资源库/${result.folder}`);
     return result;
@@ -533,9 +533,8 @@ function onJobEvent(event) {
   if (job.status === 'done' && job.result) {
     state.lastExtract = { type: 'frames', ...job.result, at: Date.now() };
     state.framesJobId = null;
-    void refreshLibrary({ quiet: true }).then(() => {
-      setLibraryDir(job.result.folder);
-    });
+    applyLibraryAdditions(job.result.entries ?? []);
+    setLibraryDir(job.result.folder);
     setStatus(`后台截帧完成：${job.result.extracted}/${job.result.requested} 帧 → 资源库/${job.result.folder}`);
   } else if (job.status === 'failed') {
     state.framesJobId = null;
@@ -574,7 +573,7 @@ export async function extractAudio() {
       dir: state.audio.dir || '音频',
     });
     state.lastExtract = { type: 'audio', ...result, at: Date.now() };
-    await refreshLibrary({ quiet: true });
+    if (result.entry) applyLibraryAdditions([result.entry]);
     setLibraryDir(state.audio.dir || '音频');
     setStatus(`已提取音频 → 资源库/${result.entry?.path ?? ''}`);
     updateToast(toastId, { kind: 'success', progress: 1, title: '音频提取完成', message: `资源库/${result.entry?.path ?? ''}` });
@@ -727,7 +726,7 @@ export async function removeWatermark() {
     wm.status = 'ready';
     wm.result = result;
     state.lastExtract = { type: 'watermark', ...result, at: Date.now() };
-    await refreshLibrary({ quiet: true });
+    if (result.entry) applyLibraryAdditions([result.entry]);
     setLibraryDir(result.entry?.dir || state.edit.output.dir || '视频处理');
     setStatus(
       `已输出去水印视频（${result.engine}）→ 资源库/${result.entry?.path ?? ''}`,
@@ -777,7 +776,7 @@ export async function cutVideo() {
       name: state.edit.output.cutName || undefined,
     });
     state.lastExtract = { type: 'cut', ...result, at: Date.now() };
-    await refreshLibrary({ quiet: true });
+    if (result.entry) applyLibraryAdditions([result.entry]);
     setLibraryDir(result.entry?.dir || state.edit.output.dir || '视频处理');
     setStatus(`已导出裁剪视频 → 资源库/${result.entry?.path ?? ''}`);
     updateToast(cutToast, { kind: 'success', progress: 1, title: '视频导出完成', message: `资源库/${result.entry?.path ?? ''}` });

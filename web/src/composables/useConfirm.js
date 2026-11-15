@@ -16,6 +16,9 @@ const state = reactive({
   confirmText: '确定',
   cancelText: '取消',
   danger: false,
+  // 多选项模式：choices = [{ text, value, kind: 'primary'|'danger'|'ghost' }]
+  choices: null,
+  autoFocusValue: '',
 });
 
 let resolver = null;
@@ -37,6 +40,12 @@ function cancel() {
   settle(false);
 }
 
+/** 多选项模式：点某一项直接带着 value 结束（返回字符串）。 */
+export function choose(value) {
+  if (!state.open) return;
+  settle(value);
+}
+
 /**
  * @param {{title?:string,message?:string,detail?:string,confirmText?:string,cancelText?:string,danger?:boolean}} [options]
  * @returns {Promise<boolean>} 用户确认返回 true，取消或关闭返回 false
@@ -56,10 +65,12 @@ export function confirm(options = {}) {
     state.cancelText = options.cancelText || '取消';
     state.danger = Boolean(options.danger);
     state.open = true;
+    state.choices = Array.isArray(options?.choices) ? options.choices : null;
+    state.autoFocusValue = options?.autoFocusValue ? String(options.autoFocusValue) : '';
     resolver = resolve;
   });
 }
 
 export function useConfirm() {
-  return { state: readonly(state), actions: { accept, cancel }, confirm };
+  return { state: readonly(state), choose, actions: { accept, cancel, choose }, confirm };
 }

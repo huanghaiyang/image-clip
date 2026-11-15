@@ -70,8 +70,10 @@ export function createApp() {
   const library = createLibrary();
   library.init().catch((err) => console.warn('[image-clip] 资源库初始化失败:', err.message));
 
-  // 后台任务（视频截帧等）：HTTP 请求只负责创建任务，长活在这里异步跑
-  const jobs = createJobManager();
+  // 后台任务（视频截帧等）：HTTP 请求只负责创建任务，长活在这里异步跑；
+  // 已完成任务会持久化到 data/cache/jobs-history.json，重启后仍能在任务面板看到历史
+  const jobs = createJobManager({ cacheFile: path.join(library.cacheRoot, 'jobs-history.json') });
+  jobs.init().catch((err) => console.warn('[image-clip] 任务历史读取失败:', err.message));
 
   // 所有写接口都用“原始二进制”接收，JSON 负载由 extractInput 内部分支处理。
   const rawBody = express.raw({ type: () => true, limit: LIMITS.maxUploadBytes });

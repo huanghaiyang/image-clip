@@ -44,18 +44,21 @@ const TOOL_LABELS = {
 };
 
 const MAX_STEPS = 40;
-const THUMB_SIDE = 220;
+const THUMB_SIDE = 480;
 
 const state = reactive({
   open: false,
   entries: [],
   selectedId: null,
   compare: false,
+  compareOpen: false,
+  itemId: null,
 });
 
 let seq = 0;
 let timer = 0;
 let lastSignature = '';
+let lastDepths = '';
 let restoring = false;
 
 /** 各工具历史深度的读取 + 回退函数（顺序：先工具，最后素材列表）。 */
@@ -136,22 +139,56 @@ function thumbForTool(tool) {
 
 function snapshot(force = false) {
   if (appMode.mode !== 'image') return null;
+  const item = workspace.selected.value;
+  if (!item) return null;
+  // 换素材 = 换一条时间轴：切到别的图片不是"编辑步骤"
+  if (state.itemId !== item.id) {
+    state.itemId = item.id;
+    state.entries.splice(0, state.entries.length);
+    state.selectedId = null;
+    lastSignature = '';
+    lastDepths = '';
+  }
   const tool = appMode.imageTool;
   const depths = readDepths();
-  const signature = `${tool}|${JSON.stringify(depths)}`;
-  if (!force && signature === lastSignature) return null;
+  const depthsJson = JSON.stringify(depths);
+  const signature = `${tool}|${depthsJson}`;
+  const thumb = thumbForTool(tool);
+  if (!thumb) return null;
+  // 只有「真的改了东西」才算一步：切换工具 / 切换工作区不会改变任何历史栈深度。
+  // 再叠加像素比对兜底（某些操作会 push 历史但画面没变）。
+  const depthsChanged = depthsJson !== lastDepths;
+  const last = state.entries[state.entries.length - 1] ?? null;
+  if (!force && !depthsChanged && last) {
+    lastSignature = signature;
+    return null;
+  }
+  if (!force && last && last.thumb === thumb) {
+    lastSignature = signature;
+    lastDepths = depthsJson;
+    return null;
+  }
+  // 和更早某一步完全一样（撤销回退）：只把选中标记挪过去，不追加重复步骤
+  const existing = state.entries.find((entry) => entry.thumb === thumb);
+  if (existing) {
+    state.selectedId = existing.id;
+    lastSignature = signature;
+    return existing;
+  }
+  if (!force && signature === lastSignature && last) return null;
   lastSignature = signature;
   const entry = {
     id: `step-${++seq}`,
     at: Date.now(),
     tool,
     label: TOOL_LABELS[tool] ?? tool,
-    thumb: thumbForTool(tool),
+    thumb,
     depths,
   };
   state.entries.push(entry);
   if (state.entries.length > MAX_STEPS) state.entries.shift();
   state.selectedId = entry.id;
+  lastDepths = depthsJson;
   return entry;
 }
 
@@ -185,7 +222,9 @@ export function restoreStep(stepId) {
     }
     state.selectedId = step.id;
     // 回退后不新增一步：只把签名同步到当前真实深度，下一步操作才会记录新步骤
-    lastSignature = `${appMode.imageTool}|${JSON.stringify(readDepths())}`;
+    const currentDepths = readDepths();
+    lastDepths = JSON.stringify(currentDepths);
+    lastSignature = `${appMode.imageTool}|${lastDepths}`;
     return true;
   } finally {
     restoring = false;
@@ -198,6 +237,14 @@ export function selectStep(stepId) {
 
 export function toggleCompare() {
   state.compare = !state.compare;
+}
+
+export function openCompare() {
+  state.compareOpen = true;
+}
+
+export function closeCompare() {
+  state.compareOpen = false;
 }
 
 export function toggleTimeline() {
@@ -245,6 +292,8 @@ export function useEditTimeline() {
       restore: restoreStep,
       select: selectStep,
       toggleCompare,
+      openCompare,
+      closeCompare,
       toggle: toggleTimeline,
       clear: clearTimeline,
     },

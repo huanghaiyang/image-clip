@@ -11,12 +11,20 @@ import { useConfirm } from '../composables/useConfirm.js';
 
 const { state, actions } = useConfirm();
 const confirmBtn = ref(null);
+const dialogEl = ref(null);
 
 watch(
   () => state.open,
   async (open) => {
     if (!open) return;
     await nextTick();
+    if (state.choices?.length) {
+      const target = state.autoFocusValue
+        ? dialogEl.value?.querySelector(`button[data-choice="${state.autoFocusValue}"]`)
+        : null;
+      (target ?? dialogEl.value?.querySelector('.confirm-foot button'))?.focus();
+      return;
+    }
     confirmBtn.value?.focus();
   },
 );
@@ -40,6 +48,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onWindowKeydown, tru
   <Teleport to="body">
     <div v-if="state.open" class="confirm-backdrop" @click.self="actions.cancel()">
       <div
+        ref="dialogEl"
         class="confirm-dialog"
         :class="{ 'is-danger': state.danger }"
         role="alertdialog"
@@ -55,18 +64,38 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onWindowKeydown, tru
           </div>
         </div>
         <div class="confirm-foot">
-          <button class="btn is-mini is-ghost" type="button" @click="actions.cancel()">
-            {{ state.cancelText }}
-          </button>
-          <button
-            ref="confirmBtn"
-            class="btn is-mini"
-            :class="{ 'is-danger': state.danger }"
-            type="button"
-            @click="actions.accept()"
-          >
-            {{ state.confirmText }}
-          </button>
+          <template v-if="state.choices?.length">
+            <button
+              v-for="choice in state.choices"
+              :key="choice.value"
+              class="btn is-mini"
+              :data-choice="choice.value"
+              :class="{
+                'is-ghost': choice.kind !== 'primary' && choice.kind !== 'danger',
+                'is-danger': choice.kind === 'danger',
+                'is-primary': choice.kind === 'primary',
+                'is-default': choice.value === state.autoFocusValue,
+              }"
+              type="button"
+              @click="actions.choose(choice.value)"
+            >
+              {{ choice.text }}
+            </button>
+          </template>
+          <template v-else>
+            <button class="btn is-mini is-ghost" type="button" @click="actions.cancel()">
+              {{ state.cancelText }}
+            </button>
+            <button
+              ref="confirmBtn"
+              class="btn is-mini"
+              :class="{ 'is-danger': state.danger }"
+              type="button"
+              @click="actions.accept()"
+            >
+              {{ state.confirmText }}
+            </button>
+          </template>
         </div>
       </div>
     </div>

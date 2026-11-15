@@ -30,6 +30,7 @@ import {
 import { useWorkspace } from './useWorkspace.js';
 import { useConfirm } from './useConfirm.js';
 import { pushToast } from './useToasts.js';
+import { finishLocalTask, startLocalTask, updateLocalTask } from './useJobs.js';
 import { setMode } from './useAppMode.js';
 import { movesFromResults, notifyLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
 import { mapLimit } from '../lib/async.js';
@@ -290,6 +291,148 @@ function applyPathMoves(results) {
   return moves;
 }
 
+// --------------------------------------------------------------- 增量更新（避免整页刷新闪烁）
+
+/** 用条目列表重算 stats（与后端 /tree 的统计口径保持一致）。 */
+function recomputeStats(list, folders = libraryIndex.value.folders ?? []) {
+  return {
+    files: list.length,
+    folders: folders.length,
+    images: list.filter((entry) => entry.kind === 'image').length,
+    videos: list.filter((entry) => entry.kind === 'video').length,
+    audios: list.filter((entry) => entry.kind === 'audio').length,
+    bytes: list.reduce((sum, entry) => sum + (Number(entry.bytes) || 0), 0),
+    truncated: Boolean(libraryIndex.value.stats?.truncated),
+  };
+}
+
+/**
+ * 增量：把新条目并入轻量索引与「已加载的目录缓存」，不重建整个列表。
+ * 上传/截帧/导出后调用，当前页面不会闪、也不会打断正在进行的操作。
+ */
+export function applyLibraryAdditions(added = []) {
+  const list = (added ?? []).filter((entry) => entry?.path);
+  if (!list.length) return 0;
+
+  // 轻量索引还没加载完时不要动它（否则统计会被算成"只有新增的几项"）；目录缓存照常增量。
+  if (libraryIndex.value.ready) {
+    const indexEntries = new Map((libraryIndex.value.entries ?? []).map((entry) => [entry.path, entry]));
+    for (const entry of list) indexEntries.set(entry.path, { ...(indexEntries.get(entry.path) ?? {}), ...entry });
+    const nextIndexEntries = [...indexEntries.values()];
+    libraryIndex.value = {
+      ...libraryIndex.value,
+      entries: nextIndexEntries,
+      stats: recomputeStats(nextIndexEntries),
+    };
+  }
+
+  // 只 patch 已经加载过的目录；未加载的目录进入时会自己拉取
+  const nextCache = new Map(dirCache.value);
+  for (const entry of list) {
+    const bucket = nextCache.get(entry.dir);
+    if (!bucket) continue;
+    const byPath = new Map((bucket.entries ?? []).map((item) => [item.path, item]));
+    byPath.set(entry.path, { ...(byPath.get(entry.path) ?? {}), ...entry });
+    nextCache.set(entry.dir, { ...bucket, entries: [...byPath.values()] });
+  }
+  dirCache.value = nextCache;
+
+  const nextMeta = new Map(metaByPath.value);
+  for (const entry of list) {
+    if (entry.width || entry.height || entry.duration || entry.bytes) nextMeta.set(entry.path, entry);
+  }
+  metaByPath.value = nextMeta;
+
+  preserveSelected();
+  return list.length;
+}
+
+/** 增量：从索引 / 目录缓存 / 元数据里移除被删除的路径（支持文件夹前缀）。 */
+export function applyLibraryRemoval(paths = []) {
+  const roots = (paths ?? []).filter(Boolean);
+  if (!roots.length) return 0;
+  const inside = (value) => Boolean(value) && roots.some((root) => value === root || value.startsWith(`${root}/`));
+
+  if (libraryIndex.value.ready) {
+    const indexEntries = (libraryIndex.value.entries ?? []).filter((entry) => !inside(entry.path));
+    const indexFolders = (libraryIndex.value.folders ?? []).filter((folder) => !inside(folder.path));
+    libraryIndex.value = {
+      ...libraryIndex.value,
+      entries: indexEntries,
+      folders: indexFolders,
+      stats: recomputeStats(indexEntries, indexFolders),
+    };
+  }
+
+  const nextCache = new Map();
+  for (const [dir, bucket] of dirCache.value) {
+    if (inside(dir)) continue;
+    nextCache.set(dir, {
+      ...bucket,
+      entries: (bucket.entries ?? []).filter((entry) => !inside(entry.path)),
+      folders: (bucket.folders ?? []).filter((folder) => !inside(folder.path)),
+    });
+  }
+  dirCache.value = nextCache;
+
+  const nextMeta = new Map();
+  for (const [path, info] of metaByPath.value) if (!inside(path)) nextMeta.set(path, info);
+  metaByPath.value = nextMeta;
+
+  state.selected = state.selected.filter((path) => !inside(path));
+  if (state.previewPath && inside(state.previewPath)) state.previewPath = null;
+  for (const root of roots) {
+    if (state.currentDir && (state.currentDir === root || state.currentDir.startsWith(`${root}/`))) {
+      state.currentDir = root.includes('/') ? root.slice(0, root.lastIndexOf('/')) : '';
+    }
+  }
+  return roots.length;
+}
+
+/** 增量：改名 / 移动后把索引、目录缓存、元数据里的路径整体映射到新路径。 */
+export function applyLibraryMoves(moves = []) {
+  const list = (moves ?? []).filter((move) => move?.from && move?.to && move.from !== move.to);
+  if (!list.length) return;
+  const remap = (value) => remapLibraryPath(value, list);
+  const indexEntries = (libraryIndex.value.entries ?? []).map((entry) => {
+    const path = remap(entry.path);
+    if (path === entry.path) return entry;
+    const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+    return { ...entry, path, dir, name: path.slice(path.lastIndexOf('/') + 1) };
+  });
+  const indexFolders = (libraryIndex.value.folders ?? []).map((folder) => {
+    const path = remap(folder.path);
+    if (path === folder.path) return folder;
+    const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+    return { ...folder, path, parent, name: path.slice(path.lastIndexOf('/') + 1) };
+  });
+  libraryIndex.value = { ...libraryIndex.value, entries: indexEntries, folders: indexFolders };
+
+  const nextCache = new Map();
+  for (const [dir, bucket] of dirCache.value) {
+    nextCache.set(remap(dir), {
+      ...bucket,
+      entries: (bucket.entries ?? []).map((entry) => {
+        const path = remap(entry.path);
+        if (path === entry.path) return entry;
+        const nextDir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+        return { ...entry, path, dir: nextDir, name: path.slice(path.lastIndexOf('/') + 1) };
+      }),
+      folders: (bucket.folders ?? []).map((folder) => {
+        const path = remap(folder.path);
+        if (path === folder.path) return folder;
+        const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+        return { ...folder, path, parent, name: path.slice(path.lastIndexOf('/') + 1) };
+      }),
+    });
+  }
+  dirCache.value = nextCache;
+
+  const nextMeta = new Map();
+  for (const [path, info] of metaByPath.value) nextMeta.set(remap(path), info);
+  metaByPath.value = nextMeta;
+}
+
 // --------------------------------------------------------------- 动作
 
 const dirRequests = new Map();
@@ -536,6 +679,8 @@ export async function uploadFiles(fileList, options = {}) {
   state.upload.skipped = [];
   state.upload.failed = [];
   const uploaded = [];
+  const uploadTaskId = `upload-${Date.now().toString(36)}`;
+  startLocalTask({ id: uploadTaskId, title: `上传 ${files.length} 个文件`, detail: '准备中…' });
 
   try {
     for (const [index, file] of files.entries()) {
@@ -564,10 +709,14 @@ export async function uploadFiles(fileList, options = {}) {
         else state.upload.failed.push({ name: file.name, message: err.message });
       }
       setStatus(`已处理 ${index + 1}/${files.length}：${file.name}`);
+      updateLocalTask(uploadTaskId, {
+        progress: files.length ? (index + 1) / files.length : 0,
+        detail: `${index + 1}/${files.length} · ${file.name}`,
+      });
     }
 
-    // refreshLibrary 内部会 force 重扫当前目录：同名覆盖上传后元数据立刻更新
-    await refreshLibrary({ quiet: true });
+    // 增量并入：不整页刷新，避免列表闪烁和打断正在进行的操作
+    applyLibraryAdditions(uploaded);
     const skipped = state.upload.skipped.length;
     const failed = state.upload.failed.length;
     if (failed) {
@@ -577,6 +726,10 @@ export async function uploadFiles(fileList, options = {}) {
     } else {
       setStatus(`已上传 ${uploaded.length} 个文件到资源库`);
     }
+    finishLocalTask(uploadTaskId, {
+      status: failed ? 'failed' : 'done',
+      detail: `成功 ${uploaded.length} 个${skipped ? ` · 跳过 ${skipped} 个重复` : ''}${failed ? ` · 失败 ${failed}` : ''}`,
+    });
     if (uploaded.length) {
       pushToast({
         kind: 'success',
@@ -600,7 +753,7 @@ export async function saveBlobToLibrary(blob, name, dir = '导出') {
   state.busy = true;
   try {
     const result = await uploadBlobToLibrary(blob, name, dir);
-    await refreshLibrary({ quiet: true });
+    if (result?.entry) applyLibraryAdditions([result.entry]);
     setStatus(`已保存到资源库：${result.entry?.path ?? `${dir}/${name}`}`);
     return result.entry ?? null;
   } catch (err) {
@@ -698,7 +851,7 @@ export async function renameOne(entry, name) {
     }
     // 文件夹改名时，选中项 / 当前目录 / 预览路径可能都在它下面
     const moves = applyPathMoves(result.results);
-    await refreshLibrary({ quiet: true });
+    applyLibraryMoves(moves);
     const finalName = moves[0]?.to?.split('/').pop() || target;
     setStatus(`已重命名为 ${finalName}`);
     return true;
@@ -786,8 +939,7 @@ export async function moveSelected(targetDir) {
   try {
     const result = await moveLibraryItems([...state.selected], targetDir ?? '');
     // 若移动的是当前目录（或它的上级），把目录与预览路径一起迁到新位置
-    applyPathMoves(result.results);
-    await refreshLibrary({ quiet: true });
+    applyLibraryMoves(applyPathMoves(result.results));
     state.selected = [];
     const failed = failedCount(result);
     if (failed) setError(`移动部分失败：${failed} 项`);
@@ -812,7 +964,17 @@ export async function copySelected(targetDir) {
   state.busy = true;
   try {
     const result = await copyLibraryItems([...state.selected], targetDir ?? '');
-    await refreshLibrary({ quiet: true });
+    // 复制返回的结果里有新路径：用源条目做模板增量并入，避免整页刷新闪烁
+    const template = new Map(entries.value.map((entry) => [entry.path, entry]));
+    const added = [];
+    for (const row of result.results ?? []) {
+      if (!row.ok || !row.from || !row.to) continue;
+      const source = template.get(row.from);
+      if (!source) continue;
+      const dir = row.to.includes('/') ? row.to.slice(0, row.to.lastIndexOf('/')) : '';
+      added.push({ ...source, path: row.to, dir, name: row.to.slice(row.to.lastIndexOf('/') + 1) });
+    }
+    applyLibraryAdditions(added);
     state.selected = [];
     const failed = failedCount(result);
     if (failed) setError(`复制部分失败：${failed} 项`);
@@ -911,9 +1073,7 @@ export async function deletePaths(paths) {
   try {
     const result = await deleteLibraryItems(list);
     await applyDeletionImpact(await inspectDeletionImpact(list), list);
-    const doomed = new Set(list);
-    state.selected = state.selected.filter((path) => !doomed.has(path));
-    await refreshLibrary({ quiet: true });
+    applyLibraryRemoval(list);
     const failed = failedCount(result);
     if (failed) {
       setError(`删除部分失败：${failed} 项`);
@@ -948,16 +1108,8 @@ export async function deleteFolder(folder) {
   try {
     const result = await deleteLibraryItems([path]);
     await applyDeletionImpact(await inspectDeletionImpact([path]), [path]);
-    const inside = (value) => Boolean(value) && (value === path || value.startsWith(`${path}/`));
-    // 先退出被删目录，再刷新，避免请求已不存在的路径
-    if (inside(state.currentDir)) {
-      state.currentDir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-    }
-    if (inside(state.previewPath)) {
-      state.previewPath = '';
-    }
-    state.selected = state.selected.filter((item) => !inside(item));
-    await refreshLibrary({ quiet: true });
+    // applyLibraryRemoval 会顺带处理当前目录 / 预览 / 选中项
+    applyLibraryRemoval([path]);
     const failed = failedCount(result);
     if (failed) setError(`删除文件夹部分失败：${failed} 项`);
     else setStatus(`已将文件夹「${name}」及其内容移入回收站`);
@@ -1046,6 +1198,31 @@ export function stepPreview(direction) {
  *  - 单张 → 默认切到「透明裁剪」（可用 options.mode 指定 cropimage/bgremove/eraser）；
  *  - 多张 → 切到「图片裁剪」，那里有批量裁剪，正好处理一组关键帧。
  */
+/**
+ * 批量转入图片编辑前的确认：工作区已有素材时询问是否先清空。
+ * 默认项是「追加到现有素材」（即不清空）；返回 false 表示用户取消。
+ */
+export async function confirmTransferToEditor(count = 0) {
+  const workspace = useWorkspace();
+  const editing = workspace.state.items.length;
+  if (!editing) return true;
+  const { confirm } = useConfirm();
+  const choice = await confirm({
+    title: '当前已有正在编辑的素材',
+    message: `图片处理工作区里已经有 ${editing} 个素材。要把选中的 ${count} 张追加进去，还是先清空再转入？`,
+    detail: '默认是追加（不清空）。清空后原来的素材会从「当前素材」移除，未保存的编辑会丢失；资源库文件不受影响。',
+    choices: [
+      { text: '追加到现有素材', value: 'append', kind: 'primary' },
+      { text: '清空后转入', value: 'clean', kind: 'danger' },
+      { text: '取消', value: 'cancel', kind: 'ghost' },
+    ],
+    autoFocusValue: 'append',
+  });
+  if (choice === 'cancel' || choice === null) return false;
+  if (choice === 'clean') workspace.actions.clearItems();
+  return true;
+}
+
 export async function openInEditor(entryOrPath, options = {}) {
   const list = Array.isArray(entryOrPath) ? entryOrPath : [entryOrPath];
   const resolved = list
@@ -1205,6 +1382,10 @@ export function useLibrary() {
       deleteSelected,
       deleteFolder,
       describeDeletionImpact,
+      confirmTransferToEditor,
+      applyLibraryAdditions,
+      applyLibraryRemoval,
+      applyLibraryMoves,
       openPreview,
       closePreview,
       stepPreview,

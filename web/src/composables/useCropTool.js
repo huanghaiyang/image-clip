@@ -22,7 +22,7 @@ import { downloadBlob } from '../lib/imaging.js';
 import { cropToBlob, stripExtension } from '../lib/imageops.js';
 import { uploadBlobToLibrary } from '../lib/library.js';
 import { useWorkspace } from './useWorkspace.js';
-import { refreshLibrary, saveBlobToLibrary } from './useLibrary.js';
+import { applyLibraryAdditions, refreshLibrary, saveBlobToLibrary } from './useLibrary.js';
 
 const PRESET_KEY = 'image-clip:crop-sizes:v1';
 
@@ -545,10 +545,12 @@ export async function batchCrop(options = {}) {
     }
 
     if (saveToLibrary && entries.length) {
+      const uploaded = [];
       for (const entry of entries) {
-        await uploadBlobToLibrary(entry.blob, entry.name, '裁剪结果');
+        const result = await uploadBlobToLibrary(entry.blob, entry.name, '裁剪结果');
+        if (result?.entry) uploaded.push(result.entry);
       }
-      await refreshLibrary({ quiet: true });
+      applyLibraryAdditions(uploaded);
     }
 
     if (download && entries.length) {
