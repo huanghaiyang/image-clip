@@ -12,6 +12,7 @@ import { computed, reactive, readonly, shallowRef } from 'vue';
 import {
   LibraryApiError,
   createLibraryFolder,
+  createLibraryFolders,
   deleteLibraryItems,
   fetchLibraryBlob,
   fetchLibraryDirectory,
@@ -907,6 +908,40 @@ export async function createFolder(name) {
   }
 }
 
+/**
+ * 在当前目录下批量创建固定名称的子文件夹（不覆盖、不自动编号）。
+ * @param {string[]} names
+ * @returns {Promise<{results:object[],created:number,total:number}|null>}
+ */
+export async function createFolders(names) {
+  const list = (Array.isArray(names) ? names : [])
+    .map((name) => String(name ?? '').trim())
+    .filter(Boolean);
+  if (!list.length) {
+    setError('请至少输入一个文件夹名称');
+    return null;
+  }
+  state.busy = true;
+  try {
+    const result = await createLibraryFolders(state.currentDir, list);
+    await refreshLibrary({ quiet: true });
+    const created = Number(result.created) || 0;
+    const skipped = (result.results ?? []).filter((row) => !row.ok);
+    if (created) {
+      setStatus(`已在「${state.currentDir || '根目录'}」创建 ${created} 个子文件夹${skipped.length ? `，跳过 ${skipped.length} 个` : ''}`);
+    } else {
+      const first = skipped[0];
+      setError(`没有创建文件夹：${first?.error ?? '名称重复或已存在'}`);
+    }
+    return { ...result, results: result.results ?? [] };
+  } catch (err) {
+    setError(`批量创建文件夹失败：${err.message}`);
+    return null;
+  } finally {
+    state.busy = false;
+  }
+}
+
 export async function renameOne(entry, name) {
   const target = String(name ?? '').trim();
   if (!target || target === entry.name) return true;
@@ -1598,6 +1633,7 @@ export function useLibrary() {
       uploadNewVersion,
       restoreVersionHistory,
       createFolder,
+      createFolders,
       renameOne,
       previewBatchRename,
       batchRename,

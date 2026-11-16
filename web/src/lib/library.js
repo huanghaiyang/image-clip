@@ -177,6 +177,15 @@ export function createLibraryFolder(dir, name) {
   });
 }
 
+/** 在同一个目录下批量创建固定名称的子文件夹。 */
+export function createLibraryFolders(dir, names) {
+  return requestJson('/api/library/mkdir-batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dir, names }),
+  });
+}
+
 export function renameLibraryItems(items) {
   return requestJson('/api/library/rename', {
     method: 'POST',

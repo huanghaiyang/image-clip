@@ -10,12 +10,14 @@ import { computed, nextTick, ref, watch } from 'vue';
 import { useLibrary } from '../composables/useLibrary.js';
 import { useRenamePrompt } from '../composables/useRenamePrompt.js';
 import { useConfirm } from '../composables/useConfirm.js';
+import BatchFolderDialog from './BatchFolderDialog.vue';
 import { openUploadPicker } from '../composables/useUploadPicker.js';
 import { formatSize } from '../lib/library.js';
 
 const { state, folderTree, currentFolders, currentEntries, stats, actions } = useLibrary();
 const { actions: renameActions } = useRenamePrompt();
 const { confirm } = useConfirm();
+const batchCreating = ref(false);
 
 const creating = ref(false);
 const folderName = ref('');
@@ -269,10 +271,17 @@ async function removeFolder(folder) {
       </div>
       <div v-else class="footer-actions">
         <button class="btn is-mini is-ghost" type="button" @click="creating = true">+ 新建文件夹</button>
-        <button class="btn is-mini" type="button" :disabled="state.busy" @click="upload">上传</button>
+        <button class="btn is-mini is-ghost" type="button" :disabled="state.busy" @click="batchCreating = true">批量建子文件夹</button>
+        <button class="btn is-mini footer-upload" type="button" :disabled="state.busy" @click="upload">上传</button>
       </div>
     </div>
   </aside>
+
+  <BatchFolderDialog
+    :open="batchCreating"
+    :parent="state.currentDir"
+    @close="batchCreating = false"
+  />
 </template>
 
 <style scoped>
@@ -488,11 +497,17 @@ async function removeFolder(folder) {
 
 .footer-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
 .footer-actions .btn {
-  flex: 1;
+  flex: 1 1 calc(50% - 3px);
+  white-space: nowrap;
+}
+
+.footer-actions .footer-upload {
+  flex-basis: 100%;
 }
 
 .upload-line {

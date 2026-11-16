@@ -698,6 +698,65 @@ export function createLibrary(options = {}) {
     return { path: rel, name: clean, parent: toRel(base), depth: rel.split('/').length - 1 };
   }
 
+  /**
+   * 批量创建固定名称的子文件夹。
+   * 不自动编号、不覆盖：同名/同批重复/非法名称会按行返回 skipped 状态，其余照常创建。
+   */
+  async function mkdirBatch(dirRel, names) {
+    invalidateScan();
+    const baseInfo = resolve(dirRel || '');
+    const baseStat = await fs.stat(baseInfo.abs).catch(() => null);
+    if (!baseStat?.isDirectory()) throw new LibraryError('目标目录不存在', 'NOT_FOUND', 404);
+    const list = (Array.isArray(names) ? names : []).map((name) => String(name ?? '').trim()).filter(Boolean);
+    if (!list.length) throw new LibraryError('没有需要创建的文件夹名', 'BAD_INPUT', 400);
+    if (list.length > 200) throw new LibraryError('单次最多创建 200 个文件夹', 'TOO_MANY', 413);
+
+    const results = [];
+    const used = new Set();
+    for (const raw of list) {
+      let clean;
+      try {
+        // 固定名称必须原样保存：拒绝需要“清洗”的名字（斜杠、通配符、保留设备名等），
+        // 否则预览里显示的名称和实际创建出来的会不一致。
+        const trimmed = String(raw ?? '').trim();
+        if (!trimmed || trimmed === '.' || trimmed === '..' || trimmed.length > 80 || /[\/:*?"<>|]/.test(trimmed)) {
+          throw new Error('名称包含不合法字符或过长');
+        }
+        clean = sanitizeName(trimmed);
+        if (clean !== trimmed) throw new Error('名称包含不合法字符');
+      } catch (err) {
+        results.push({ name: raw, ok: false, status: 'invalid', error: err.message });
+        continue;
+      }
+      const key = clean.toLowerCase();
+      if (used.has(key)) {
+        results.push({ name: clean, ok: false, status: 'duplicate', error: '本次列表内重名' });
+        continue;
+      }
+      used.add(key);
+      const abs = path.join(baseInfo.abs, clean);
+      if (await exists(abs)) {
+        results.push({ name: clean, ok: false, status: 'exists', error: '同名文件夹已存在' });
+        continue;
+      }
+      try {
+        await fs.mkdir(abs, { recursive: false });
+        const rel = toRel(abs);
+        results.push({
+          name: clean,
+          ok: true,
+          status: 'created',
+          path: rel,
+          parent: toRel(baseInfo.abs),
+          depth: rel.split('/').length - 1,
+        });
+      } catch (err) {
+        results.push({ name: clean, ok: false, status: 'error', error: err.message });
+      }
+    }
+    return results;
+  }
+
   async function entryByRel(rel) {
     await loadMeta();
     const { abs, rel: relPath } = resolve(rel, { allowRoot: false });
@@ -2110,6 +2169,7 @@ export function createLibrary(options = {}) {
     prepareUpload,
     prepareOverwrite,
     mkdir,
+    mkdirBatch,
     entryByRel,
     thumbnail,
     renameItems,
@@ -2447,6 +2507,20 @@ export function createLibraryRouter(library) {
     wrap(async (req, res) => {
       const folder = await library.mkdir(req.body?.dir ?? '', req.body?.name ?? '');
       res.status(201).json({ ok: true, folder });
+    }),
+  );
+
+  router.post(
+    '/mkdir-batch',
+    jsonBody,
+    wrap(async (req, res) => {
+      const results = await library.mkdirBatch(req.body?.dir ?? '', req.body?.names);
+      res.json({
+        ok: results.some((row) => row.ok),
+        total: results.length,
+        created: results.filter((row) => row.ok).length,
+        results,
+      });
     }),
   );
 

@@ -710,6 +710,19 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 * 接口：`POST /api/library/marks`，`{ items:[{id,path}], favorite?:boolean, mark?:string|null }`；
   删除/移入回收站时自动清理收藏与标记。
 
+**批量新建子文件夹（可视化）**
+
+侧边栏「批量建子文件夹」打开对话框：
+
+* 在**当前目录**下批量创建多个固定名称子文件夹；名称每行一个，也支持逗号 / 顿号 / 分号；
+* 右侧实时预览每个名称的状态：新建 / 已存在 / 批内重复 / 不合法，并显示父目录、数量与将创建/跳过的统计；
+* 不覆盖、不自动编号；非法字符（`\ / : * ? " < > |`、`.`/`..`、超长）会标红跳过；
+* 接口：`POST /api/library/mkdir-batch`，`{dir, names}`，返回逐项 `{name, ok, status, path?, error?}`；
+* 创建成功后刷新资源库并关闭；有失败项时留在对话框里显示结果，方便修正；
+* **模板**：内置「动画项目 / 视频拆帧 / 素材整理」三套常用目录；点模板一键填充名称列表；
+  也可把当前列表「保存当前为模板」，自定义模板存 localStorage、刷新后仍在，同名保存会覆盖，可删除；
+  模板只负责填充输入框，创建前仍会按已存在/重复/非法规则预览与跳过。
+
 ### 10.3 视频工作区
 
 * **探测**：`ffprobe` 给出时长、宽高、帧率、编码、码率、是否有音轨。
@@ -1128,6 +1141,8 @@ data/logs/
 * `server/test/file-ids.test.js`：文件 id 稳定（改名/移动）、跨重启持久化、按 id 操作与 HTTP `?id=`；
 * `server/test/file-locks.test.js`：锁定后禁止删除、文件夹含锁定文件时整夹拒绝、改名/移动保持锁定与跨重启持久化、HTTP `/lock`；
 * `server/test/file-marks.test.js`：收藏 / emoji 标记写入与清除、改名/移动保持、跨重启持久化、删除时清理、HTTP `/marks`；
+* `server/test/folder-batch.test.js`：批量建夹正常创建、跳过已存在/重名/非法名称、父目录校验、HTTP `/mkdir-batch`；
+* `web/test/folder-templates.test.js`：建夹模板的内置模板、保存/覆盖/删除、去重与坏数据回退。
 * `server/test/logger.test.js`：按天/按大小拆分、任务日志分离、保留期清理、tail；
 * `server/test/guest.test.js`：临时用户标识解析与任务/日志隔离（A 看不到 B 的任务，资源库共享）；
 * `server/test/jobs-queue.test.js`：任务并发上限、排队位置、用户配额、取消、任务日志落盘；

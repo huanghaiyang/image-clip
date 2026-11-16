@@ -798,15 +798,22 @@ onBeforeUnmount(() => {
             />
             <span v-else class="thumb-icon">{{ KIND_ICON[entry.kind] ?? '▤' }}</span>
             <span v-if="entrySize(entry)" class="badge-size mono">{{ entrySize(entry) }}</span>
-            <span v-if="entry.locked || entry.favorite || entry.mark" class="card-flags">
-              <span v-if="entry.locked" class="flag is-lock" title="已锁定：禁止删除">
+            <!-- 三个状态位始终显示：锁定 / 收藏 / emoji 标记；有状态时点亮，没有时保持暗色 -->
+            <span class="card-status">
+              <span class="status-item is-lock" :class="{ 'is-on': entry.locked }" :title="entry.locked ? '已锁定：禁止删除' : '未锁定'">
                 <svg width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <rect x="3.2" y="6.8" width="9.6" height="6.4" rx="1.4" stroke="currentColor" stroke-width="1.4" />
                   <path d="M5.4 6.8V5.1a2.6 2.6 0 0 1 5.2 0v1.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
                 </svg>
               </span>
-              <span v-if="entry.favorite" class="flag is-fav" title="已收藏">★</span>
-              <span v-if="entry.mark" class="flag is-mark" :title="`标记：${entry.mark}`">{{ entry.mark }}</span>
+              <span class="status-item is-fav" :class="{ 'is-on': entry.favorite }" :title="entry.favorite ? '已收藏' : '未收藏'">★</span>
+              <span class="status-item is-mark" :class="{ 'is-on': Boolean(entry.mark) }" :title="entry.mark ? `标记：${entry.mark}` : '无标记'">
+                <template v-if="entry.mark">{{ entry.mark }}</template>
+                <svg v-else width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M2.5 3.2h7.2l3.8 3.8-5.6 5.6-3.8-3.8V3.2Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
+                  <circle cx="5.6" cy="6" r="0.9" fill="currentColor" />
+                </svg>
+              </span>
             </span>
             <span v-if="editingPaths.has(entry.path)" class="badge-editing">编辑中</span>
             <span v-if="duplicatePaths.has(entry.path)" class="badge-dup">重复 {{ duplicateGroupOf.get(entry.path) }}</span>
@@ -1423,43 +1430,48 @@ onBeforeUnmount(() => {
 
 /* 徽标都画在缩略图之上：.thumb img 是 z-index:1（视频模糊铺底之后），
    徽标若停留在 auto 会被图片盖住，只透过 object-fit:contain 的透明留边露出一半。 */
-.card-flags {
+.card-status {
   position: absolute;
   z-index: 3;
   left: 4px;
   bottom: 4px;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
+  padding: 1px 3px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.58);
   pointer-events: none;
 }
 
-.flag {
+.status-item {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 3px;
-  border-radius: 3px;
-  background: rgba(0, 0, 0, 0.62);
-  color: #fff;
+  min-width: 13px;
+  height: 14px;
+  padding: 0 2px;
+  border-radius: 2px;
+  color: rgba(255, 255, 255, 0.38);
   font-size: 10px;
   line-height: 1;
   white-space: nowrap;
+  transition: color 0.12s ease, background 0.12s ease;
 }
 
-.flag.is-lock {
+.status-item.is-lock.is-on {
   color: #ffd166;
 }
 
-.flag.is-fav {
+.status-item.is-fav.is-on {
   color: #ffd166;
   font-size: 11px;
 }
 
-.flag.is-mark {
+.status-item.is-mark.is-on {
+  color: #fff;
   font-size: 11px;
+  background: rgba(255, 255, 255, 0.14);
 }
 
 .tree-flags {
