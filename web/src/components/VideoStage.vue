@@ -7,7 +7,7 @@
  *   因此这里用本地 `now`（监听 timeupdate）记录真实播放位置，时间轴/时间码都基于 `now`；
  *   只有在外部 seekTo（标记跳转、逐帧、拖动等）时才回读 `state.currentTime`。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 import { useLibrary } from '../composables/useLibrary.js';
 import { useVideo } from '../composables/useVideo.js';
@@ -329,6 +329,18 @@ watch(
     videoError.value = '';
     hoverVisible.value = false;
     stopGifPreview();
+    // 改名 / 移动后路径变了，但按文件 id 拼出的 src 可能没变（id 不变）。
+    // 改名时服务端会主动结束旧播放流以释放 Windows 文件句柄，所以这里必须
+    // 显式 load() 重新发起 Range 请求，否则播放器会停在已断开的流上。
+    void nextTick(() => {
+      const el = videoEl.value;
+      if (!el || !state.activePath) return;
+      try {
+        el.load();
+      } catch {
+        /* 浏览器可能在卸载中 */
+      }
+    });
   },
 );
 

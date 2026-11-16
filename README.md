@@ -740,6 +740,17 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
 * 前端改名成功后会广播路径映射，视频工作区同步 `activePath` 与显示名，时间轴标记不丢。
   实测「播放中改名」返回 200，视频工作区标题同步为新文件名。
 
+**视频改名后的播放恢复**
+
+改名时服务端会结束旧播放流以释放 Windows 文件句柄；前端在 `activePath` 变化后
+除了更新标题/路径，还会 `video.load()` 重新发起 Range 请求。否则按文件 id 拼出的
+播放地址没变，浏览器会停在已经断开的流上，表现为「接口成功、视频却播不了」。
+
+**Toast 自动消失**
+
+`useToasts` 的定时器原先调用了未定义的 `dismiss`，到点后会抛
+`ReferenceError: dismiss is not defined`。已改为 `dismissToast`，并新增「超时自动消失」回归测试。
+
 ### 10.4 背景去除（`shared/bgremove.js`）
 
 纯算法、零依赖，浏览器与 Node 都能跑同一份代码：

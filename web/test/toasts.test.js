@@ -48,3 +48,12 @@ test('clear 清空全部', () => {
   clearToasts();
   assert.equal(state.items.length, 0);
 });
+
+
+test('超时自动消失（回归：dismiss 未定义）', async () => {
+  clearToasts();
+  pushToast({ id: 'auto-dismiss', kind: 'success', title: '自动消失', timeout: 20 });
+  assert.equal(state.items.length, 1);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(state.items.length, 0);
+});

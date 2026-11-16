@@ -56,7 +56,7 @@ function scheduleDismiss(toast) {
   clearTimer(toast.id);
   const timeout = Number(toast.timeout ?? DEFAULT_TIMEOUT[toast.kind] ?? 4000);
   if (!timeout || timeout <= 0) return;
-  const timer = setTimeout(() => dismiss(toast.id), timeout);
+  const timer = setTimeout(() => dismissToast(toast.id), timeout);
   timers.set(toast.id, timer);
 }
 
