@@ -673,20 +673,23 @@ function fileInfo(entry) {
           </button>
         </div>
         <p class="hint">文件夹会连同其中的全部内容一起移动 / 复制；灰色目标表示会嵌套到文件夹自身。</p>
-        <div class="lock-row">
-          <button class="btn is-mini" type="button" :disabled="state.busy" @click="actions.lockSelected()">
-            锁定选中（禁止删除）
-          </button>
-          <button class="btn is-mini is-ghost" type="button" :disabled="state.busy" @click="actions.unlockSelected()">
-            解锁选中
-          </button>
-        </div>
-        <div class="lock-row">
-          <button class="btn is-mini" type="button" :disabled="state.busy" @click="actions.favoriteSelected()">☆ 收藏选中</button>
-          <button class="btn is-mini is-ghost" type="button" :disabled="state.busy" @click="actions.unfavoriteSelected()">取消收藏</button>
-          <EmojiMarkPicker label="标记选中" title="给选中的文件设置 emoji 标记" @pick="actions.markSelected($event)" />
-        </div>
-        <p class="hint">锁定只禁止删除；改名、移动、复制不受影响。文件夹需先展开并锁定其中的文件。</p>
+        <!-- 单文件详情里已经有「锁定 / 收藏 / 标记」行，这里只在多选时显示批量操作，避免重复 -->
+        <template v-if="state.selected.length > 1">
+          <div class="lock-row">
+            <button class="btn is-mini" type="button" :disabled="state.busy" @click="actions.lockSelected()">
+              锁定选中（禁止删除）
+            </button>
+            <button class="btn is-mini is-ghost" type="button" :disabled="state.busy" @click="actions.unlockSelected()">
+              解锁选中
+            </button>
+          </div>
+          <div class="lock-row">
+            <button class="btn is-mini" type="button" :disabled="state.busy" @click="actions.favoriteSelected()">☆ 收藏选中</button>
+            <button class="btn is-mini is-ghost" type="button" :disabled="state.busy" @click="actions.unfavoriteSelected()">取消收藏</button>
+            <EmojiMarkPicker label="标记选中" title="给选中的文件设置 emoji 标记" @pick="actions.markSelected($event)" />
+          </div>
+          <p class="hint">锁定只禁止删除；改名、移动、复制不受影响。文件夹需先展开并锁定其中的文件。</p>
+        </template>
         <button class="btn is-block is-ghost is-danger" type="button" :disabled="state.busy" @click="removeAll">
           删除选中项
         </button>

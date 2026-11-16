@@ -105,6 +105,23 @@ const state = reactive({
 });
 
 /** 已知文件 = 轻量索引 + 已加载目录，再叠加按需补全的元数据。 */
+/**
+ * 把锁定 / 收藏 / 标记的本地覆盖叠加到条目上。
+ * 所有展示列表（当前目录、搜索、树形、预览）都必须经过这里，
+ * 否则接口成功后只有刷新才会重新拉服务端状态。
+ */
+function withStatusOverrides(list) {
+  const overrides = lockOverrides.value;
+  const markPatches = markOverrides.value;
+  if (!overrides.size && !markPatches.size) return list;
+  return list.map((entry) => {
+    const locked = overrides.get(entry.id);
+    const marks = markPatches.get(entry.id);
+    if (locked === undefined && !marks) return entry;
+    return { ...entry, ...(locked === undefined ? {} : { locked }), ...(marks ?? {}) };
+  });
+}
+
 const entries = computed(() => {
   if (!libraryIndex.value.ready && dirCache.value.size === 0) return [];
   const map = new Map();
@@ -113,21 +130,13 @@ const entries = computed(() => {
     for (const entry of bucket.entries) map.set(entry.path, entry);
   }
   const list = [...map.values()];
-  const overrides = lockOverrides.value;
-  const markPatches = markOverrides.value;
   const withMeta = !metaByPath.value.size
     ? list
     : list.map((entry) => {
         const info = metaByPath.value.get(entry.path);
         return info ? { ...entry, ...info } : entry;
       });
-  if (!overrides.size && !markPatches.size) return withMeta;
-  return withMeta.map((entry) => {
-    const locked = overrides.get(entry.id);
-    const marks = markPatches.get(entry.id);
-    if (locked === undefined && !marks) return entry;
-    return { ...entry, ...(locked === undefined ? {} : { locked }), ...(marks ?? {}) };
-  });
+  return withStatusOverrides(withMeta);
 });
 
 const folders = computed(() => {
@@ -192,21 +201,12 @@ function arrangeEntries(list) {
 /** 当前目录下的文件；搜索时跨目录（依赖后台补全的轻量索引）。 */
 const currentEntries = computed(() => {
   const keyword = state.search.trim().toLowerCase();
-  if (keyword) {
-    return arrangeEntries(
-      entries.value.filter(
-        (entry) => entry.name.toLowerCase().includes(keyword) || entry.path.toLowerCase().includes(keyword),
-      ),
-    );
-  }
-  const cached = dirCache.value.get(state.currentDir);
-  if (!cached) return [];
-  // 目录列表本身不含尺寸/时长，叠加按需补全的元数据
-  const list = cached.entries.map((entry) => {
-    const info = metaByPath.value.get(entry.path);
-    return info ? { ...entry, ...info } : entry;
-  });
-  return arrangeEntries(list);
+  // 统一从 entries 取（已叠加元数据 + 锁定/收藏/标记覆盖）：
+  // 之前平铺视图直接读 dirCache，导致接口成功后状态要刷新才生效。
+  const base = keyword
+    ? entries.value.filter((entry) => entry.name.toLowerCase().includes(keyword) || entry.path.toLowerCase().includes(keyword))
+    : entries.value.filter((entry) => entry.dir === state.currentDir);
+  return arrangeEntries(base);
 });
 
 const selectedEntries = computed(() => {
@@ -1173,8 +1173,8 @@ function refOfEntry(entry) {
 function applyLockResults(results) {
   const next = new Map(lockOverrides.value);
   for (const row of results ?? []) {
-    const entry = entries.value.find((item) => item.id === row.id || item.path === row.path);
-    if (entry?.id) next.set(entry.id, Boolean(row.locked));
+    const id = row.id ?? entries.value.find((item) => item.path === row.path)?.id;
+    if (id) next.set(id, Boolean(row.locked));
   }
   lockOverrides.value = next;
 }
