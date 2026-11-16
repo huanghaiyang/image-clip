@@ -123,9 +123,47 @@ export function createLibrary(options = {}) {
     return released;
   }
 
+  /**
+   * 正在读取某个文件的后台任务（视频封面 / 探针等）。
+   * 刚上传的视频常会立刻生成封面：ffmpeg 读文件期间 Windows 不允许改名。
+   * 改名 / 移动前先等这些任务结束，比单纯重试更可靠。
+   */
+  const activeFileWork = new Map();
+
+  function trackFileWork(absPath, task) {
+    if (!absPath || !task) return task;
+    const key = path.resolve(absPath);
+    if (!activeFileWork.has(key)) activeFileWork.set(key, new Set());
+    const set = activeFileWork.get(key);
+    set.add(task);
+    const cleanup = () => {
+      set.delete(task);
+      if (!set.size) activeFileWork.delete(key);
+    };
+    task.then(cleanup, cleanup);
+    return task;
+  }
+
+  async function waitForFileWork(paths, timeoutMs = 8000) {
+    const targets = (paths ?? []).map((item) => path.resolve(item));
+    if (!targets.length) return;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const pending = [];
+      for (const [abs, set] of activeFileWork) {
+        if (targets.some((target) => abs === target || abs.startsWith(`${target}${path.sep}`))) pending.push(...set);
+      }
+      if (!pending.length) return;
+      await Promise.race([
+        Promise.allSettled(pending),
+        new Promise((resolve) => setTimeout(resolve, Math.max(80, deadline - Date.now()))),
+      ]);
+    }
+  }
+
   const RETRY_RENAME_CODES = new Set(['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY']);
   /** Windows 上文件/目录可能被杀毒、索引器或 ffmpeg 短暂占用：重试几次再放弃。 */
-  async function renameWithRetry(from, to, attempts = 6, delayMs = 120) {
+  async function renameWithRetry(from, to, attempts = 10, delayMs = 160) {
     let lastError = null;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
@@ -848,7 +886,7 @@ export function createLibrary(options = {}) {
               // 同一个视频的其他宽度请求正在抽帧，等它完成即可
               await generating;
             } else {
-              const task = (async () => {
+              const task = trackFileWork(abs, (async () => {
                 const info = await probeVideo(abs).catch(() => null);
                 // 临时文件必须以 .jpg 结尾：ffmpeg 靠扩展名推断输出格式
                 const tmp = path.join(posterDir, `${posterHash}.${process.pid}-${crypto.randomBytes(3).toString('hex')}.part.jpg`);
@@ -858,7 +896,7 @@ export function createLibrary(options = {}) {
                 } finally {
                   await fs.rm(tmp, { force: true }).catch(() => {});
                 }
-              })();
+              })());
               posterInflight.set(poster, task);
               try {
                 await task;
@@ -931,6 +969,8 @@ export function createLibrary(options = {}) {
     }
 
     const valid = prepared.filter((p) => p.ok !== false && p.changed);
+    // 刚上传的视频可能正在生成封面 / 被探针读取：先等这些后台任务结束
+    if (valid.length) await waitForFileWork(valid.map((item) => item.abs));
     // 视频正在播放时会占用文件；先结束播放响应，再开始改名
     if (valid.length) releaseOpenFiles(valid.map((item) => item.abs));
     const sourceSet = new Set(valid.map((p) => path.resolve(p.abs)));
@@ -977,7 +1017,9 @@ export function createLibrary(options = {}) {
           await renameWithRetry(item.abs, item.tempPath);
         } catch (err) {
           item.ok = false;
-          item.error = `无法重命名：${err.message}`;
+          item.error = RETRY_RENAME_CODES.has(err.code)
+            ? '文件正被占用（可能正在生成视频封面或播放），请稍后重试'
+            : `无法重命名：${err.message}`;
           item.tempPath = null;
         }
       }
