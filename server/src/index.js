@@ -50,6 +50,7 @@ import { ffmpegStatus } from './ffmpeg.js';
 import { createLibrary, createLibraryRouter } from './library.js';
 import { createJobManager } from './jobs.js';
 import { createLogger } from './logger.js';
+import { createAccessLogger, logHttpError, sanitizeClientEvent } from './httpLog.js';
 import { guestMiddleware } from './guest.js';
 import { createLimiters } from './limiter.js';
 import { createVideoRouter } from './video.js';
@@ -110,6 +111,38 @@ export function createApp() {
   // 不登录、不注册：客户端用 X-Client-Id（每个标签页一个）标识自己；
   // 所有请求都放行，req.user 只用于任务/日志隔离，不构成安全边界。
   app.use(guestMiddleware());
+
+  // ---- 访问日志 / 请求 ID ------------------------------------------------
+  // 每个 /api 请求记一条（4xx warn、5xx error），健康检查与前端错误上报避免自噪音。
+  app.use(
+    createAccessLogger({
+      logger,
+      skip: (req) => req.path === '/api/health' || req.path === '/api/logs/client',
+      quietGets: [
+        /^\/api\/jobs(?:\/|$)/,
+        /^\/api\/library\/thumb(?:\/|$)/,
+        /^\/api\/library\/file(?:\/|$)/,
+        /\/similar\/index$/,
+      ],
+    }),
+  );
+
+  // ---- 浏览器错误上报 ----------------------------------------------------
+  app.post('/api/logs/client', express.json({ limit: '64kb' }), (req, res) => {
+    const event = sanitizeClientEvent(req.body);
+    if (!event) {
+      res.status(400).json({ error: { code: 'BAD_LOG_EVENT', message: '缺少 message' } });
+      return;
+    }
+    const data = {
+      ...event,
+      requestId: req.requestId ?? null,
+      user: req.user?.id ?? null,
+      ip: req.ip ?? null,
+    };
+    logger[event.level]('client', event.message, data);
+    res.status(204).end();
+  });
 
   // ---- 重接口并发闸门 ---------------------------------------------------
   const imageGate = limiters.image.middleware();
@@ -508,12 +541,20 @@ export function createApp() {
   });
 
   // eslint-disable-next-line no-unused-vars -- express 靠 4 个参数识别错误处理中间件
-  app.use((err, _req, res, _next) => {
+  // eslint-disable-next-line no-unused-vars -- express 靠 4 个参数识别错误处理中间件
+  app.use((err, req, res, _next) => {
     const status = err.status ?? (err.type === 'entity.too.large' ? 413 : 500);
     const code = err.code ?? (status === 413 ? 'PAYLOAD_TOO_LARGE' : 'INTERNAL_ERROR');
     const message = status === 413 ? '请求体过大' : err.message || '服务器内部错误';
+    // 统一落日志：4xx warn，5xx error（5xx 带堆栈）；访问日志会带 errorCode/errorMessage
+    res.locals.errorInfo = { code, message };
+    try {
+      logHttpError(logger, err, req, { status, code, message });
+    } catch {
+      /* 日志失败不能影响响应 */
+    }
     if (status >= 500) console.error('[image-clip]', err);
-    res.status(status).json({ error: { code, message } });
+    res.status(status).json({ error: { code, message, requestId: req.requestId ?? null } });
   });
 
   return app;
@@ -672,7 +713,14 @@ if (isMain) {
     console.log(
       `[image-clip] API 已启动: http://${HOST}:${PORT}  (算法 ${ALGORITHM}) · 任务并发 ${stats.concurrency} · 每用户上限 ${stats.maxPerUser}`,
     );
-    logger.info('server', '服务启动', { port: PORT, pid: process.pid, concurrency: stats.concurrency });
+    logger.info('server', '服务启动', {
+      port: PORT,
+      host: HOST,
+      pid: process.pid,
+      concurrency: stats.concurrency,
+      logDir: logger.fileForApp ? path.dirname(logger.fileForApp()) : null,
+      node: process.version,
+    });
   });
 
   let shuttingDown = false;

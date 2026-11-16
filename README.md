@@ -1125,6 +1125,17 @@ data/logs/
 * 写入串行化，不会出现并发 append 交错；关闭前 `flush()` 保证不丢日志；
 * 任务生命周期的 enqueued / started / progress / done / failed / cancelled 都会写进任务日志；
 * 查询接口：`GET /api/jobs/:id/log?limit=300`（任务日志尾部，只能看当前临时用户自己的任务）。
+
+**接口 / 错误日志（`server/src/httpLog.js`）**
+
+* 每个 `/api` 请求写一条 `scope=http` 访问日志：`requestId / method / path / status / ms / user / ip / queryKeys`；
+  4xx 记 `warn`，5xx 记 `error`；慢请求（>2s）带 `slow:true`；
+* 响应头带 `X-Request-Id`，前端可以在控制台/报错里对应到具体请求；
+* 统一错误处理中间件对所有异常再写一条带 `stack`（5xx）或 `code/message`（4xx）的错误日志；
+* 高频轮询 / 缩略图 / 视频流这类 GET 只写 `debug`（`LOG_LEVEL=debug` 可看），避免刷屏；出错仍会记 `warn/error`；
+* `POST /api/logs/client` 接收浏览器上报；前端 `installClientErrorLogging()` 捕获
+  `window.onerror` / `unhandledrejection`，去重限流后写入 `scope=client` 的应用日志；
+* 健康检查 `/api/health` 与错误上报接口自身不写访问日志，避免自噪音。
   任务中心里点任意任务即可直接看日志尾部，运行中的任务每 1.5s 自动刷新；原始文件由运维直接在 `data/logs` 查看。
 
 ### 10.17 测试
@@ -1149,6 +1160,7 @@ data/logs/
 * `server/test/file-locks.test.js`：锁定后禁止删除、文件夹含锁定文件时整夹拒绝、改名/移动保持锁定与跨重启持久化、HTTP `/lock`；
 * `server/test/file-marks.test.js`：收藏 / emoji 标记写入与清除、改名/移动保持、跨重启持久化、删除时清理、HTTP `/marks`；
 * `server/test/folder-batch.test.js`：批量建夹正常创建、跳过已存在/重名/非法名称、父目录校验、HTTP `/mkdir-batch`；
+* `server/test/http-log.test.js`：访问日志字段、4xx/5xx 错误日志、浏览器错误清洗与截断；
 * `web/test/folder-templates.test.js`：建夹模板的内置模板、保存/覆盖/删除、去重与坏数据回退。
 * `server/test/logger.test.js`：按天/按大小拆分、任务日志分离、保留期清理、tail；
 * `server/test/guest.test.js`：临时用户标识解析与任务/日志隔离（A 看不到 B 的任务，资源库共享）；
