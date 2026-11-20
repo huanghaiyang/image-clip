@@ -27,6 +27,15 @@ async function makeLibrary() {
   return { base, root, library };
 }
 
+/**
+ * 清掉临时目录。fileIds 的落盘是 300ms 防抖定时器，直接 rm 会与写入竞争，
+ * 在 Windows 上表现为 ENOTEMPTY；先等定时器过去，再让 fs.rm 自己重试。
+ */
+async function cleanupBase(base) {
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  await fs.rm(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
 test('扫描给每个文件分配稳定 id；改名后 id 不变且可用 id 再操作', async () => {
   const { base, root, library } = await makeLibrary();
   try {
@@ -50,7 +59,7 @@ test('扫描给每个文件分配稳定 id；改名后 id 不变且可用 id 再
     const third = await library.scan({ light: true, force: true });
     assert.equal(third.entries.find((entry) => entry.path === 'B/one-renamed.png').id, original.id);
   } finally {
-    await fs.rm(base, { recursive: true, force: true });
+    await cleanupBase(base);
   }
 });
 
@@ -71,7 +80,7 @@ test('id 持久化：重启后（新实例）同一文件仍是同一个 id', as
     const second = await reopened.scan({ light: true, force: true });
     assert.equal(second.entries.find((item) => item.path === 'A/one.png').id, entry.id);
   } finally {
-    await fs.rm(base, { recursive: true, force: true });
+    await cleanupBase(base);
   }
 });
 
@@ -83,9 +92,13 @@ test('删除 / 回收站释放 id；复制得到新 id；resolveRef 找不到失
     const two = scan.entries.find((item) => item.path === 'A/two.png');
     assert.ok(library.resolveRef({ id: one.id }));
 
-    // 复制 → 新文件新 id
+    // 复制 → 新文件新 id，且复制响应本身就要带新 id / 条目
     const copied = await library.copyPaths([{ id: one.id }], 'B');
     assert.equal(copied[0].ok, true);
+    assert.match(copied[0].id, /^f_[a-f0-9]{12}$/);
+    assert.notEqual(copied[0].id, one.id);
+    assert.equal(copied[0].entry.id, copied[0].id);
+    assert.equal(copied[0].entry.path, copied[0].to);
     const afterCopy = await library.scan({ light: true, force: true });
     const clone = afterCopy.entries.find((item) => item.path === copied[0].to);
     assert.ok(clone.id);
@@ -97,7 +110,23 @@ test('删除 / 回收站释放 id；复制得到新 id；resolveRef 找不到失
     const afterDelete = await library.scan({ light: true, force: true });
     assert.ok(!afterDelete.entries.some((item) => item.id === two.id));
   } finally {
-    await fs.rm(base, { recursive: true, force: true });
+    await cleanupBase(base);
+  }
+});
+
+test('彻底删除回收站项目时，历史版本索引不再指向已删文件', async () => {
+  const { base, library } = await makeLibrary();
+  try {
+    await library.snapshotVersion('A/one.png');
+    const trashed = await library.trashPaths(['A/one.png']);
+    assert.equal(trashed[0].ok, true);
+    await library.purgeTrash([trashed[0].id]);
+
+    const indexFile = path.join(base, 'library', '.versions', 'index.json');
+    const index = JSON.parse(await fs.readFile(indexFile, 'utf8').catch(() => '{}'));
+    assert.ok(!Object.hasOwn(index, 'A/one.png'), 'purge 后版本索引不应保留已删路径');
+  } finally {
+    await cleanupBase(base);
   }
 });
 
@@ -137,6 +166,6 @@ test('HTTP 接口可直接按 id 访问文件 / 缩略图 / 元数据', async ()
       await new Promise((resolve) => server.close(resolve));
     }
   } finally {
-    await fs.rm(base, { recursive: true, force: true });
+    await cleanupBase(base);
   }
 });

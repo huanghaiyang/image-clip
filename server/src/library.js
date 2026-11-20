@@ -1196,14 +1196,28 @@ export function createLibrary(options = {}) {
         }
         const { abs: dest, name: finalName } = await uniqueTarget(targetDir, path.basename(abs));
         await fs.cp(abs, dest, { recursive: true });
-        results.push({ from: rel, ok: true, to: toRel(dest), name: finalName });
-        // 复制出来的是新文件：分配新 id，并排队补指纹（目录递归）
-        fileIds.idFor(toRel(dest));
-        void phashTouchTree(toRel(dest));
+        const copiedRel = toRel(dest);
+        const destStat = await fs.stat(dest);
+        // 复制出来的是新文件：分配新 id，并返回完整基础条目，前端不能沿用源 id。
+        // 文件夹没有稳定文件 id，返回 entry=null，由进入目录时的扫描补全子文件。
+        const entry = destStat.isDirectory()
+          ? null
+          : basicEntry({ rel: copiedRel, name: finalName, stat: destStat });
+        results.push({
+          from: rel,
+          ok: true,
+          to: copiedRel,
+          name: finalName,
+          id: entry?.id ?? null,
+          entry,
+        });
+        void phashTouchTree(copiedRel);
       } catch (err) {
         results.push({ from: rel, ok: false, error: err.message });
       }
     }
+    // 新文件 id 已分配；复制接口结束前落盘，避免进程退出丢掉映射
+    if (results.some((row) => row.ok)) await fileIds.persist();
     return results;
   }
 
@@ -1441,20 +1455,26 @@ export function createLibrary(options = {}) {
     invalidateScan();
     if (all) {
       const current = await listTrash().catch(() => ({ items: [] }));
+      const purgedPaths = current.items.map((item) => item.originalPath).filter(Boolean);
       await fs.rm(path.join(root, TRASH_DIR), { recursive: true, force: true }).catch(() => {});
+      // 版本 / 元数据 / 指纹不在 .trash 内，必须按原路径另行清理
+      await forgetDerivedData(purgedPaths);
       return { ok: true, removed: current.items.length, results: current.items.map((item) => ({ id: item.id, ok: true })) };
     }
     if (!Array.isArray(ids) || !ids.length) throw new LibraryError('没有需要清理的项目', 'BAD_INPUT', 400);
     const results = [];
+    const purgedPaths = [];
     for (const id of ids) {
       try {
-        const { itemDir } = await readTrashRecord(id);
+        const { itemDir, record } = await readTrashRecord(id);
         await fs.rm(itemDir, { recursive: true, force: true });
+        if (record?.path) purgedPaths.push(record.path);
         results.push({ id, ok: true });
       } catch (err) {
         results.push({ id, ok: false, error: err.message });
       }
     }
+    await forgetDerivedData(purgedPaths);
     return { ok: results.every((r) => r.ok !== false), removed: results.filter((r) => r.ok).length, results };
   }
 
@@ -1604,6 +1624,60 @@ export function createLibrary(options = {}) {
     }
     meta = next;
     scheduleMetaSave();
+  }
+
+  /** 彻底删除回收站项目后，清掉对应路径的历史版本 / 元数据 / 指纹，避免同名新文件继承旧记录。 */
+  async function forgetDerivedData(paths = []) {
+    const roots = (paths ?? []).map((value) => String(value ?? '').replace(/\\/g, '/')).filter(Boolean);
+    if (!roots.length) return;
+    const inside = (key) => roots.some((root) => key === root || key.startsWith(`${root}/`));
+
+    for (const root of roots) phashForgetTree(root);
+
+    try {
+      await loadVersions();
+      const next = {};
+      let changed = false;
+      const droppedFiles = [];
+      for (const key of Object.keys(versionsIndex)) {
+        if (inside(key)) {
+          changed = true;
+          for (const version of versionsIndex[key] ?? []) {
+            if (version?.file) droppedFiles.push(version.file);
+          }
+          continue;
+        }
+        next[key] = versionsIndex[key];
+      }
+      if (changed) {
+        versionsIndex = next;
+        await saveVersions();
+        await Promise.all(droppedFiles.map((file) => fs.rm(path.join(versionsRoot, file), { force: true }).catch(() => {})));
+      }
+    } catch (err) {
+      console.warn('[library] 清理历史版本索引失败:', err.message);
+    }
+
+    try {
+      await loadMeta();
+      let changed = false;
+      for (const key of Object.keys(meta)) {
+        if (inside(key)) {
+          delete meta[key];
+          changed = true;
+        }
+      }
+      if (changed) {
+        if (metaTimer) {
+          clearTimeout(metaTimer);
+          metaTimer = null;
+        }
+        metaDirty = false;
+        await fs.writeFile(path.join(root, META_FILE), JSON.stringify(meta), 'utf8');
+      }
+    } catch (err) {
+      console.warn('[library] 清理元数据缓存失败:', err.message);
+    }
   }
 
   // ------------------------------------------------------------- 内容校验

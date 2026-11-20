@@ -35,7 +35,13 @@ import { useConfirm } from './useConfirm.js';
 import { pushToast } from './useToasts.js';
 import { finishLocalTask, startLocalTask, updateLocalTask } from './useJobs.js';
 import { setMode } from './useAppMode.js';
-import { movesFromResults, notifyLibraryPathsMoved, remapLibraryPath, remapMetaInfo } from '../lib/pathMoves.js';
+import {
+  entryMetaPatch,
+  movesFromResults,
+  notifyLibraryPathsMoved,
+  remapDuplicateGroups,
+  remapLibraryPath,
+} from '../lib/pathMoves.js';
 import { mapLimit } from '../lib/async.js';
 
 const EMPTY_STATS = { files: 0, folders: 0, images: 0, videos: 0, audios: 0, bytes: 0, truncated: false };
@@ -134,7 +140,10 @@ const entries = computed(() => {
     ? list
     : list.map((entry) => {
         const info = metaByPath.value.get(entry.path);
-        return info ? { ...entry, ...info } : entry;
+        if (!info) return entry;
+        // 只叠加尺寸 / 时长等描述字段；旧实现直接 {...entry, ...info}，
+        // 会把缓存快照里的 path / name / id / bytes 覆盖回旧值。
+        return { ...entry, ...entryMetaPatch(info) };
       });
   return withStatusOverrides(withMeta);
 });
@@ -378,9 +387,13 @@ export function applyLibraryAdditions(added = []) {
 
   const nextMeta = new Map(metaByPath.value);
   for (const entry of list) {
-    if (entry.width || entry.height || entry.duration || entry.bytes) nextMeta.set(entry.path, entry);
+    const patch = entryMetaPatch(entry);
+    if (Object.keys(patch).length) nextMeta.set(entry.path, patch);
   }
   metaByPath.value = nextMeta;
+
+  // 新增文件可能改变同目录查重结果；旧分组里的路径已不再完整，先撤掉标记等高亮重扫。
+  if (state.duplicates.groups.length) state.duplicates.groups = [];
 
   preserveSelected();
   return list.length;
@@ -420,6 +433,11 @@ export function applyLibraryRemoval(paths = []) {
 
   state.selected = state.selected.filter((path) => !inside(path));
   if (state.previewPath && inside(state.previewPath)) state.previewPath = null;
+  if (state.duplicates.groups.length) {
+    state.duplicates.groups = state.duplicates.groups
+      .map((group) => ({ ...group, paths: (group.paths ?? []).filter((path) => !inside(path)) }))
+      .filter((group) => group.paths.length > 1);
+  }
   for (const root of roots) {
     if (state.currentDir && (state.currentDir === root || state.currentDir.startsWith(`${root}/`))) {
       state.currentDir = root.includes('/') ? root.slice(0, root.lastIndexOf('/')) : '';
@@ -535,9 +553,15 @@ export function applyLibraryMoves(moves = []) {
   const nextMeta = new Map();
   for (const [path, info] of metaByPath.value) {
     const nextPath = remap(path);
-    nextMeta.set(nextPath, remapMetaInfo(info, nextPath));
+    nextMeta.set(nextPath, entryMetaPatch(info));
   }
   metaByPath.value = nextMeta;
+
+  if (state.duplicates.groups.length) {
+    const scanDir = remap(state.duplicates.dir);
+    state.duplicates.groups = remapDuplicateGroups(state.duplicates.groups, list, scanDir);
+    state.duplicates.dir = scanDir;
+  }
 }
 
 // --------------------------------------------------------------- 动作
@@ -642,23 +666,35 @@ function pumpMetaQueue() {
   while (metaRunning < META_CONCURRENCY && metaQueue.length) {
     const ref = metaQueue.shift();
     const path = ref?.path ?? String(ref);
+    const key = ref?.id ?? path;
     metaRunning += 1;
     fetchLibraryEntryMeta(ref)
       .then((info) => {
         if (!info) return;
         const next = new Map(metaByPath.value);
-        next.set(path, info);
+        next.set(path, entryMetaPatch(info));
         metaByPath.value = next;
       })
       .catch(() => {
-        // 单个文件解析失败不影响列表，允许下次重试
-        metaRequested.delete(path);
+        // 单个文件解析失败不影响列表，允许下次重试；key 可能是 id，不能只删 path
+        metaRequested.delete(key);
       })
       .finally(() => {
         metaRunning -= 1;
         pumpMetaQueue();
       });
   }
+}
+
+/** 内容被覆盖 / 版本恢复后清掉旧元数据，让卡片重新请求尺寸与大小。 */
+function forgetEntryMeta(path, id) {
+  if (path && metaByPath.value.has(path)) {
+    const next = new Map(metaByPath.value);
+    next.delete(path);
+    metaByPath.value = next;
+  }
+  if (id) metaRequested.delete(id);
+  if (path) metaRequested.delete(path);
 }
 
 // --------------------------------------------------------------- 刷新
@@ -851,6 +887,11 @@ export async function uploadFiles(fileList, options = {}) {
 
     // 增量并入：不整页刷新，避免列表闪烁和打断正在进行的操作
     applyLibraryAdditions(uploaded);
+    // 上传到刚创建的新子目录时，增量层拿不到新文件夹；静默重拉一次索引/目录树
+    const knownDirs = new Set(folders.value.map((folder) => folder.path));
+    if (uploaded.some((entry) => entry?.dir && !knownDirs.has(entry.dir))) {
+      await refreshLibrary({ quiet: true });
+    }
     const skipped = state.upload.skipped.length;
     const failed = state.upload.failed.length;
     if (failed) {
@@ -1140,19 +1181,21 @@ export async function copySelected(targetDir) {
   state.busy = true;
   try {
     const result = await copyLibraryItems([...state.selected].map(refOfPath), targetDir ?? '');
-    // 复制返回的结果里有新路径：用源条目做模板增量并入，避免整页刷新闪烁
+    // 复制返回的结果里有新路径和新 id：优先用服务端条目，绝不能再沿用源文件的 id
     const template = new Map(entries.value.map((entry) => [entry.path, entry]));
     const added = [];
     for (const row of result.results ?? []) {
-      if (!row.ok || !row.from || !row.to) continue;
+      if (!row.ok || !row.from || !row.to || !row.entry) continue;
       const source = template.get(row.from);
-      if (!source) continue;
       const dir = row.to.includes('/') ? row.to.slice(0, row.to.lastIndexOf('/')) : '';
-      added.push({ ...source, path: row.to, dir, name: row.to.slice(row.to.lastIndexOf('/') + 1) });
+      const name = row.name ?? row.to.slice(row.to.lastIndexOf('/') + 1);
+      added.push({ ...(source ?? {}), ...row.entry, path: row.to, dir, name });
     }
     applyLibraryAdditions(added);
     state.selected = [];
-    await refreshCurrentDirQuietly();
+    // 复制文件夹会新增一棵目录树，增量层没有文件夹条目；静默重拉索引，侧栏与统计立即更新
+    if ((result.results ?? []).some((row) => row.ok && !row.entry)) await refreshLibrary({ quiet: true });
+    else await refreshCurrentDirQuietly();
     const failed = failedCount(result);
     if (failed) setError(`复制部分失败：${failed} 项`);
     else setStatus(`已复制 ${result.succeeded} 项到 ${targetDir || '根目录'}`);
@@ -1477,6 +1520,8 @@ export async function uploadNewVersion(entry, file) {
         state.upload.percent = percent;
       },
     });
+    // 覆盖上传后旧尺寸 / 旧大小已经无效；清掉元数据缓存并允许重新探测
+    forgetEntryMeta(entry.path, entry.id);
     await refreshLibrary({ quiet: true });
     setStatus(`已保存新版本：${entry.path}（旧版本已存入历史）`);
     return result?.entry ?? null;
@@ -1497,6 +1542,8 @@ export async function restoreVersionHistory(entry, versionId) {
   state.busy = true;
   try {
     const result = await restoreLibraryVersion(entry.path, versionId);
+    // 恢复历史版本 = 原地覆盖内容，同样清掉旧尺寸 / 旧大小缓存
+    forgetEntryMeta(entry.path, entry.id);
     await refreshLibrary({ quiet: true });
     setStatus(`已恢复历史版本：${entry.name}`);
     return result?.entry ?? null;

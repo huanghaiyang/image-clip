@@ -46,10 +46,50 @@ export function movesFromResults(results) {
 }
 
 /**
- * 元数据缓存项自带 path 字段；改名 / 移动后只迁移 key 会让它继续指向旧路径。
- * 合并到条目上时 path 会被覆盖回旧值，详情面板与选中项就会对不上。
+ * 元数据缓存只允许保存这些「描述内容」的字段。
+ * path / name / dir / id / bytes / mtime 属于条目结构，必须由目录缓存或索引提供；
+ * 以旧快照覆盖它们会让改名后的卡片名、复制后的 id、覆盖上传后的体积全部回退。
  */
-export function remapMetaInfo(info, nextPath) {
-  if (!info || typeof info !== 'object' || !info.path || info.path === nextPath) return info;
-  return { ...info, path: nextPath };
+export const ENTRY_META_FIELDS = [
+  'width',
+  'height',
+  'duration',
+  'fps',
+  'pages',
+  'hasAudio',
+  'codec',
+  'audioCodec',
+  'format',
+];
+
+/** 从接口返回或完整条目里只挑出真正的元数据字段。 */
+export function entryMetaPatch(info) {
+  if (!info || typeof info !== 'object') return {};
+  const patch = {};
+  for (const key of ENTRY_META_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(info, key)) patch[key] = info[key];
+  }
+  return patch;
+}
+
+/** POSIX 路径的父目录（资源库路径统一用 /）。 */
+export function dirnamePosix(rel) {
+  const clean = String(rel ?? '');
+  return clean.includes('/') ? clean.slice(0, clean.lastIndexOf('/')) : '';
+}
+
+/**
+ * 改名 / 移动后同步查重高亮：路径整体映射，并丢掉已经离开扫描目录的成员。
+ * 不足 2 个成员的组不再构成重复，直接移除。
+ */
+export function remapDuplicateGroups(groups, moves, scanDir = '') {
+  if (!Array.isArray(groups) || !groups.length) return [];
+  return groups
+    .map((group) => ({
+      ...group,
+      paths: (group.paths ?? [])
+        .map((path) => remapLibraryPath(path, moves))
+        .filter((path) => dirnamePosix(path) === scanDir),
+    }))
+    .filter((group) => group.paths.length > 1);
 }
