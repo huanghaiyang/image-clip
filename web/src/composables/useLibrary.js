@@ -545,11 +545,11 @@ const dirRequests = new Map();
  * 加载单个目录的直接子项（有缓存则直接复用）。
  * 只有进入目录 / 展开目录时才触发，不再为了首屏读取整个资源库。
  */
-export async function loadDir(dir = '', { force = false } = {}) {
+export async function loadDir(dir = '', { force = false, quiet = false } = {}) {
   const key = dir ?? '';
   if (!force && dirCache.value.has(key)) return dirCache.value.get(key);
   if (dirRequests.has(key)) return dirRequests.get(key);
-  state.dirLoading = true;
+  if (!quiet) state.dirLoading = true;
   const request = fetchLibraryDirectory(key, { force })
     .then((data) => {
       const next = new Map(dirCache.value);
@@ -559,10 +559,25 @@ export async function loadDir(dir = '', { force = false } = {}) {
     })
     .finally(() => {
       dirRequests.delete(key);
-      if (!dirRequests.size) state.dirLoading = false;
+      if (!quiet && !dirRequests.size) state.dirLoading = false;
     });
   dirRequests.set(key, request);
   return request;
+}
+
+/**
+ * 移动 / 复制后静默重拉当前目录：文件夹卡片的预览图、目录统计由服务端按真实磁盘状态生成，
+ * 本地增量只够立刻改列表，预览图（尤其是整夹移动）仍可能对不上，重新拉一次就不用刷新应用。
+ */
+async function refreshCurrentDirQuietly() {
+  if (state.search.trim()) return; // 搜索结果不展示文件夹卡片
+  const pending = dirRequests.get(state.currentDir);
+  if (pending) await pending.catch(() => {}); // 先让在途请求落地，避免复用到移动前的旧结果
+  try {
+    await loadDir(state.currentDir, { force: true, quiet: true });
+  } catch {
+    // 当前目录被移走/删除时，用增量结果先展示；提供错误提示由外层负责
+  }
 }
 
 let indexRequest = null;
@@ -1090,11 +1105,18 @@ export async function moveSelected(targetDir) {
   try {
     const result = await moveLibraryItems([...state.selected].map(refOfPath), targetDir ?? '');
     // 若移动的是当前目录（或它的上级），把目录与预览路径一起迁到新位置
-    applyLibraryMoves(applyPathMoves(result.results));
+    const moves = applyPathMoves(result.results);
+    applyLibraryMoves(moves);
     state.selected = [];
+    // 全部条目本来就在目标目录（服务端返回 skipped）时什么也没变，不用重拉列表
+    if (moves.length) await refreshCurrentDirQuietly();
     const failed = failedCount(result);
-    if (failed) setError(`移动部分失败：${failed} 项`);
-    else setStatus(`已移动 ${result.succeeded} 项到 ${targetDir || '根目录'}`);
+    const movedCount = (result.results ?? []).filter((row) => row.ok && !row.skipped).length;
+    if (failed) {
+      const first = (result.results ?? []).find((row) => !row.ok);
+      setError(`移动部分失败：${failed} 项${first?.from ? `（${first.from}：${first.error ?? '未知错误'}）` : ''}`);
+    } else if (!moves.length) setStatus(`所选 ${result.succeeded} 项已在目标目录`);
+    else setStatus(`已移动 ${movedCount} 项到 ${targetDir || '根目录'}`);
     return result.ok;
   } catch (err) {
     setError(`移动失败：${err.message}`);
@@ -1127,6 +1149,7 @@ export async function copySelected(targetDir) {
     }
     applyLibraryAdditions(added);
     state.selected = [];
+    await refreshCurrentDirQuietly();
     const failed = failedCount(result);
     if (failed) setError(`复制部分失败：${failed} 项`);
     else setStatus(`已复制 ${result.succeeded} 项到 ${targetDir || '根目录'}`);

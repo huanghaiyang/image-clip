@@ -28,6 +28,38 @@ async function makeLibrary() {
   return { base, root, library };
 }
 
+test('移动到项目自己所在的目录：空操作，不改名也不产生副本', async () => {
+  const { base, root, library } = await makeLibrary();
+  try {
+    const results = await library.movePaths(['A/same.png'], 'A');
+    assert.equal(results.length, 1);
+    assert.equal(results[0].ok, true);
+    assert.equal(results[0].skipped, true);
+    assert.equal(results[0].to, 'A/same.png');
+    assert.equal(await fs.readFile(path.join(root, 'A', 'same.png'), 'utf8'), 'from-A');
+    await assert.rejects(fs.readFile(path.join(root, 'A', 'same (2).png')));
+  } finally {
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('批量移动时，已在目标目录的项目保持原名，其余项目正常移动', async () => {
+  const { base, root, library } = await makeLibrary();
+  try {
+    await fs.writeFile(path.join(root, 'A', 'x.png'), 'x');
+    const results = await library.movePaths(['A/same.png', 'A/x.png'], 'A');
+    assert.ok(results.every((row) => row.ok));
+    assert.ok(results.every((row) => row.skipped));
+    assert.deepEqual(
+      (await fs.readdir(path.join(root, 'A'))).sort(),
+      ['same.png', 'x.png'],
+      '同目录移动不能改名或生成 (2) 副本',
+    );
+  } finally {
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
 test('移动到已有同名文件的目录：自动加序号，不覆盖任何一方', async () => {
   const { base, root, library } = await makeLibrary();
   try {

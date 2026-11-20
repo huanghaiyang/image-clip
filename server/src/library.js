@@ -1119,6 +1119,9 @@ export function createLibrary(options = {}) {
   /** 移动文件/文件夹到目标目录；跨盘时自动退回“复制 + 删除”。 */
   async function movePaths(refs, targetDirRel) {
     const paths = (refs ?? []).map((ref) => resolveRef(ref)).filter((value) => value != null);
+    // 批量移动时卡片缩略图 / 视频封面可能正在读文件（Windows 上会锁住目标），
+    // 先等后台读取任务结束，再结束播放响应，避免整批里个别项 rename 报 EPERM。
+    await waitForFileWork(paths.map((rel) => path.resolve(root, rel)));
     releaseOpenFiles(paths);
     invalidateScan();
     if (!Array.isArray(paths) || !paths.length) throw new LibraryError('没有需要移动的项目', 'BAD_INPUT', 400);
@@ -1134,13 +1137,20 @@ export function createLibrary(options = {}) {
           results.push({ from: rel, ok: true, to: targetRel || '', skipped: true });
           continue;
         }
+        // 已经在目标目录里的项目：移动应当是空操作。
+        // 之前会走 uniqueTarget → 把同目录文件改名成「name (2).ext」，
+        // 批量移动（尤其默认目标是当前目录 / 根目录）会把整批文件改名，看起来像移动出错。
+        if (path.resolve(path.dirname(abs)) === path.resolve(targetDir)) {
+          results.push({ from: rel, ok: true, to: rel, skipped: true });
+          continue;
+        }
         if (path.resolve(targetDir).startsWith(path.resolve(abs) + path.sep)) {
           throw new Error('不能把文件夹移动到它自己的子目录');
         }
         const name = path.basename(abs);
         const { abs: dest, name: finalName } = await uniqueTarget(targetDir, name);
         try {
-          await fs.rename(abs, dest);
+          await renameWithRetry(abs, dest);
         } catch (err) {
           if (err.code !== 'EXDEV') throw err;
           await fs.cp(abs, dest, { recursive: true });
