@@ -35,7 +35,7 @@ import { useConfirm } from './useConfirm.js';
 import { pushToast } from './useToasts.js';
 import { finishLocalTask, startLocalTask, updateLocalTask } from './useJobs.js';
 import { setMode } from './useAppMode.js';
-import { movesFromResults, notifyLibraryPathsMoved, remapLibraryPath } from '../lib/pathMoves.js';
+import { movesFromResults, notifyLibraryPathsMoved, remapLibraryPath, remapMetaInfo } from '../lib/pathMoves.js';
 import { mapLimit } from '../lib/async.js';
 
 const EMPTY_STATS = { files: 0, folders: 0, images: 0, videos: 0, audios: 0, bytes: 0, truncated: false };
@@ -533,7 +533,10 @@ export function applyLibraryMoves(moves = []) {
   dirCache.value = nextCache;
 
   const nextMeta = new Map();
-  for (const [path, info] of metaByPath.value) nextMeta.set(remap(path), info);
+  for (const [path, info] of metaByPath.value) {
+    const nextPath = remap(path);
+    nextMeta.set(nextPath, remapMetaInfo(info, nextPath));
+  }
   metaByPath.value = nextMeta;
 }
 

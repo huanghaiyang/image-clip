@@ -44,3 +44,12 @@ export function movesFromResults(results) {
     .filter((item) => item?.ok && item.from && item.to && item.from !== item.to)
     .map((item) => ({ from: item.from, to: item.to }));
 }
+
+/**
+ * 元数据缓存项自带 path 字段；改名 / 移动后只迁移 key 会让它继续指向旧路径。
+ * 合并到条目上时 path 会被覆盖回旧值，详情面板与选中项就会对不上。
+ */
+export function remapMetaInfo(info, nextPath) {
+  if (!info || typeof info !== 'object' || !info.path || info.path === nextPath) return info;
+  return { ...info, path: nextPath };
+}
