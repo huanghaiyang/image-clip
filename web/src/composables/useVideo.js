@@ -222,25 +222,40 @@ export function getPlayer() {
   return player.value;
 }
 
+/** 正在进行的健康检查；并发调用共用同一个请求，避免首次进入视频区时重复探测。 */
+let healthRequest = null;
+
 export async function checkVideoHealth({ force = false } = {}) {
-  if (state.health.checked && !force) return state.health;
+  if (!force && state.health.checked) return state.health;
+  if (!force && healthRequest) return healthRequest;
+  const request = (async () => {
+    try {
+      const payload = await fetchVideoHealth();
+      state.health = {
+        checked: true,
+        ok: Boolean(payload?.ffmpeg?.available),
+        ffmpeg: payload?.ffmpeg ?? null,
+        error: payload?.ffmpeg?.available ? '' : payload?.ffmpeg?.hint || 'FFmpeg 不可用',
+      };
+    } catch (err) {
+      // 网络/服务端瞬时失败（例如开发时服务端正在重启）不能永久钉死为「已检查且不可用」：
+      // 之前这里把 checked 置为 true，第一次打开视频就再也抽不出时间轴缩略图，
+      // 只有刷新应用才会重新检查。现在保留错误文案，但不缓存失败结果，下次调用会重试。
+      state.health = {
+        checked: false,
+        ok: false,
+        ffmpeg: null,
+        error: `无法连接服务端：${err.message}`,
+      };
+    }
+    return state.health;
+  })();
+  healthRequest = request;
   try {
-    const payload = await fetchVideoHealth();
-    state.health = {
-      checked: true,
-      ok: Boolean(payload?.ffmpeg?.available),
-      ffmpeg: payload?.ffmpeg ?? null,
-      error: payload?.ffmpeg?.available ? '' : payload?.ffmpeg?.hint || 'FFmpeg 不可用',
-    };
-  } catch (err) {
-    state.health = {
-      checked: true,
-      ok: false,
-      ffmpeg: null,
-      error: `无法连接服务端：${err.message}`,
-    };
+    return await request;
+  } finally {
+    if (healthRequest === request) healthRequest = null;
   }
-  return state.health;
 }
 
 export async function selectVideo(pathOrEntry) {
@@ -298,26 +313,49 @@ export async function selectVideo(pathOrEntry) {
   }
 }
 
+/** 短暂等待，用于抽帧失败后的自动重试。 */
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** 请求服务端均匀抽帧，拼成时间轴缩略图带。 */
 export async function loadFilmstrip({ count = 16, width = 160 } = {}) {
   if (!state.activePath) return [];
+  const requestedPath = state.activePath;
   // 首次打开视频时，健康检查可能还没返回（ffmpegReady 仍是 false）。
   // 以前这里直接 return，导致「第一次进视频工作区时间轴没有关键帧缩略图」——
   // 现在先等健康检查，再决定能不能出图；失败也走下面统一的 catch。
-  if (!ffmpegReady.value) await checkVideoHealth();
-  if (!state.activePath || !ffmpegReady.value) return [];
-  const requestedPath = state.activePath;
   state.filmstripLoading = true;
   try {
-    const payload = await fetchFilmstrip(requestedPath, { count, width });
-    // 请求期间用户可能已经切到别的视频，避免把旧结果覆盖到新视频上
-    if (state.activePath !== requestedPath) return state.filmstrip;
-    state.filmstrip = payload?.frames ?? [];
-    return state.filmstrip;
-  } catch (err) {
-    state.filmstrip = [];
-    // 时间轴缩略图失败不阻断播放，只在状态栏给出提示
-    console.warn('[video] 时间轴缩略图生成失败:', err.message);
+    // 抽帧失败（服务端瞬时忙碌 / 健康检查失败）时自动重试一次：
+    // 以前只失败一次就把 filmstrip 留空，用户只能刷新应用才能重新生成。
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (!ffmpegReady.value) await checkVideoHealth({ force: attempt > 0 });
+      if (state.activePath !== requestedPath) return state.filmstrip;
+      if (!ffmpegReady.value) {
+        if (attempt === 0) {
+          await delay(300);
+          continue;
+        }
+        return [];
+      }
+      try {
+        const payload = await fetchFilmstrip(requestedPath, { count, width });
+        // 请求期间用户可能已经切到别的视频，避免把旧结果覆盖到新视频上
+        if (state.activePath !== requestedPath) return state.filmstrip;
+        state.filmstrip = payload?.frames ?? [];
+        return state.filmstrip;
+      } catch (err) {
+        if (attempt === 0 && state.activePath === requestedPath) {
+          await delay(500);
+          continue;
+        }
+        if (state.activePath === requestedPath) state.filmstrip = [];
+        // 时间轴缩略图失败不阻断播放，只在状态栏给出提示
+        console.warn('[video] 时间轴缩略图生成失败:', err.message);
+        return [];
+      }
+    }
     return [];
   } finally {
     state.filmstripLoading = false;

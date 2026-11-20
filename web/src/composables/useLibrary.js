@@ -470,16 +470,64 @@ export function applyLibraryMoves(moves = []) {
     if (!bucket) return;
     if (!bucket.folders.some((item) => item.path === folder.path)) bucket.folders.push(folder);
   };
+  /** 移动进来的图片 / 视频：用于给目标文件夹卡片补预览图。 */
+  const movedPreviews = [];
   for (const [, bucket] of dirCache.value) {
     for (const entry of bucket.entries ?? []) {
       const path = remap(entry.path);
       const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-      pushEntry(dir, path === entry.path ? entry : { ...entry, path, dir, name: path.slice(path.lastIndexOf('/') + 1) });
+      const next =
+        path === entry.path ? entry : { ...entry, path, dir, name: path.slice(path.lastIndexOf('/') + 1) };
+      pushEntry(dir, next);
+      if (path !== entry.path && (entry.kind === 'image' || entry.kind === 'video')) movedPreviews.push(next);
     }
     for (const folder of bucket.folders ?? []) {
       const path = remap(folder.path);
       const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
       pushFolder(parent, path === folder.path ? folder : { ...folder, path, parent, name: path.slice(path.lastIndexOf('/') + 1) });
+    }
+  }
+
+  // 文件夹卡片的 4 张预览图是服务端按目录内容生成的快照。移动 / 改名后如果不动它，
+  // 源文件夹仍显示已经移走的图片、目标文件夹又没有新图，只能刷新应用才能正确显示。
+  // 这里按已知的移动结果就地修正：移走的不再属于原文件夹，移入的补到目标文件夹。
+  const previewDepth = (folderPath, filePath) => {
+    if (!filePath) return -1;
+    if (folderPath) {
+      if (!filePath.startsWith(`${folderPath}/`)) return -1;
+      return filePath.slice(folderPath.length + 1).split('/').length - 1;
+    }
+    return filePath.split('/').length - 1;
+  };
+  for (const bucket of nextCache.values()) {
+    for (let i = 0; i < bucket.folders.length; i += 1) {
+      const folder = bucket.folders[i];
+      const previews = [];
+      const seen = new Set();
+      const add = (preview) => {
+        const path = preview?.path;
+        if (!path || seen.has(path)) return;
+        const depth = previewDepth(folder.path, path);
+        if (depth < 0 || depth > 2) return; // 与服务端的 2 层预览范围保持一致
+        seen.add(path);
+        previews.push(preview);
+      };
+      for (const preview of folder.previews ?? []) {
+        const path = remap(preview.path);
+        add(path === preview.path ? preview : { ...preview, path, name: path.slice(path.lastIndexOf('/') + 1) });
+      }
+      for (const entry of movedPreviews) {
+        add({
+          id: entry.id,
+          path: entry.path,
+          name: entry.name,
+          kind: entry.kind,
+          bytes: entry.bytes,
+          mtime: entry.mtime,
+          thumbUrl: entry.thumbUrl,
+        });
+      }
+      bucket.folders[i] = { ...folder, previews: previews.slice(0, 4) };
     }
   }
   dirCache.value = nextCache;
