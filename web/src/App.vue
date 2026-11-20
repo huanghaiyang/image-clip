@@ -33,6 +33,7 @@ import AudioPanel from './components/AudioPanel.vue';
 import PixelPaintStage from './components/PixelPaintStage.vue';
 import SpriteStage from './components/SpriteStage.vue';
 import GrayscaleStage from './components/GrayscaleStage.vue';
+import StudioStage from './components/StudioStage.vue';
 import StatusBar from './components/StatusBar.vue';
 import ChatDrawer from './components/ChatDrawer.vue';
 import UploadDialog from './components/UploadDialog.vue';
@@ -85,7 +86,7 @@ const mode = computed(() => appMode.mode);
 const isSolidBackdrop = computed(() => mode.value === 'image' && imageViewState.backdrop === 'solid');
 
 /** 这些图片工具的舞台没有内置拖放，交给窗口级处理。 */
-const WINDOW_DROP_TOOLS = new Set(['cropimage', 'bgremove', 'eraser', 'pixel', 'sprite', 'tint']);
+const WINDOW_DROP_TOOLS = new Set(['cropimage', 'bgremove', 'eraser', 'pixel', 'sprite', 'tint', 'studio']);
 
 /** 资源库 / 视频 / 音频直接入库；图片处理入库后自动载入素材列表。 */
 async function importFiles(files, { toLibrary = false } = {}) {
@@ -255,6 +256,12 @@ function onKeydown(event) {
     return;
   }
 
+  if (tool === 'studio') {
+    // 合成：0 适合窗口（撤销/重做走全局 Ctrl+Z）
+    if (event.key === '0') resetActiveViewport();
+    return;
+  }
+
   if (tool === 'crop') {
     if (event.key === '0') actions.setView('zoom', 'fit');
     if (event.key.toLowerCase() === 'r' && !meta) {
@@ -386,6 +393,7 @@ watch(
         <PixelPaintStage v-else-if="activeTool === 'pixel'" />
         <SpriteStage v-else-if="activeTool === 'sprite'" />
         <GrayscaleStage v-else-if="activeTool === 'tint'" />
+        <StudioStage v-else-if="activeTool === 'studio'" />
         <WatermarkStage v-else-if="activeTool === 'watermark'" />
         <StageCanvas v-else />
         <ImageToolPanel />

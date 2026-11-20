@@ -32,6 +32,7 @@ export const IMAGE_TOOLS = [
   { value: 'pixel', label: '像素笔绘', hint: '像素级画笔 / 橡皮 / 吸管，绘制后生成新素材或导出 PNG' },
   { value: 'sprite', label: '精灵图', hint: '导入 sprite 图，按透明分隔或网格切帧，预览并播放动画' },
   { value: 'tint', label: '灰度着色', hint: '转成灰度后映射为任意颜色，可调强度并批量导出' },
+  { value: 'studio', label: '合成', hint: '图层 / 蒙版 / 魔棒选区 / 曲线调色 / 关键帧动画 / 图集导出' },
 ];
 
 const VALID = new Set(MODES.map((mode) => mode.value));

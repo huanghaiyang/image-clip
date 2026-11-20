@@ -20,6 +20,7 @@ import { useEraser } from './useEraser.js';
 import { usePixelPaint } from './usePixelPaint.js';
 import { useWatermark } from './useWatermark.js';
 import { useVideo } from './useVideo.js';
+import { useStudio } from './useStudio.js';
 
 const { state: appMode } = useAppMode();
 const workspace = useWorkspace();
@@ -29,6 +30,7 @@ const eraser = useEraser();
 const pixel = usePixelPaint();
 const watermark = useWatermark();
 const video = useVideo();
+const studio = useStudio();
 
 const workspaceStack = {
   key: 'workspace',
@@ -78,6 +80,14 @@ const watermarkStack = {
   redo: () => watermark.actions.redoMask(),
 };
 
+const studioStack = {
+  key: 'studio',
+  canUndo: studio.computed.canUndo,
+  canRedo: studio.computed.canRedo,
+  undo: () => studio.actions.undo(),
+  redo: () => studio.actions.redo(),
+};
+
 const videoStack = {
   key: 'video',
   canUndo: video.canUndoMarks,
@@ -94,6 +104,7 @@ const STACKS_BY_TOOL = {
   eraser: [eraserStack, workspaceStack],
   pixel: [pixelStack, workspaceStack],
   watermark: [watermarkStack, workspaceStack],
+  studio: [studioStack, workspaceStack],
 };
 
 /** 其他工作区的撤销优先级：越靠前越贴近当前操作。 */

@@ -55,6 +55,7 @@ import { createAccessLogger, logHttpError, sanitizeClientEvent } from './httpLog
 import { guestMiddleware } from './guest.js';
 import { createLimiters } from './limiter.js';
 import { createVideoRouter } from './video.js';
+import { createEffectsRouter } from './effects.js';
 import { cutoutModelPath, cutoutStatus } from './cutout.js';
 import { findCutoutModel } from '../../shared/cutout.js';
 
@@ -521,6 +522,8 @@ export function createApp() {
   app.use('/api/library', createLibraryRouter(library));
   app.use('/api/assets/external', createExternalAssetsRouter(externalAssets));
   app.use('/api/video', createVideoRouter(library, { jobs }));
+  // 视频特效 / 变速（filtergraph 参数化接口，见 server/src/effects.js）
+  app.use('/api/effects', createEffectsRouter(library, { jobs }));
 
   // 大模型接入（提供方注册、对话、工具调用）。放在静态资源之前挂载。
   app.use('/api/llm', createLlmRouter());
