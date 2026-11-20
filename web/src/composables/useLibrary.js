@@ -42,27 +42,27 @@ const EMPTY_STATS = { files: 0, folders: 0, images: 0, videos: 0, audios: 0, byt
 
 const BROWSE_MODE_KEY = 'image-clip:library-browse-mode';
 // 迁移标记带版本号：每次调整默认值时换一个，保证老用户也会落到新默认（只清一次）
-const BROWSE_MODE_MIGRATED_KEY = 'image-clip:library-browse-mode-migrated-v2';
+const BROWSE_MODE_MIGRATED_KEY = 'image-clip:library-browse-mode-migrated-v3';
 
 /**
  * 资源库主列表的展示方式。
  *
- * 默认树形（目录层级一眼看清，大图库更像资源管理器）；用户手动切成平铺后记住选择。
- * 旧版本的默认值是平铺，而且会话恢复会把当时的 'flat' 写进 localStorage，所以做一次
- * 一次性迁移：没有迁移标记时清掉遗留的 'flat'，直接落到新的默认树形。之后用户再手动
- * 切成平铺就会被正常记住。
+ * 默认平铺（缩略图网格，文件名与预览一眼看清）；用户手动切成树形后记住选择。
+ * 上一版的默认值是树形，而且会话恢复会把当时的 'tree' 写进 localStorage，所以做一次
+ * 一次性迁移：没有迁移标记时清掉遗留的 'tree'，直接落到新的默认平铺。之后用户再手动
+ * 切成树形就会被正常记住。
  */
 function initialBrowseMode() {
   try {
     const stored = localStorage.getItem(BROWSE_MODE_KEY);
     if (!localStorage.getItem(BROWSE_MODE_MIGRATED_KEY)) {
       localStorage.setItem(BROWSE_MODE_MIGRATED_KEY, '1');
-      if (stored === 'flat') localStorage.removeItem(BROWSE_MODE_KEY);
-      return 'tree';
+      if (stored === 'tree') localStorage.removeItem(BROWSE_MODE_KEY);
+      return 'flat';
     }
-    return stored === 'flat' ? 'flat' : 'tree';
+    return stored === 'tree' ? 'tree' : 'flat';
   } catch {
-    return 'tree';
+    return 'flat';
   }
 }
 
