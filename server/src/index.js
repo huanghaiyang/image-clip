@@ -48,6 +48,7 @@ import { createLlmRouter } from './llm/routes.js';
 import { DETECT_METHODS, DEFAULT_DETECT_OPTIONS } from '../../shared/watermark/detect.js';
 import { ffmpegStatus } from './ffmpeg.js';
 import { createLibrary, createLibraryRouter } from './library.js';
+import { createExternalAssets, createExternalAssetsRouter } from './externalAssets.js';
 import { createJobManager } from './jobs.js';
 import { createLogger } from './logger.js';
 import { createAccessLogger, logHttpError, sanitizeClientEvent } from './httpLog.js';
@@ -73,6 +74,10 @@ export function createApp() {
   // 资源库与视频工作区共用同一个 library 实例：视频接口也通过它做路径校验与落盘。
   const library = createLibrary();
   library.init().catch((err) => console.warn('[image-clip] 资源库初始化失败:', err.message));
+
+  // 资源库 / 回收站之外的关联资源索引（AI 产物、导出文件）
+  const externalAssets = createExternalAssets();
+  externalAssets.init().catch((err) => console.warn('[image-clip] 关联资源索引初始化失败:', err.message));
 
   // 日志：应用日志按天 + 按大小拆分；任务日志单独留存（保留天数见环境变量）
   const logger = createLogger({
@@ -101,7 +106,7 @@ export function createApp() {
   jobs.init().catch((err) => console.warn('[image-clip] 任务历史读取失败:', err.message));
 
   // 供优雅关闭 / 调试使用
-  app.locals.services = { library, jobs, logger, limiters };
+  app.locals.services = { library, externalAssets, jobs, logger, limiters };
   app.locals.ready = Promise.all([loggerReady, jobs.init()]).catch(() => {});
 
   // 所有写接口都用“原始二进制”接收，JSON 负载由 extractInput 内部分支处理。
@@ -148,6 +153,7 @@ export function createApp() {
   const imageGate = limiters.image.middleware();
   const videoGate = limiters.video.middleware();
   app.use('/api/library/thumb', limiters.thumbnail.middleware());
+  app.use('/api/assets/external/thumb', limiters.thumbnail.middleware());
   app.use('/api/library/similar', imageGate);
   app.use('/api/video/frames', videoGate);
 
@@ -174,6 +180,7 @@ export function createApp() {
       ffmpeg,
       cutout: cutoutStatus(),
       library: { root: library.root, thumbnails: library.thumbnailRoot },
+      externalAssets: await externalAssets.status().catch(() => null),
       outputFormats: OUTPUT_FORMATS,
       limits: LIMITS,
       defaults: DEFAULT_OPTIONS,
@@ -512,6 +519,7 @@ export function createApp() {
 
   // 资源库 & 视频工作区（放在图片接口之后、静态资源之前；路径互不冲突）。
   app.use('/api/library', createLibraryRouter(library));
+  app.use('/api/assets/external', createExternalAssetsRouter(externalAssets));
   app.use('/api/video', createVideoRouter(library, { jobs }));
 
   // 大模型接入（提供方注册、对话、工具调用）。放在静态资源之前挂载。

@@ -85,6 +85,40 @@ export function fetchLibraryDuplicates(dir = '') {
 }
 
 /**
+ * 关联资源索引（资源库 / 回收站之外）：AI 产物与导出文件。
+ * 每条记录包含 thumbUrl，列表可直接用缩略图展示。
+ */
+export function fetchExternalAssets({ q = '', kind = 'all', source = 'all', limit = 200, offset = 0 } = {}) {
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (kind && kind !== 'all') params.set('kind', kind);
+  if (source && source !== 'all') params.set('source', source);
+  if (limit) params.set('limit', String(limit));
+  if (offset) params.set('offset', String(offset));
+  const query = params.toString();
+  return requestJson(`/api/assets/external${query ? `?${query}` : ''}`, { cache: 'no-cache' });
+}
+
+/** 关联资源索引状态（生成时间、来源数量）。 */
+export function fetchExternalAssetStatus() {
+  return requestJson('/api/assets/external/index', { cache: 'no-store' });
+}
+
+/** 重建关联资源索引（新增产物后手动刷新）。 */
+export function rebuildExternalAssetIndex() {
+  return requestJson('/api/assets/external/reindex', { method: 'POST', cache: 'no-store' });
+}
+
+/** 关联资源缩略图 URL；宽高仍由服务端按 w 参数生成。 */
+export function externalAssetThumbUrl(entry, width = 320) {
+  if (!entry?.thumbUrl) return '';
+  const url = new URL(entry.thumbUrl, window.location.origin);
+  url.searchParams.set('w', String(Math.max(64, Math.min(480, Math.round(Number(width) || 320)))));
+  return `${url.pathname}${url.search}`;
+}
+
+
+/**
  * 上传一个 File/Blob 到资源库。
  * @param {File|Blob} file
  * @param {{

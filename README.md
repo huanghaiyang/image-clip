@@ -65,6 +65,7 @@ image-clip/
 │  ├─ src/imaging.js          sharp 解码 → RGBA → 调 shared/aabb → 裁剪编码
 │  ├─ src/ffmpeg.js           FFmpeg 定位 / 探测 / 单帧 / 音频 / 时间轴缩略图
 │  ├─ src/library.js          资源库：扫描、上传、子目录、批量改名、缩略图、文件服务
+│  ├─ src/externalAssets.js   关联资源：AI 产物 / 导出文件的索引、缩略图与检索
 │  ├─ src/video.js            视频路由：probe / filmstrip / frames / audio
 │  ├─ src/index.js            Express API + 生产环境静态托管
 │  └─ test/api.test.js        真实起 HTTP 服务的集成测试（14 项）
@@ -630,6 +631,8 @@ data/library/                    ← IMAGE_CLIP_LIBRARY_DIR 可覆盖
 ├─ 导出/                         ← 图片工具「保存到资源库」的默认落点
 └─ …用户自建子目录
 data/library-thumbs/             ← 缩略图缓存（按 路径+mtime 命名）
+data/asset-thumbs/               ← 关联资源缩略图缓存（AI 产物 / 导出文件）
+data/cache/external-assets-index.json ← 关联资源索引
 data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime+数量+宽度 哈希）
 ```
 
@@ -667,6 +670,29 @@ data/cache/filmstrip/            ← 时间轴缩略图缓存（按 路径+mtime
   批量选中多张时可以直接进入裁剪工作区做批量裁剪。
 * **文件服务**：`GET /api/library/file` 走 `res.sendFile`，因此支持 Range 请求，
   `<video>` 可以拖动进度条、只加载需要的片段。
+
+**关联资源索引（资源库 / 回收站之外）**
+
+资源库工具栏的「关联资源」打开独立检索面板，覆盖两类不进入 `data/library` 的素材：
+
+* `data/artifacts`：AI 对话 / 工具产生的图片、掩膜，带 `label`、`sessionId` 与原始尺寸；
+* `data/exports`：`save_artifact` 等导出的文件。
+
+服务端 `server/src/externalAssets.js` 会为每条记录生成稳定 id、原文件 URL、缩略图 URL，
+索引持久化到 `data/cache/external-assets-index.json`；`data/artifacts` / `data/exports`
+目录 mtime 变化时自动重建，新增产物不用重启服务。接口：
+
+```
+GET  /api/assets/external?q=&kind=&source=&limit=&offset=   检索（名称/路径/标签/会话 ID）
+GET  /api/assets/external/index                            索引状态与来源统计
+POST /api/assets/external/reindex                          强制重建
+GET  /api/assets/external/thumb?id=&w=                     缩略图（图片/视频，webp）
+GET  /api/assets/external/file?id=                          原文件（支持 Range）
+```
+
+回收站 `.trash` 与历史版本 `.versions` 不会被扫描，保证「非素材库、非回收站」的边界。
+缩略图沿用资源库的缓存策略：按「绝对路径 + mtime + size + 宽度」生成，图片与视频都支持；
+前端没有缩略图时回退到类型图标。
 
 **输入控件样式**
 

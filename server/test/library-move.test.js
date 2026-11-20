@@ -12,6 +12,21 @@ import path from 'node:path';
 
 import { createLibrary } from '../src/library.js';
 
+async function rmWithRetry(target) {
+  // 资源库的 fileIds / meta / pHash 都有防抖写盘定时器，Windows 上可能在
+  // 测试 finally 执行时仍持有临时文件句柄，导致 ENOTEMPTY。
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      await fs.rm(target, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (!['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY'].includes(err.code) || attempt === 9) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));
+    }
+  }
+}
+
 async function makeLibrary() {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'library-move-'));
   const root = path.join(base, 'library');
@@ -39,7 +54,7 @@ test('移动到项目自己所在的目录：空操作，不改名也不产生�
     assert.equal(await fs.readFile(path.join(root, 'A', 'same.png'), 'utf8'), 'from-A');
     await assert.rejects(fs.readFile(path.join(root, 'A', 'same (2).png')));
   } finally {
-    await fs.rm(base, { recursive: true, force: true });
+    await rmWithRetry(base);
   }
 });
 
@@ -56,7 +71,7 @@ test('批量移动时，已在目标目录的项目保持原名，其余项目�
       '同目录移动不能改名或生成 (2) 副本',
     );
   } finally {
-    await fs.rm(base, { recursive: true, force: true });
+    await rmWithRetry(base);
   }
 });
 
@@ -71,7 +86,7 @@ test('移动到已有同名文件的目录：自动加序号，不覆盖任何�
     assert.equal(await fs.readFile(path.join(root, 'B', 'same (2).png'), 'utf8'), 'from-A');
     await assert.rejects(fs.readFile(path.join(root, 'A', 'same.png')));
   } finally {
-    await fs.rm(base, { recursive: true, force: true });
+    await rmWithRetry(base);
   }
 });
 
@@ -86,7 +101,7 @@ test('复制到已有同名文件的目录：自动加序号，原文件保留',
     assert.equal(await fs.readFile(path.join(root, 'B', 'same (2).png'), 'utf8'), 'from-A');
     assert.equal(await fs.readFile(path.join(root, 'A', 'same.png'), 'utf8'), 'from-A');
   } finally {
-    await fs.rm(base, { recursive: true, force: true });
+    await rmWithRetry(base);
   }
 });
 
@@ -106,6 +121,6 @@ test('同名文件批量改名：冲突时自动加序号，不互相覆盖', as
     const contents = await Promise.all([...names].map((name) => fs.readFile(path.join(root, 'A', name), 'utf8')));
     assert.deepEqual(contents.sort(), ['x', 'y']);
   } finally {
-    await fs.rm(base, { recursive: true, force: true });
+    await rmWithRetry(base);
   }
 });

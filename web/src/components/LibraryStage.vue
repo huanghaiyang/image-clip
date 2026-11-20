@@ -22,6 +22,7 @@ import { fetchPhashStatus, formatDuration, formatSize, libraryFileUrl, libraryTh
 import { buildResourceTree, flattenResourceTree } from '../lib/resourceTree.js';
 import LibrarySlideshow from './LibrarySlideshow.vue';
 import TrashDialog from './TrashDialog.vue';
+import ExternalAssetsDialog from './ExternalAssetsDialog.vue';
 import ViewToggle from './ui/ViewToggle.vue';
 import SimilarSearchDialog from './SimilarSearchDialog.vue';
 import SpritePlayer from './SpritePlayer.vue';
@@ -81,6 +82,15 @@ watch(
   { immediate: true },
 );
 const trashOpen = ref(false);
+const externalOpen = ref(false);
+const externalQuery = ref('');
+
+/** 打开关联资源时，用当前选中的文件名做初始检索词（不是精确关联，只是少输入几个字）。 */
+function openExternalAssets() {
+  const first = state.selected.length === 1 ? actions.entryByPath(state.selected[0]) : null;
+  externalQuery.value = first?.name ? first.name.replace(/\.[^.]+$/, '') : '';
+  externalOpen.value = true;
+}
 
 /** 正在编辑的资源：图片工作区当前素材的来源 + 视频/音频当前打开的文件。 */
 const editingPaths = computed(() => {
@@ -695,6 +705,14 @@ onBeforeUnmount(() => {
       >
         清除标记
       </button>
+      <button
+        class="btn is-mini is-ghost"
+        type="button"
+        title="检索资源库与回收站之外的 AI 产物和导出文件（已单独建索引与缩略图）"
+        @click="openExternalAssets"
+      >
+        关联资源
+      </button>
       <button class="btn is-mini is-ghost" type="button" title="查看已删除的资源" @click="trashOpen = true">
         回收站
       </button>
@@ -1013,6 +1031,8 @@ onBeforeUnmount(() => {
     />
     <!-- 回收站：删除的资源先放这里，可预览、恢复或彻底删除 -->
     <TrashDialog v-if="trashOpen" :open="trashOpen" @close="trashOpen = false" />
+    <!-- 关联资源：资源库与回收站之外的 AI 产物 / 导出文件，带缩略图检索 -->
+    <ExternalAssetsDialog v-if="externalOpen" :initial-query="externalQuery" @close="externalOpen = false" />
     <!-- 智能识图：以图搜图 / 找相似资源（指纹本地计算） -->
     <SimilarSearchDialog />
   </section>
